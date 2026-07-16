@@ -2,34 +2,42 @@
 """
 Build a searchable subject/session/task/run/volume table from BIDS events.tsv files.
 
-For every row of every events.tsv found under `bids_root`, locate the matching BOLD
-file (to read its TR and frame count), compute which BOLD volumes were active during
-that event (onset shifted by a configurable hemodynamic lag, spanning the event's
-full duration), and emit one output row per volume.
+Reads the "event_extraction" section of the mvpa config. For every row of every
+events.tsv found under `bids_root`, locate the matching BOLD file (to read its TR
+and frame count), compute which BOLD volumes were active during that event (onset
+shifted by a configurable hemodynamic lag, spanning the event's full duration), and
+emit one output row per volume.
 
 Usage:
-    python generate_master_spreadsheet.py --config trial_finder_config.json
+    python generate_master_spreadsheet.py --config mvpa_config.json
 """
 
 import argparse
 import glob
 import json
-import math
 import os
-import re
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import nibabel as nib
 
+from mvpa_common import parse_bids_entities, compute_volume_range
 
-BIDS_ENTITY_RE = re.compile(r"(?:^|_)(?P<key>[a-zA-Z]+)-(?P<val>[^_.]+)")
 REQUIRED_ENTITIES = ("sub", "ses", "task", "run")
 
+# trial_type values considered administrative/non-trial (never relevant to any
+# analysis) and always dropped, regardless of what any config asks for. Edit
+# this list directly to add/remove exclusions -- not exposed as a config option
+# on purpose, since it's a blanket policy rather than a per-dataset choice.
+EXCLUDED_TRIAL_TYPE_EXACT = ("start_block", "end_block")
+EXCLUDED_TRIAL_TYPE_SUBSTRINGS = ("fixation", "postrt")
 
-def parse_bids_entities(filename: str) -> dict:
-    return {m.group("key"): m.group("val") for m in BIDS_ENTITY_RE.finditer(Path(filename).name)}
+
+def is_excluded_trial_type(trial_type) -> bool:
+    tt = str(trial_type).lower()
+    if tt in EXCLUDED_TRIAL_TYPE_EXACT:
+        return True
+    return any(s in tt for s in EXCLUDED_TRIAL_TYPE_SUBSTRINGS)
 
 
 def load_config(path: str) -> dict:
@@ -94,7 +102,12 @@ def process_events_file(events_path: str, bids_root: str, hemodynamic_lag: float
     events = events.sort_values("onset").reset_index(drop=True)
 
     rows = []
-    for _, row in events.iterrows():
+    excluded_count = 0
+    for i, row in events.iterrows():
+        if is_excluded_trial_type(row["trial_type"]):
+            excluded_count += 1
+            continue
+
         duration = row["duration"]
         if pd.isna(row["onset"]) or pd.isna(duration) or not np.isfinite(duration):
             print(f"  (!) skipping row with non-finite duration in {events_path}: trial_type={row.get('trial_type')!r}")
@@ -102,8 +115,7 @@ def process_events_file(events_path: str, bids_root: str, hemodynamic_lag: float
 
         start_time = row["onset"] + hemodynamic_lag
         stop_time = start_time + duration
-        start_vol = int(math.floor(start_time / tr))
-        stop_vol = min(int(math.ceil(stop_time / tr)), n_frames)
+        start_vol, stop_vol = compute_volume_range(start_time, stop_time, tr, n_frames)
 
         for vol in range(start_vol, stop_vol):
             rows.append({
@@ -111,6 +123,9 @@ def process_events_file(events_path: str, bids_root: str, hemodynamic_lag: float
                 "session": entities["ses"],
                 "volume_of_interest": vol,
                 "trial_type": row["trial_type"],
+                "trial_index": i + 1,
+                "onset": row["onset"],
+                "duration": duration,
                 "task": entities["task"],
                 "run": int(entities["run"]),
                 "boldfile": bold_path,
@@ -118,25 +133,32 @@ def process_events_file(events_path: str, bids_root: str, hemodynamic_lag: float
                 **extra_entities,
             })
 
+    if excluded_count:
+        print(f"  (i) excluded {excluded_count} administrative/non-trial row(s) (fixation/block/postRT) from {events_path}")
+
     return pd.DataFrame(rows)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", required=True, help="Path to trial_finder_config.json")
-    parser.add_argument("--output", default=None, help="Override config's output_file")
-    parser.add_argument("--hemodynamic-lag", type=float, default=None, help="Override config's hemodynamic_lag (seconds)")
-    parser.add_argument("--expected-events", default=None, help="Override config's expected_events_file")
+    parser.add_argument("--config", required=True, help="Path to the mvpa config JSON (reads its event_extraction section)")
+    parser.add_argument("--output", default=None, help="Override event_extraction's output_file")
+    parser.add_argument("--hemodynamic-lag", type=float, default=None, help="Override event_extraction's hemodynamic_lag (seconds)")
+    parser.add_argument("--expected-events", default=None, help="Override event_extraction's expected_events_file")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    bids_root = cfg["bids_root"]
-    hemodynamic_lag = args.hemodynamic_lag if args.hemodynamic_lag is not None else cfg.get("hemodynamic_lag", 0)
-    output_file = args.output or cfg.get("output_file", "master_spreadsheet.csv")
-    bold_glob = cfg.get("bold_glob")
-    expected_events_file = args.expected_events or cfg.get("expected_events_file")
+    if "event_extraction" not in cfg:
+        raise SystemExit("config missing required 'event_extraction' section")
+    event_cfg = cfg["event_extraction"]
 
-    events_files = find_events_files(bids_root, cfg.get("events_glob", "**/*_events.tsv"))
+    bids_root = event_cfg["bids_root"]
+    hemodynamic_lag = args.hemodynamic_lag if args.hemodynamic_lag is not None else event_cfg.get("hemodynamic_lag", 0)
+    output_file = args.output or event_cfg.get("output_file", "master_spreadsheet.csv")
+    bold_glob = event_cfg.get("bold_glob")
+    expected_events_file = args.expected_events or event_cfg.get("expected_events_file")
+
+    events_files = find_events_files(bids_root, event_cfg.get("events_glob", "**/*_events.tsv"))
     print(f"Found {len(events_files)} events file(s) under {bids_root}")
 
     all_rows = []

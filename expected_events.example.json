@@ -1,8 +1,5 @@
 [
-  "start_block",
-  "end_block",
   "rest_block",
-  "trial_fixation",
   "view_face",
   "view_place",
   "suppress_face",

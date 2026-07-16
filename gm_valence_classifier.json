@@ -2,38 +2,84 @@
   "config_version": "1.0",
   "created_by": "AKH",
   "notes": "MVPA positive/negative; masking on grey matter",
-  "desc": "gm_valence_classifier",
-  "mask": {
-      "mask_pattern": "{root}/sub-{subject_id}/{session_id}/masks/native_gm_transformed_mask.nii.gz"
+
+  "event_extraction": {
+    "bids_root": "sample-data",
+    "events_glob": "**/*_events.tsv",
+    "hemodynamic_lag": 4.6,
+    "output_file": "master_spreadsheet.csv",
+    "expected_events_file": "expected_events.example.json"
   },
-  "targets": [
-    {
-      "name": "gm_valence_classifier",
-      "regressor_column": "valence",
-      "categories": ["positive", "negative"],
-      "drop_na": true
+
+  "model_conditions": {
+    "training": {
+      "conditions": {
+        "positive": {
+          "and": [
+            {"column": "task", "match": "exact", "value": "loc"},
+            {"column": "trial_type", "match": "regex", "value": ".*positive.*"}
+          ]
+        },
+        "negative": {
+          "and": [
+            {"column": "task", "match": "exact", "value": "loc"},
+            {"column": "trial_type", "match": "regex", "value": ".*negative.*"}
+          ]
+        }
+      }
+    },
+
+    "testing": {
+      "conditions": {
+        "positive": {"column": "task", "match": "exact", "value": "WMpos"},
+        "negative": {"column": "task", "match": "exact", "value": "WMneg"}
+      }
+    },
+
+    "timecourse_decoding": {
+      "conditions": {
+        "positive": {
+          "and": [
+            {"column": "task", "match": "exact", "value": "WMpos"},
+            {"not": {"column": "trial_type", "match": "regex", "value": "view_.*"}}
+          ]
+        },
+        "negative": {
+          "and": [
+            {"column": "task", "match": "exact", "value": "WMneg"},
+            {"not": {"column": "trial_type", "match": "regex", "value": "view_.*"}}
+          ]
+        }
+      },
+      "window": {
+        "start": {"reference": "onset", "offset_seconds": 0},
+        "end": {"reference": "offset_end", "offset_seconds": 10}
+      }
     }
-  ],
-  "featureSelection": {
+  },
+
+  "model": {
+    "desc": "gm_valence_classifier",
+    "mask": {
+      "mask_pattern": "sub-{subject}/ses-{session}/masks/native_gm_transformed_mask.nii.gz"
+    },
+    "featureSelection": {
       "model": "ANOVA",
       "feat_p": 0.05
-  },
-  "classifier": {
-    "name": "sklearn.linear_model.LogisticRegression",
-    "params": {
-      "penalty": "l2",
-      "C": 0.5,
-      "solver": "lbfgs",
-      "max_iter": 10000,
-      "multi_class": "ovr",
-      "class_weight": "balanced"
+    },
+    "classifier": {
+      "name": "sklearn.linear_model.LogisticRegression",
+      "params": {
+        "penalty": "l2",
+        "C": 0.5,
+        "solver": "lbfgs",
+        "max_iter": 10000,
+        "class_weight": "balanced"
+      }
+    },
+    "cv": {
+      "strategy": "GroupKFold",
+      "n_splits": "infer"
     }
-  },
-  "cv": {
-    "strategy": "GroupKFold",
-    "n_splits": "infer"
-  },
-  "decoding": {
-    "grouping_categories": [ "window", "clusterID", "operation", "valence"]
   }
 }
