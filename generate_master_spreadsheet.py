@@ -101,18 +101,26 @@ def process_events_file(events_path: str, bids_root: str, hemodynamic_lag: float
     events["duration"] = pd.to_numeric(events["duration"], errors="coerce")
     events = events.sort_values("onset").reset_index(drop=True)
 
+    # Drop excluded/invalid rows *before* assigning trial_index, so trial_index is a
+    # contiguous 1..N over exactly the events that end up in the output table --
+    # matching the final conditions of interest, not raw position in the source file.
+    excluded_mask = events["trial_type"].apply(is_excluded_trial_type)
+    invalid_mask = events["onset"].isna() | events["duration"].isna() | ~np.isfinite(events["duration"])
+
+    excluded_count = int(excluded_mask.sum())
+    if excluded_count:
+        print(f"  (i) excluded {excluded_count} administrative/non-trial row(s) (fixation/block/postRT) from {events_path}")
+
+    invalid_count = int((invalid_mask & ~excluded_mask).sum())
+    if invalid_count:
+        bad_types = events.loc[invalid_mask & ~excluded_mask, "trial_type"].tolist()
+        print(f"  (!) skipping {invalid_count} row(s) with non-finite duration in {events_path}: trial_type(s)={bad_types}")
+
+    events = events[~excluded_mask & ~invalid_mask].reset_index(drop=True)
+
     rows = []
-    excluded_count = 0
     for i, row in events.iterrows():
-        if is_excluded_trial_type(row["trial_type"]):
-            excluded_count += 1
-            continue
-
         duration = row["duration"]
-        if pd.isna(row["onset"]) or pd.isna(duration) or not np.isfinite(duration):
-            print(f"  (!) skipping row with non-finite duration in {events_path}: trial_type={row.get('trial_type')!r}")
-            continue
-
         start_time = row["onset"] + hemodynamic_lag
         stop_time = start_time + duration
         start_vol, stop_vol = compute_volume_range(start_time, stop_time, tr, n_frames)
@@ -132,9 +140,6 @@ def process_events_file(events_path: str, bids_root: str, hemodynamic_lag: float
                 "eventfile": events_path,
                 **extra_entities,
             })
-
-    if excluded_count:
-        print(f"  (i) excluded {excluded_count} administrative/non-trial row(s) (fixation/block/postRT) from {events_path}")
 
     return pd.DataFrame(rows)
 

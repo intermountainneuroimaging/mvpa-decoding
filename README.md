@@ -145,7 +145,7 @@ an event's active window:
 | `subject`, `session`, `task`, `run` | *Inferred* from the events filename. |
 | `volume_of_interest` | *Computed*: the BOLD frame index, from `onset + hemodynamic_lag` through `onset + hemodynamic_lag + duration`, using the BOLD file's own TR, clipped to its frame count. |
 | `trial_type` | Verbatim from the events file -- never reinterpreted, split, or renamed. |
-| `trial_index` | *Computed*: 1-based sequential index of the source events.tsv row (in onset order) within its run -- identifies "which event produced this volume," used by `mvpa_workflow.py` for trial-balancing and for recomputing `timecourse_decoding`'s window. |
+| `trial_index` | *Computed*: 1-based sequential index (in onset order) among this run's *retained* events -- i.e. after the hardcoded exclusions below, so it's always contiguous. Identifies "which event produced this volume," used by `mvpa_workflow.py` for trial-balancing and for recomputing `timecourse_decoding`'s window. |
 | `onset`, `duration` | Verbatim from the events file, repeated across every volume belonging to that event. |
 | `boldfile`, `eventfile` | Resolved source file paths, for traceability/sorting. |
 | *(varies)* | Any other BIDS entity found in the filename, e.g. `dir` -- *inferred*, present only if that entity appears in your filenames. |
@@ -172,9 +172,11 @@ change the list:
 | substring (case-insensitive): `postrt` | post-response-time administrative events |
 
 `rest_block` is **not** excluded -- it's a real experimental condition in some
-designs, not a structural marker. `trial_index` is assigned before exclusion
-(from the row's position in the full onset-sorted events file), so dropping
-these rows doesn't shift the `trial_index` of the real trials around them.
+designs, not a structural marker. Exclusions (and invalid-duration rows) are
+dropped *before* `trial_index` is assigned, so `trial_index` is always a
+contiguous `1..N` over exactly the events that end up in the output table --
+not the row's raw position in the source events.tsv, which would otherwise
+leave gaps wherever an excluded row used to sit.
 
 ## 4. `model_conditions`
 
