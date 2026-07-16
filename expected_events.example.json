@@ -1,0 +1,20 @@
+[
+  "start_block",
+  "end_block",
+  "rest_block",
+  "trial_fixation",
+  "view_face",
+  "view_place",
+  "suppress_face",
+  "suppress_place",
+  "maintain_face",
+  "maintain_place",
+  "breath_face",
+  "breath_place",
+  "track_face",
+  "track_place",
+  "positive_face_image",
+  "negative_face_image",
+  "positive_place_image",
+  "negative_place_image"
+]

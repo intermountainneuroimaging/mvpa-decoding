@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""
+Build a searchable subject/session/task/run/volume table from BIDS events.tsv files.
+
+For every row of every events.tsv found under `bids_root`, locate the matching BOLD
+file (to read its TR and frame count), compute which BOLD volumes were active during
+that event (onset shifted by a configurable hemodynamic lag, spanning the event's
+full duration), and emit one output row per volume.
+
+Usage:
+    python generate_master_spreadsheet.py --config trial_finder_config.json
+"""
+
+import argparse
+import glob
+import json
+import math
+import os
+import re
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import nibabel as nib
+
+
+BIDS_ENTITY_RE = re.compile(r"(?:^|_)(?P<key>[a-zA-Z]+)-(?P<val>[^_.]+)")
+REQUIRED_ENTITIES = ("sub", "ses", "task", "run")
+
+
+def parse_bids_entities(filename: str) -> dict:
+    return {m.group("key"): m.group("val") for m in BIDS_ENTITY_RE.finditer(Path(filename).name)}
+
+
+def load_config(path: str) -> dict:
+    with open(path) as f:
+        return json.load(f)
+
+
+def find_events_files(bids_root: str, events_glob: str):
+    return sorted(glob.glob(os.path.join(bids_root, events_glob), recursive=True))
+
+
+def find_bold_file(bids_root: str, entities: dict, bold_glob: str = None):
+    if bold_glob:
+        pattern = bold_glob.format(
+            subject=entities["sub"], session=entities["ses"],
+            task=entities["task"], run=entities["run"],
+        )
+        matches = sorted(glob.glob(os.path.join(bids_root, pattern), recursive=True))
+    else:
+        tokens = [f"sub-{entities['sub']}", f"ses-{entities['ses']}",
+                  f"task-{entities['task']}", f"run-{entities['run']}"]
+        matches = [
+            f for f in glob.glob(os.path.join(bids_root, "**", "*.nii.gz"), recursive=True)
+            if "bold" in os.path.basename(f) and all(t in os.path.basename(f) for t in tokens)
+        ]
+        matches = sorted(matches)
+    return matches
+
+
+def load_expected_events(path: str) -> set:
+    with open(path) as f:
+        loaded = json.load(f)
+    if isinstance(loaded, dict):
+        loaded = loaded.get("expected_trial_types", loaded.get("trial_types", []))
+    return set(loaded)
+
+
+def process_events_file(events_path: str, bids_root: str, hemodynamic_lag: float, bold_glob: str = None):
+    entities = parse_bids_entities(events_path)
+    missing = [e for e in REQUIRED_ENTITIES if e not in entities]
+    if missing:
+        print(f"  (!) skipping {events_path}: missing BIDS entities {missing} in filename")
+        return None
+    extra_entities = {k: v for k, v in entities.items() if k not in REQUIRED_ENTITIES}
+
+    bold_matches = find_bold_file(bids_root, entities, bold_glob)
+    if len(bold_matches) == 0:
+        print(f"  (!) skipping {events_path}: no matching BOLD file found")
+        return None
+    if len(bold_matches) > 1:
+        print(f"  (!) skipping {events_path}: {len(bold_matches)} ambiguous BOLD matches: {bold_matches}")
+        return None
+    bold_path = bold_matches[0]
+
+    header = nib.load(bold_path).header
+    tr = float(header.get_zooms()[3])
+    n_frames = int(header.get_data_shape()[-1])
+
+    events = pd.read_csv(events_path, sep="\t")
+    events["onset"] = pd.to_numeric(events["onset"], errors="coerce")
+    events["duration"] = pd.to_numeric(events["duration"], errors="coerce")
+    events = events.sort_values("onset").reset_index(drop=True)
+
+    rows = []
+    for _, row in events.iterrows():
+        duration = row["duration"]
+        if pd.isna(row["onset"]) or pd.isna(duration) or not np.isfinite(duration):
+            print(f"  (!) skipping row with non-finite duration in {events_path}: trial_type={row.get('trial_type')!r}")
+            continue
+
+        start_time = row["onset"] + hemodynamic_lag
+        stop_time = start_time + duration
+        start_vol = int(math.floor(start_time / tr))
+        stop_vol = min(int(math.ceil(stop_time / tr)), n_frames)
+
+        for vol in range(start_vol, stop_vol):
+            rows.append({
+                "subject": entities["sub"],
+                "session": entities["ses"],
+                "volume_of_interest": vol,
+                "trial_type": row["trial_type"],
+                "task": entities["task"],
+                "run": int(entities["run"]),
+                "boldfile": bold_path,
+                "eventfile": events_path,
+                **extra_entities,
+            })
+
+    return pd.DataFrame(rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--config", required=True, help="Path to trial_finder_config.json")
+    parser.add_argument("--output", default=None, help="Override config's output_file")
+    parser.add_argument("--hemodynamic-lag", type=float, default=None, help="Override config's hemodynamic_lag (seconds)")
+    parser.add_argument("--expected-events", default=None, help="Override config's expected_events_file")
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    bids_root = cfg["bids_root"]
+    hemodynamic_lag = args.hemodynamic_lag if args.hemodynamic_lag is not None else cfg.get("hemodynamic_lag", 0)
+    output_file = args.output or cfg.get("output_file", "master_spreadsheet.csv")
+    bold_glob = cfg.get("bold_glob")
+    expected_events_file = args.expected_events or cfg.get("expected_events_file")
+
+    events_files = find_events_files(bids_root, cfg.get("events_glob", "**/*_events.tsv"))
+    print(f"Found {len(events_files)} events file(s) under {bids_root}")
+
+    all_rows = []
+    for events_path in events_files:
+        df = process_events_file(events_path, bids_root, hemodynamic_lag, bold_glob)
+        if df is not None and not df.empty:
+            all_rows.append(df)
+
+    if not all_rows:
+        raise SystemExit("No events rows produced -- check bids_root/events_glob/bold_glob in the config.")
+
+    table = pd.concat(all_rows, ignore_index=True)
+    table = table.sort_values(["subject", "task", "run", "volume_of_interest"])
+
+    if expected_events_file:
+        expected = load_expected_events(expected_events_file)
+        observed = set(table["trial_type"].dropna().unique())
+        missing = sorted(expected - observed)
+        unexpected = sorted(observed - expected)
+        if missing:
+            print(f"(!) expected trial_type(s) never observed in this dataset: {missing}")
+        if unexpected:
+            print(f"(!) observed trial_type(s) not in {expected_events_file} (possible typo?): {unexpected}")
+
+    table.to_csv(output_file, index=False)
+    print(f"Wrote {len(table)} rows to {output_file}")
+
+
+if __name__ == "__main__":
+    main()

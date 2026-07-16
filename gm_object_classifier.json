@@ -1,0 +1,39 @@
+{
+  "config_version": "1.0",
+  "created_by": "AKH",
+  "notes": "MVPA face/place; masking on grey matter",
+  "desc": "gm_object_classifier",
+  "mask": {
+      "mask_pattern": "{root}/sub-{subject_id}/{session_id}/masks/native_gm_transformed_mask.nii.gz"
+  },
+  "targets": [
+    {
+      "name": "gm_object_classifier",
+      "regressor_column": "clusterID",
+      "categories": ["face", "place"],
+      "drop_na": true
+    }
+  ],
+  "featureSelection": {
+      "model": "ANOVA",
+      "feat_p": 0.05
+  },
+  "classifier": {
+    "name": "sklearn.linear_model.LogisticRegression",
+    "params": {
+      "penalty": "l2",
+      "C": 0.5,
+      "solver": "lbfgs",
+      "max_iter": 10000,
+      "multi_class": "ovr",
+      "class_weight": "balanced"
+    }
+  },
+  "cv": {
+    "strategy": "GroupKFold",
+    "n_splits": "infer"
+  },
+  "decoding": {
+    "grouping_categories": [ "window", "clusterID", "operation", "valence"]
+  }
+}
