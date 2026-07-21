@@ -445,3 +445,22 @@ with its `volume_of_interest` values spread across `vol_of_interest_1..N`
 columns (`N` = the widest trial; shorter trials are NaN-padded). Useful for
 eyeballing whether the volume counts per trial look right -- not used by the
 modeling steps themselves.
+
+## Tutorial: a real external dataset (Haxby et al. 2001 / OpenNeuro ds000105)
+
+See **[tutorial/README.md](tutorial/README.md)** for a full walkthrough
+against real public data (downloaded fresh, not checked into this repo) --
+every command, the actual output and results, including a minimal
+preprocessing pass (`tutorial/preprocess_haxby.py`: rigid motion correction,
+rigid coregistration to a common run, linear detrending) written into a
+`derivatives/` folder and picked up via `derivatives_root`/`bold_glob` -- and
+a detailed accounting of where the tutorial still oversimplifies (rigid-only
+alignment with deliberately cheap settings, no slice-timing correction, no
+normalization to a standard template, a crude intensity-based mask rather
+than an anatomical one). It's also the only example here with **8**
+classification conditions (not 2) and no `ses-` entity in its filenames at
+all, which is what surfaced a real bug: `generate_master_spreadsheet.py`
+used to *require* `ses` and would have silently rejected every file in a
+session-less dataset like this one -- fixed, since BIDS session labels are
+optional for single-session studies. `tutorial/config-haxby.example.json` is
+the exact config used.

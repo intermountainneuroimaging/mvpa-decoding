@@ -28,7 +28,11 @@ import nibabel as nib
 
 from mvpa_common import parse_bids_entities, compute_volume_range
 
-REQUIRED_ENTITIES = ("sub", "ses", "task", "run")
+# "ses" has a dedicated output column (session) whenever present, but -- per the
+# BIDS spec -- is optional in filenames for single-session datasets, so it's not
+# required for a file to be processed.
+REQUIRED_ENTITIES = ("sub", "task", "run")
+HANDLED_ENTITIES = ("sub", "ses", "task", "run")
 
 # trial_type values considered administrative/non-trial (never relevant to any
 # analysis) and always dropped, regardless of what any config asks for. Edit
@@ -57,13 +61,14 @@ def find_events_files(bids_root: str, events_glob: str):
 def find_bold_file(derivatives_root: str, entities: dict, bold_glob: str = None):
     if bold_glob:
         pattern = bold_glob.format(
-            subject=entities["sub"], session=entities["ses"],
+            subject=entities["sub"], session=entities.get("ses", ""),
             task=entities["task"], run=entities["run"],
         )
         matches = sorted(glob.glob(os.path.join(derivatives_root, pattern), recursive=True))
     else:
-        tokens = [f"sub-{entities['sub']}", f"ses-{entities['ses']}",
-                  f"task-{entities['task']}", f"run-{entities['run']}"]
+        tokens = [f"sub-{entities['sub']}", f"task-{entities['task']}", f"run-{entities['run']}"]
+        if "ses" in entities:
+            tokens.append(f"ses-{entities['ses']}")
         matches = [
             f for f in glob.glob(os.path.join(derivatives_root, "**", "*.nii.gz"), recursive=True)
             if "bold" in os.path.basename(f) and all(t in os.path.basename(f) for t in tokens)
@@ -86,7 +91,7 @@ def process_events_file(events_path: str, derivatives_root: str, hemodynamic_lag
     if missing:
         print(f"  (!) skipping {events_path}: missing BIDS entities {missing} in filename")
         return None
-    extra_entities = {k: v for k, v in entities.items() if k not in REQUIRED_ENTITIES}
+    extra_entities = {k: v for k, v in entities.items() if k not in HANDLED_ENTITIES}
 
     bold_matches = find_bold_file(derivatives_root, entities, bold_glob)
     if len(bold_matches) == 0:
@@ -133,7 +138,7 @@ def process_events_file(events_path: str, derivatives_root: str, hemodynamic_lag
         for vol in range(start_vol, stop_vol):
             rows.append({
                 "subject": entities["sub"],
-                "session": entities["ses"],
+                "session": entities.get("ses", ""),
                 "volume_of_interest": vol,
                 "trial_type": row["trial_type"],
                 "trial_index": i + 1,

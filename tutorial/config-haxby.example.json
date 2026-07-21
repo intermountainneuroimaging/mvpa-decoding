@@ -1,0 +1,542 @@
+{
+  "config_version": "1.0",
+  "created_by": "AKH",
+  "notes": "Haxby et al. 2001 (OpenNeuro ds000105) 8-way object category classifier; minimally preprocessed (motion correction + rigid coregistration to run 1 + linear detrending, see tutorial/preprocess_haxby.py) -- not a scientifically rigorous preprocessing pipeline",
+  "event_extraction": {
+    "bids_root": "tutorial/haxby-data",
+    "derivatives_root": "tutorial/haxby-data/derivatives",
+    "bold_glob": "sub-{subject}/func/sub-{subject}_task-{task}_run-{run}_desc-preproc_bold.nii.gz",
+    "events_glob": "**/*_events.tsv",
+    "hemodynamic_lag": 4.0,
+    "output_file": "master_spreadsheet_haxby.csv",
+    "expected_events_file": "tutorial/expected_events_haxby.example.json"
+  },
+  "model_conditions": {
+    "training": {
+      "conditions": {
+        "bottle": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "bottle"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9"
+              ]
+            }
+          ]
+        },
+        "cat": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "cat"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9"
+              ]
+            }
+          ]
+        },
+        "chair": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "chair"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9"
+              ]
+            }
+          ]
+        },
+        "face": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "face"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9"
+              ]
+            }
+          ]
+        },
+        "house": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "house"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9"
+              ]
+            }
+          ]
+        },
+        "scissors": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "scissors"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9"
+              ]
+            }
+          ]
+        },
+        "scrambledpix": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "scrambledpix"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9"
+              ]
+            }
+          ]
+        },
+        "shoe": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "shoe"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8",
+                "9"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "testing": {
+      "conditions": {
+        "bottle": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "bottle"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "cat": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "cat"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "chair": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "chair"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "face": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "face"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "house": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "house"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "scissors": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "scissors"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "scrambledpix": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "scrambledpix"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "shoe": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "shoe"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "timecourse_decoding": {
+      "conditions": {
+        "bottle": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "bottle"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "cat": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "cat"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "chair": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "chair"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "face": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "face"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "house": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "house"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "scissors": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "scissors"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "scrambledpix": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "scrambledpix"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        },
+        "shoe": {
+          "and": [
+            {
+              "column": "trial_type",
+              "match": "exact",
+              "value": "shoe"
+            },
+            {
+              "column": "run",
+              "match": "in",
+              "values": [
+                "10",
+                "11",
+                "12"
+              ]
+            }
+          ]
+        }
+      },
+      "window": {
+        "start": {
+          "reference": "onset",
+          "offset_seconds": 0
+        },
+        "end": {
+          "reference": "offset_end",
+          "offset_seconds": 10
+        }
+      }
+    }
+  },
+  "model": {
+    "desc": "haxby_object_classifier",
+    "mask": {
+      "mask_pattern": "sub-{subject}/masks/native_epi_mask.nii.gz"
+    },
+    "featureSelection": {
+      "model": "ANOVA",
+      "feat_p": 0.05
+    },
+    "classifier": {
+      "name": "sklearn.linear_model.LogisticRegression",
+      "params": {
+        "penalty": "l2",
+        "C": 0.5,
+        "solver": "lbfgs",
+        "max_iter": 10000,
+        "class_weight": "balanced"
+      }
+    },
+    "cv": {
+      "strategy": "GroupKFold",
+      "n_splits": "infer"
+    }
+  }
+}

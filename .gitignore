@@ -1,5 +1,8 @@
 sample-data/
+haxby-data/
+haxby_out/
 master_spreadsheet_with_bold_file.csv
 master_spreadsheet.csv
+master_spreadsheet_haxby.csv
 .DS_Store
 __pycache__/
