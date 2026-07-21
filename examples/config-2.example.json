@@ -4,11 +4,11 @@
   "notes": "MVPA face/place; masking on grey matter",
 
   "event_extraction": {
-    "bids_root": "sample-data",
+    "bids_root": "examples/sample-data",
     "events_glob": "**/*_events.tsv",
     "hemodynamic_lag": 4.6,
     "output_file": "master_spreadsheet.csv",
-    "expected_events_file": "expected_events.example.json"
+    "expected_events_file": "examples/expected_events.example.json"
   },
 
   "model_conditions": {

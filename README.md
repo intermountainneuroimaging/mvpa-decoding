@@ -5,6 +5,10 @@ single searchable `master_spreadsheet.csv`, defining/validating which rows of
 that table count as which MVPA classification condition, and actually
 training/cross-validating a classifier and running timecourse decoding.
 
+See [THEORY.md](THEORY.md) for the scientific background and use case this
+pipeline replicates (Kim et al., 2020, *Nature Communications*) and how each
+config section/output maps back to that paper's analyses.
+
 One JSON config, three top-level sections, three scripts:
 
 | Stage | Script | Reads section |
@@ -15,9 +19,11 @@ One JSON config, three top-level sections, three scripts:
 
 All three scripts take the **same** config file via `--config`. Shared logic
 (BIDS filename parsing, the query DSL, window math) lives in `mvpa_common.py`,
-imported by all three. Everything below is grounded in `gm_object_classifier.json`
-and `gm_valence_classifier.json`, two complete configs that run end-to-end
-against `sample-data/`.
+imported by all three. Everything below is grounded in
+`examples/config-2.example.json`, a complete config that runs end-to-end
+against `examples/sample-data/`. `examples/config-1.example.json` is the same
+shape but written as a fill-in-your-own-paths template, including the
+derivative-data fields (`derivatives_root`, `mask_root`) described below.
 
 ## 1. What input data is assumed
 
@@ -34,11 +40,11 @@ You need a directory tree containing, for every scan run you want in the table:
   be **exactly one** such match per events file -- zero or multiple matches
   cause that events file to be skipped with a warning, not a crash.
 
-Example tree (trimmed from `sample-data/`, real files this repo's examples
-run against):
+Example tree (trimmed from `examples/sample-data/`, real files this repo's
+examples run against):
 
 ```
-sample-data/
+examples/sample-data/
 └── sub-4057/
     └── ses-A1/
         └── func/
@@ -47,6 +53,13 @@ sample-data/
             ├── sub-4057_ses-A1_task-WMpos_dir-pa_run-01_events.tsv
             └── sub-4057_ses-A1_task-WMpos_dir-pa_run-01_bold.nii.gz
 ```
+
+This assumes events and BOLD files are co-located and share a naming
+convention. If your preprocessed data lives elsewhere (a separate fMRIPrep
+`derivatives/` tree, a different naming scheme, etc.), see
+[Using preprocessed/derivative data](#using-preprocessedderivative-data-eg-fmriprep) below --
+`derivatives_root`/`bold_glob` decouple BOLD-file discovery from this assumption
+entirely.
 
 **Inferred from the data, never configured:**
 - `subject`, `session`, `task`, `run` -- parsed out of the events filename.
@@ -60,8 +73,9 @@ sample-data/
 
 ## 2. The config file
 
-One JSON file with three top-level sections. `gm_object_classifier.json` and
-`gm_valence_classifier.json` are two complete, real examples:
+One JSON file with three top-level sections. `examples/config-2.example.json`
+is a complete, runnable example (`examples/config-1.example.json` is the same
+shape as a fill-in-your-own-paths template):
 
 ```json
 {
@@ -81,22 +95,23 @@ Read by `generate_master_spreadsheet.py`.
 
 ```json
 "event_extraction": {
-  "bids_root": "sample-data",
+  "bids_root": "examples/sample-data",
   "events_glob": "**/*_events.tsv",
   "hemodynamic_lag": 4.6,
   "output_file": "master_spreadsheet.csv",
-  "expected_events_file": "expected_events.example.json"
+  "expected_events_file": "examples/expected_events.example.json"
 }
 ```
 
 | Field | Meaning |
 |---|---|
-| `bids_root` | Directory to search under. All other globs are relative to this. |
+| `bids_root` | Directory to search under for events.tsv files. |
 | `events_glob` | Glob (supports `**`) used to find events.tsv files under `bids_root`. |
 | `hemodynamic_lag` | Seconds added to every event's `onset` before converting to volume indices. Override per-run with `--hemodynamic-lag`. |
 | `output_file` | Where the resulting table is written. Override with `--output`. |
 | `expected_events_file` | *(optional)* Path to a template of expected `trial_type` values -- see below. Override with `--expected-events`. |
-| `bold_glob` | *(optional)* Only needed if the default BOLD-file lookup (match on `sub`/`ses`/`task`/`run` tokens + `"bold"` in the filename) is ambiguous for your dataset. A format string with `{subject}`/`{session}`/`{task}`/`{run}` placeholders. |
+| `derivatives_root` | *(optional)* Directory to search under for BOLD files, if different from `bids_root` -- e.g. a separate fMRIPrep `derivatives/` tree. Defaults to `bids_root`. See [Using preprocessed/derivative data](#using-preprocessedderivative-data-eg-fmriprep). |
+| `bold_glob` | *(optional)* Needed whenever BOLD filenames don't follow the default lookup (match on `sub`/`ses`/`task`/`run` tokens + `"bold"` in the filename) -- e.g. fMRIPrep's `desc-`/`space-` suffixes, or when `derivatives_root` returns more than one match per run. A format string with `{subject}`/`{session}`/`{task}`/`{run}` placeholders, resolved relative to `derivatives_root`. |
 
 ### `expected_events.json` (optional, separate file)
 
@@ -106,7 +121,7 @@ building the table, the script diffs this list against what was actually
 observed and prints warnings for both directions -- values you expected but
 never saw, and values you saw but didn't expect (typos, unlisted new
 conditions). This is how a stray-space typo like `"positive _face_image"` in
-`sample-data` got caught during development.
+`examples/sample-data` got caught during development.
 
 ```json
 [
@@ -134,7 +149,7 @@ conditions). This is how a stray-space typo like `"positive _face_image"` in
 ### Running it
 
 ```
-python generate_master_spreadsheet.py --config gm_object_classifier.json
+python generate_master_spreadsheet.py --config examples/config-2.example.json
 ```
 
 Output (`master_spreadsheet.csv`) -- one row per BOLD volume that overlapped
@@ -150,11 +165,11 @@ an event's active window:
 | `boldfile`, `eventfile` | Resolved source file paths, for traceability/sorting. |
 | *(varies)* | Any other BIDS entity found in the filename, e.g. `dir` -- *inferred*, present only if that entity appears in your filenames. |
 
-Example real output rows (from `sample-data`):
+Example real output rows (from `examples/sample-data`):
 
 ```
 subject  session  volume_of_interest  trial_type   trial_index  onset   duration  task   run  boldfile  eventfile  dir
-4057     A1       50                  view_place   2            18.507  2.764     WMneg  3    sample-data/sub-4057/.../..._run-03_bold.nii.gz  sample-data/sub-4057/.../..._run-03_events.tsv  pa
+4057     A1       50                  view_place   2            18.507  2.764     WMneg  3    examples/sample-data/sub-4057/.../..._run-03_bold.nii.gz  examples/sample-data/sub-4057/.../..._run-03_events.tsv  pa
 ```
 
 ### Hardcoded exclusions
@@ -177,6 +192,41 @@ dropped *before* `trial_index` is assigned, so `trial_index` is always a
 contiguous `1..N` over exactly the events that end up in the output table --
 not the row's raw position in the source events.tsv, which would otherwise
 leave gaps wherever an excluded row used to sit.
+
+### Using preprocessed/derivative data (e.g. fMRIPrep)
+
+By default, BOLD files are searched for under `bids_root` -- fine when raw
+events.tsv and preprocessed BOLD data live side by side. That's often not the
+case: fMRIPrep (and most BIDS derivative pipelines) write outputs to a
+separate `derivatives/` tree with its own naming convention (`space-`,
+`desc-preproc`, etc.), sometimes on a different disk or mount entirely.
+
+Two config fields decouple BOLD-file discovery from the events-file layout:
+
+```json
+"event_extraction": {
+  "bids_root": "/data/raw_bids",
+  "derivatives_root": "/data/derivatives/fmriprep",
+  "bold_glob": "sub-{subject}/ses-{session}/func/sub-{subject}_ses-{session}_task-{task}_run-{run}_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz",
+  "events_glob": "**/*_events.tsv"
+}
+```
+
+- `derivatives_root` -- where to search for BOLD files. Defaults to `bids_root` if
+  omitted, so this is fully backward compatible.
+- `bold_glob` -- resolved relative to `derivatives_root` (not `bids_root`) once
+  `derivatives_root` is set. Use it whenever the default lookup (match on
+  `sub`/`ses`/`task`/`run` tokens + `"bold"` in the filename) would either miss
+  the file or return more than one match (e.g. multiple `space-*` variants of
+  the same run) -- both cause that run to be skipped with a warning, not a
+  crash.
+
+`model.mask.mask_root` (see [section 5](#5-model)) works the same way for
+mask files, and defaults to `derivatives_root` -- masks are usually derivative
+products co-located with preprocessed BOLD data, but can be pointed elsewhere
+independently (e.g. a separate hand-drawn ROI directory) if needed.
+`examples/config-1.example.json` is a template showing all of these fields
+filled in.
 
 ## 4. `model_conditions`
 
@@ -268,7 +318,7 @@ past the event's end."
 ### Running it
 
 ```
-python validate_model_config.py --config gm_object_classifier.json \
+python validate_model_config.py --config examples/config-2.example.json \
     --master-spreadsheet master_spreadsheet.csv
 ```
 
@@ -284,10 +334,10 @@ additionally get:
 - **Warning** if the condition *names* differ between sections (training
   should generally define the same classes as testing/decoding).
 
-Example output against `sample-data`:
+Example output against `examples/sample-data`:
 
 ```
-Validating gm_object_classifier.json against master_spreadsheet.csv
+Validating examples/config-2.example.json against master_spreadsheet.csv
   [training] 'face': 524 rows
   [training] 'place': 536 rows
   [testing] 'face': 2020 rows
@@ -320,7 +370,6 @@ about *which rows* to use (that's `model_conditions`'s job):
       "C": 0.5,
       "solver": "lbfgs",
       "max_iter": 10000,
-      "multi_class": "ovr",
       "class_weight": "balanced"
     }
   },
@@ -334,7 +383,8 @@ about *which rows* to use (that's `model_conditions`'s job):
 | Field | Meaning |
 |---|---|
 | `desc` | Short name for this classifier variant; sanitized into the output folder name. |
-| `mask.mask_pattern` | Path to the per-subject mask NIfTI, resolved *relative to `event_extraction.bids_root`* with `{subject}`/`{session}` filled in from whichever row is being loaded (can still contain glob wildcards -- resolved the same way as bold-file lookups). |
+| `mask.mask_root` | *(optional)* Directory to search under for mask files. Defaults to `event_extraction.derivatives_root` (which itself defaults to `bids_root`) -- override independently if masks live somewhere else, e.g. a separate ROI directory. |
+| `mask.mask_pattern` | Path to the per-subject mask NIfTI, resolved relative to `mask_root` with `{subject}`/`{session}` filled in from whichever row is being loaded (can still contain glob wildcards -- resolved the same way as bold-file lookups). |
 | `featureSelection` | ANOVA voxel-selection threshold used before fitting the classifier. |
 | `classifier` | Any importable scikit-learn-style estimator: `name` is a dotted import path, `params` are passed straight through as kwargs. |
 | `cv` | Cross-validation bookkeeping (folds are actually built from the `run` column via `PredefinedSplit`). |
@@ -346,7 +396,7 @@ and `mask` are meaningfully required.
 ## Running `mvpa_workflow.py`
 
 ```
-python mvpa_workflow.py --subject 4057 --config gm_object_classifier.json \
+python mvpa_workflow.py --subject 4057 --config examples/config-2.example.json \
     --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out
 ```
 
@@ -380,8 +430,9 @@ comes from the one config plus `master_spreadsheet.csv`. For a given
    predicts with the trained classifier, and writes per-relative-timepoint
    accuracy/evidence to `<analysis-output-dir>/<desc>/<subject>/decoding/`.
 
-`sample-data` has no `masks/` directory, so running this against it requires
-pointing `model.mask.mask_pattern` at a real (or throwaway, for testing) mask
+`examples/sample-data` has no `masks/` directory, so running this against it
+requires pointing `model.mask.mask_pattern` (and `mask_root`, if the mask
+doesn't live under `derivatives_root`) at a real (or throwaway, for testing) mask
 file first.
 
 ### Trial pivot table (sanity check)

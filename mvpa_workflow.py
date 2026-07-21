@@ -824,7 +824,11 @@ if __name__ == "__main__":
     # load mvpa configuration
     full_cfg = load_config(args.config)
 
-    mask_root = full_cfg["event_extraction"]["bids_root"]
+    event_cfg = full_cfg["event_extraction"]
+    derivatives_root = event_cfg.get("derivatives_root", event_cfg["bids_root"])
+    # masks are typically co-located with preprocessed/derivative BOLD data, but can
+    # be overridden independently (e.g. a separate hand-drawn ROI directory).
+    mask_root = full_cfg["model"].get("mask", {}).get("mask_root", derivatives_root)
     model_conditions = full_cfg["model_conditions"]
 
     training_conditions = model_conditions["training"]["conditions"]

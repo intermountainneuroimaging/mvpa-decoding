@@ -8,6 +8,11 @@ and frame count), compute which BOLD volumes were active during that event (onse
 shifted by a configurable hemodynamic lag, spanning the event's full duration), and
 emit one output row per volume.
 
+BOLD files are searched under `derivatives_root` (defaults to `bids_root` if omitted) --
+set this separately when your preprocessed/derivative data (e.g. fMRIPrep output)
+lives in a different directory tree than the raw events.tsv files, or doesn't
+follow the same naming convention (pair it with `bold_glob`).
+
 Usage:
     python generate_master_spreadsheet.py --config mvpa_config.json
 """
@@ -49,18 +54,18 @@ def find_events_files(bids_root: str, events_glob: str):
     return sorted(glob.glob(os.path.join(bids_root, events_glob), recursive=True))
 
 
-def find_bold_file(bids_root: str, entities: dict, bold_glob: str = None):
+def find_bold_file(derivatives_root: str, entities: dict, bold_glob: str = None):
     if bold_glob:
         pattern = bold_glob.format(
             subject=entities["sub"], session=entities["ses"],
             task=entities["task"], run=entities["run"],
         )
-        matches = sorted(glob.glob(os.path.join(bids_root, pattern), recursive=True))
+        matches = sorted(glob.glob(os.path.join(derivatives_root, pattern), recursive=True))
     else:
         tokens = [f"sub-{entities['sub']}", f"ses-{entities['ses']}",
                   f"task-{entities['task']}", f"run-{entities['run']}"]
         matches = [
-            f for f in glob.glob(os.path.join(bids_root, "**", "*.nii.gz"), recursive=True)
+            f for f in glob.glob(os.path.join(derivatives_root, "**", "*.nii.gz"), recursive=True)
             if "bold" in os.path.basename(f) and all(t in os.path.basename(f) for t in tokens)
         ]
         matches = sorted(matches)
@@ -75,7 +80,7 @@ def load_expected_events(path: str) -> set:
     return set(loaded)
 
 
-def process_events_file(events_path: str, bids_root: str, hemodynamic_lag: float, bold_glob: str = None):
+def process_events_file(events_path: str, derivatives_root: str, hemodynamic_lag: float, bold_glob: str = None):
     entities = parse_bids_entities(events_path)
     missing = [e for e in REQUIRED_ENTITIES if e not in entities]
     if missing:
@@ -83,7 +88,7 @@ def process_events_file(events_path: str, bids_root: str, hemodynamic_lag: float
         return None
     extra_entities = {k: v for k, v in entities.items() if k not in REQUIRED_ENTITIES}
 
-    bold_matches = find_bold_file(bids_root, entities, bold_glob)
+    bold_matches = find_bold_file(derivatives_root, entities, bold_glob)
     if len(bold_matches) == 0:
         print(f"  (!) skipping {events_path}: no matching BOLD file found")
         return None
@@ -158,6 +163,7 @@ def main():
     event_cfg = cfg["event_extraction"]
 
     bids_root = event_cfg["bids_root"]
+    derivatives_root = event_cfg.get("derivatives_root", bids_root)
     hemodynamic_lag = args.hemodynamic_lag if args.hemodynamic_lag is not None else event_cfg.get("hemodynamic_lag", 0)
     output_file = args.output or event_cfg.get("output_file", "master_spreadsheet.csv")
     bold_glob = event_cfg.get("bold_glob")
@@ -168,12 +174,12 @@ def main():
 
     all_rows = []
     for events_path in events_files:
-        df = process_events_file(events_path, bids_root, hemodynamic_lag, bold_glob)
+        df = process_events_file(events_path, derivatives_root, hemodynamic_lag, bold_glob)
         if df is not None and not df.empty:
             all_rows.append(df)
 
     if not all_rows:
-        raise SystemExit("No events rows produced -- check bids_root/events_glob/bold_glob in the config.")
+        raise SystemExit("No events rows produced -- check bids_root/derivatives_root/events_glob/bold_glob in the config.")
 
     table = pd.concat(all_rows, ignore_index=True)
     table = table.sort_values(["subject", "task", "run", "volume_of_interest"])
