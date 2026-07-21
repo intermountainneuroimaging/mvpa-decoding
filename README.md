@@ -111,7 +111,7 @@ Read by `generate_master_spreadsheet.py`.
 | `output_file` | Where the resulting table is written. Override with `--output`. |
 | `expected_events_file` | *(optional)* Path to a template of expected `trial_type` values -- see below. Override with `--expected-events`. |
 | `derivatives_root` | *(optional)* Directory to search under for BOLD files, if different from `bids_root` -- e.g. a separate fMRIPrep `derivatives/` tree. Defaults to `bids_root`. See [Using preprocessed/derivative data](#using-preprocessedderivative-data-eg-fmriprep). |
-| `bold_glob` | *(optional)* Needed whenever BOLD filenames don't follow the default lookup (match on `sub`/`ses`/`task`/`run` tokens + `"bold"` in the filename) -- e.g. fMRIPrep's `desc-`/`space-` suffixes, or when `derivatives_root` returns more than one match per run. A format string with `{subject}`/`{session}`/`{task}`/`{run}` placeholders, resolved relative to `derivatives_root`. |
+| `bold_glob` | *(optional)* Needed whenever BOLD filenames don't follow the default lookup (match on `sub`/`ses`/`task`/`run` tokens + `"bold"` in the filename) -- e.g. fMRIPrep's `desc-`/`space-` suffixes, or when `derivatives_root` returns more than one match per run. A format string resolved relative to `derivatives_root`, with `{subject}`/`{session}`/`{task}`/`{run}` placeholders -- plus **any other BIDS entity found in the events filename is available under its own raw key**, e.g. `{dir}` for a `dir-pa`/`dir-ap` entity, `{acq}` for `acq-*`, etc. No code change needed for a new entity; if it's in the filename, it's usable in `bold_glob`. |
 
 ### `expected_events.json` (optional, separate file)
 

@@ -60,10 +60,23 @@ def find_events_files(bids_root: str, events_glob: str):
 
 def find_bold_file(derivatives_root: str, entities: dict, bold_glob: str = None, verbose: bool = False):
     if bold_glob:
-        pattern = bold_glob.format(
-            subject=entities["sub"], session=entities.get("ses", ""),
-            task=entities["task"], run=entities["run"],
-        )
+        # {subject}/{session}/{task}/{run} are friendly aliases for sub/ses/task/run;
+        # any *other* BIDS entity found in the events filename (e.g. dir-pa -> {dir})
+        # is also available under its own raw key, so bold_glob can reference whatever
+        # entities your dataset actually has without any code change.
+        fmt_entities = {
+            **entities,
+            "subject": entities["sub"], "session": entities.get("ses", ""),
+            "task": entities["task"], "run": entities["run"],
+        }
+        try:
+            pattern = bold_glob.format(**fmt_entities)
+        except KeyError as exc:
+            missing_key = exc.args[0]
+            print(f"    (!) bold_glob references {{{missing_key}}}, which isn't among the entities parsed "
+                  f"from this filename ({entities}) -- check for a typo in bold_glob, or confirm this entity "
+                  f"actually appears in every events filename")
+            return []
         search_path = os.path.join(derivatives_root, pattern)
         matches = sorted(glob.glob(search_path, recursive=True))
         search_desc = f"bold_glob={bold_glob!r} -> formatted={pattern!r} -> searched {search_path!r}"

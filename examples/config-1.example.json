@@ -6,7 +6,7 @@
   "event_extraction": {
     "bids_root": "<path to raw bids data (where events.tsv files live)>",
     "derivatives_root": "<path to preprocessed/derivative data, e.g. an fMRIPrep derivatives folder -- omit to search under bids_root instead>",
-    "bold_glob": "sub-{subject}/ses-{session}/func/sub-{subject}_ses-{session}_task-{task}_run-{run}_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz",
+    "bold_glob": "sub-{subject}/ses-{session}/func/sub-{subject}_ses-{session}_task-{task}_dir-{dir}_run-{run}_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz",
     "events_glob": "**/*_events.tsv",
     "hemodynamic_lag": 4.6,
     "output_file": "master_spreadsheet.csv",
