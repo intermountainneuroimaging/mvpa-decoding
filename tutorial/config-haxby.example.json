@@ -1,7 +1,7 @@
 {
   "config_version": "1.0",
   "created_by": "AKH",
-  "notes": "Haxby et al. 2001 (OpenNeuro ds000105) 8-way object category classifier; minimally preprocessed (motion correction + rigid coregistration to run 1 + linear detrending, see tutorial/preprocess_haxby.py) -- not a scientifically rigorous preprocessing pipeline",
+  "notes": "Haxby et al. 2001 (OpenNeuro ds000105) 8-way object category classifier; minimally preprocessed (motion correction + rigid coregistration to run 1 + linear detrending via FSL, see tutorial/preprocess_haxby.sh) -- not a scientifically rigorous preprocessing pipeline",
   "event_extraction": {
     "bids_root": "tutorial/haxby-data",
     "derivatives_root": "tutorial/haxby-data/derivatives",

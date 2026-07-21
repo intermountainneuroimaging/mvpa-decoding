@@ -14,50 +14,44 @@ Neuroimaging Consortium, CU Boulder) is the direct methodological ancestor of
 this codebase: same TR (460 ms), the same 4.6 s / 10-TR hemodynamic-lag shift,
 the same ANOVA feature selection (voxel-wise, p < 0.05), the same L2-penalized
 logistic regression classifier, and the same leave-one-run-out cross-validation
-scheme. `sample-data/` (the MINDMEM dataset) extends the same paradigm with a
-different operation set (e.g. `suppress`/`switch`/`maintain`/`clear`/`breath`/
-`track` rather than the paper's `maintain`/`replace`/`suppress`/`clear`) and
-adds a positive/negative valence manipulation not present in the original
-study -- the pipeline generalizes to whichever operations/categories a given
-dataset actually has, via `model_conditions`, rather than assuming this
-specific set.
+scheme.
 
 ## The scientific question
 
-Working memory (WM) has limited capacity, so removing no-longer-relevant
-information is as important as holding onto relevant information. Behavioral
-report can't tell you whether a thought has actually been expunged from mind
-versus just set aside -- so the paper's approach is to read the *representation*
-of the to-be-removed item directly out of brain activity, using a classifier,
-and watch that representation's strength change over time as different removal
-strategies are applied.
+Working memory (WM) removal -- the ability to actively clear no-longer-relevant
+content from mind, rather than just setting it aside -- is thought to be a
+point of disruption in individuals prone to repetitive negative thinking
+(e.g. rumination). Behavioral report can't tell you whether a thought has
+actually been expunged from mind versus just set aside -- so the paper's
+approach is to read the *representation* of the to-be-removed item directly
+out of brain activity, using a classifier, and watch that representation's
+strength change over time as different removal strategies are applied.
 
-## Two classifiers, two roles
+## Building on Haxby's visual object recognition paradigm
 
-The paper (and this pipeline) trains **two conceptually different classifiers**
-from the same kind of data, which is why `model_conditions` has separate
-`training`/`testing` sections that can point at entirely different tasks:
+This work extends the foundational MVPA finding that distinct, distributed
+patterns of brain activity -- not just activity localized to specialized
+regions -- encode which visual object category a person is currently
+perceiving, and that these patterns can be reliably identified straight from
+imaging data using a machine-learning classifier:
 
-1. **A representation (category) classifier**, trained on a perceptual
-   *localizer* task -- participants simply view images from each category
-   (e.g. face/place, or face/fruit/scene in the original paper) with no
-   working-memory demand. This teaches the classifier what each category
-   "looks like" in brain activity, uncontaminated by any cognitive-control
-   operation. In this repo: `event_extraction.bids_root`'s `loc`-task runs,
-   selected by `model_conditions.training`.
+> Haxby, J. V., Gobbini, M. I., Furey, M. L., Ishai, A., Schouten, J. L., &
+> Pietrini, P. (2001). Distributed and overlapping representations of faces
+> and objects in ventral temporal cortex. *Science*, 293(5539), 2425-2430.
 
-2. **An operation (or valence) classifier**, trained on the *working-memory*
-   task itself -- decoding which cognitive operation (maintain, suppress,
-   switch, clear, ...) was being performed on a given trial, directly from
-   whole-brain activity during that operation. In this repo:
-   `gm_object_classifier.json`'s and `gm_valence_classifier.json`'s
-   `model_conditions.testing`/`timecourse_decoding` sections, built from
-   `WM*`-task runs.
+Kim et al. take that idea into a working-memory context: viewing *and*
+recalling faces and places each produce their own distinct, decodable brain
+pattern -- and, critically, that pattern isn't fixed. Instructing a
+participant to maintain, suppress, replace, or clear an item from memory
+measurably changes the strength of its representation, which is exactly the
+manipulation this pipeline's classifiers are built to detect.
 
-Both classifiers are the same underlying tool
-(`model.featureSelection`/`model.classifier` in the config) -- what differs is
-*which* task's data trains/tests them, which is exactly what `model_conditions`
-exists to express as data, not code.
+This repo's distinctive contribution relative to a typical MVPA design is to
+decode **frame by frame**, at every TR, rather than collapsing an entire
+trial's hemodynamic response (the full HRF curve) into a single classifier
+input the way a more traditional MVPA approach would. That's what lets it
+track *how* a representation is manipulated or degraded as time progresses
+within a trial, not just whether it can be decoded at all.
 
 ## Timecourse decoding: the central logic of the paper
 
@@ -87,7 +81,7 @@ time series.
 |---|---|
 | `cv/*_cv_results_accuracy.csv`, `*_auc.csv` | Classifier confusion matrices / AUC per operation (Fig. 2a, 3a) -- "can this be reliably decoded at all" |
 | `*_impa_native.nii.gz` (importance maps) | Positive/negative classifier importance maps (Fig. 2b) -- which voxels/regions drive the classification |
-| `decoding/*_decoding_results.csv` | Trial-averaged decoding time series (Fig. 4a/4b) -- how classifier evidence for the removed item evolves over time under each operation |
+| `decoding/*_summary_decoding_results.csv` | Trial-averaged decoding time series (Fig. 4a/4b) -- how classifier evidence for the removed item evolves over time under each operation. (`*_decoding_results.csv` is the raw, per-TR data this is averaged from.) |
 | `<subject>_trial_pivot.csv` | Sanity check only -- no analog in the paper |
 
 ## Why this matters for interpreting results

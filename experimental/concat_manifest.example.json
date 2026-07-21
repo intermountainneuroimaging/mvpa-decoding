@@ -1,0 +1,22 @@
+{
+  "run-01": {
+    "pos": "/path/to/preproc/sub-4057_ses-A1_task-WMpos_dir-pa_run-01_desc-preproc_bold.nii.gz",
+    "neg": "/path/to/preproc/sub-4057_ses-A1_task-WMneg_dir-pa_run-03_desc-preproc_bold.nii.gz",
+    "output": "/path/to/out/sub-4057_ses-A1_task-WMcombined_run-01_desc-preproc_bold.nii.gz"
+  },
+  "run-02": {
+    "pos": "/path/to/preproc/sub-4057_ses-A1_task-WMpos_dir-pa_run-02_desc-preproc_bold.nii.gz",
+    "neg": "/path/to/preproc/sub-4057_ses-A1_task-WMneg_dir-pa_run-04_desc-preproc_bold.nii.gz",
+    "output": "/path/to/out/sub-4057_ses-A1_task-WMcombined_run-02_desc-preproc_bold.nii.gz"
+  },
+  "run-03": {
+    "pos": "/path/to/preproc/sub-4057_ses-A1_task-WMpos_dir-pa_run-05_desc-preproc_bold.nii.gz",
+    "neg": "/path/to/preproc/sub-4057_ses-A1_task-WMneg_dir-pa_run-07_desc-preproc_bold.nii.gz",
+    "output": "/path/to/out/sub-4057_ses-A1_task-WMcombined_run-03_desc-preproc_bold.nii.gz"
+  },
+  "run-04": {
+    "pos": "/path/to/preproc/sub-4057_ses-A1_task-WMpos_dir-pa_run-06_desc-preproc_bold.nii.gz",
+    "neg": "/path/to/preproc/sub-4057_ses-A1_task-WMneg_dir-pa_run-08_desc-preproc_bold.nii.gz",
+    "output": "/path/to/out/sub-4057_ses-A1_task-WMcombined_run-04_desc-preproc_bold.nii.gz"
+  }
+}

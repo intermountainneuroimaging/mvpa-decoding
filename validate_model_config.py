@@ -32,7 +32,7 @@ duration); "offset_seconds" is added to that reference time and may be
 negative (e.g. to start before onset).
 
 Usage:
-    python validate_model_config.py --config mvpa_config.json \
+    python validate_model_config.py --config mvpa_config.json \\
         [--master-spreadsheet master_spreadsheet.csv]
 
 Passing --master-spreadsheet additionally evaluates every condition's query

@@ -1,11 +1,42 @@
 #!/usr/bin/env python3
 
 """
-Within-subject MVPA decoding script.
+Within-subject MVPA decoding: trains a classifier on model_conditions.training,
+cross-validates internally on that same training data (GroupKFold on `run`),
+evaluates on model_conditions.testing, and predicts at every TR across a
+timecourse_decoding window built independently of however volume_of_interest
+was computed in master_spreadsheet.csv. Reads the merged config (event_extraction
++ model_conditions + model sections) plus master_spreadsheet.csv produced by
+generate_master_spreadsheet.py -- see README.md sections 3-5 for the config
+format and "Running mvpa_workflow.py" for what each step does.
+
+Works for any number of training/testing conditions (2 or more): class lists
+are always derived from what the classifier actually learned (clf.classes_),
+not from what happens to appear in a given fold's held-out data.
+
+Optional model.test_decode_cv (README.md section 5) replaces the single
+train-once/test-once evaluation with a proper k-fold procedure -- repeatedly
+holding out a group of runs, training on the rest, testing/decoding only on
+the held-out group, then aggregating -- via one of three strategies:
+"per_run" (leave-one-run-out), "group_kfold" (n_splits over runs), or
+"explicit_groups" (user-specified run lists). Omit it to keep today's
+single-model behavior.
+
+Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
+    <subject>_trial_pivot.csv           -- sanity check, pre-model_conditions
+    cv/<subject>_cv_results_{metric}.csv        -- internal training-CV metrics
+    cv/<subject>_cv_impa_native.nii.gz          -- CV-fold-averaged importance map
+    model/<subject>_model_results_{metric}.csv  -- held-out test metrics
+    model/<subject>_impa_native.nii.gz          -- final importance map
+    decoding/<subject>_decoding_results.csv         -- raw, one row per decoded TR
+    decoding/<subject>_summary_decoding_results.csv -- averaged per (window_index, regressor_label)
+If test_decode_cv is set, matching model/decoding/*_fold{N}_* files are also
+written per fold (see generate_report.py, which uses their presence to render
+fold-variability panels).
 
 Usage:
-    python mvpa_workflow.py --subject 4057 --config gm_object_classifier.json \
-        --master-spreadsheet master_spreadsheet.csv --analysis-output-dir $PWD
+    python mvpa_workflow.py --subject 4057 --config examples/config-2.example.json \\
+        --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out
 """
 
 import os
@@ -18,7 +49,6 @@ from pathlib import Path
 from types import SimpleNamespace
 import json
 import importlib
-import re
 
 # processing
 try:
@@ -37,7 +67,10 @@ from sklearn.model_selection import PredefinedSplit
 from collections import defaultdict
 from sklearn.metrics import confusion_matrix, roc_auc_score
 
-from mvpa_common import evaluate_query_node, compute_volume_range, resolve_window_times, build_trial_pivot_table, resolve_config_root
+from mvpa_common import (
+    evaluate_query_node, compute_volume_range, resolve_window_times, build_trial_pivot_table,
+    resolve_config_root, quick_safe, label_rows, get_single_match, get_bold_header_info,
+)
 
 # grouping used for the timecourse decoding output -- the relative timepoint
 # within each event's decode window, crossed with the classification label.
@@ -49,24 +82,25 @@ TIMECOURSE_GROUPING = ["window_index", "regressor_label"]
 # =====================================================
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Run within-subject decoding.")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 
     parser.add_argument(
         "--subject",
         required=True,
-        help="Subject ID (e.g., 4057)"
+        help="Subject ID to run, matching master_spreadsheet.csv's 'subject' column exactly (e.g. 4057)"
     )
 
     parser.add_argument(
         "--analysis-output-dir",
         required=True,
-        help="Filepath to outputs."
+        help="Root output directory -- results are written under <this>/<model.desc>/<subject>/{cv,model,decoding}/"
     )
 
     parser.add_argument(
         "--config",
         required=True,
-        help="Path to the mvpa config JSON (event_extraction + model_conditions + model sections)"
+        help="Path to the mvpa config JSON (event_extraction + model_conditions + model sections). "
+             "See README.md sections 3-5 and examples/config-*.example.json."
     )
 
     parser.add_argument(
@@ -107,20 +141,6 @@ def track_runtime(label: str = "run"):
 # =====================================================
 # Helper Functions
 # =====================================================
-
-def label_rows(df: pd.DataFrame, conditions: dict) -> pd.DataFrame:
-    """Tag rows matching any condition's query with a 'regressor_label' column
-    (first matching condition wins, in dict-insertion order), dropping rows
-    that match none."""
-    labeled = []
-    for name, query in conditions.items():
-        mask = evaluate_query_node(query, df)
-        subset = df[mask].copy()
-        subset["regressor_label"] = name
-        labeled.append(subset)
-    combined = pd.concat(labeled)
-    return combined[~combined.index.duplicated(keep="first")]
-
 
 def apply_regressor_codes(df: pd.DataFrame, categories: list) -> pd.DataFrame:
     df = df.copy()
@@ -211,31 +231,6 @@ def linear_weight_map(clf, n_voxels, feat_mask=None, class_index=0):
 
 class ShapeError(Exception):
     pass
-
-
-def get_single_match(pattern: str) -> str:
-    matches = glob.glob(pattern)
-
-    if len(matches) == 0:
-        raise FileNotFoundError(f"No files match pattern: {pattern}")
-    if len(matches) > 1:
-        raise RuntimeError(
-            f"Expected 1 file, found {len(matches)}:\n" +
-            "\n".join(str(m) for m in matches)
-        )
-
-    return str(matches[0])
-
-
-_bold_header_cache = {}
-
-
-def get_bold_header_info(boldfile: str):
-    """Return (tr, n_frames) for a boldfile, read once and cached."""
-    if boldfile not in _bold_header_cache:
-        header = nib.load(boldfile).header
-        _bold_header_cache[boldfile] = (float(header.get_zooms()[3]), int(header.get_data_shape()[-1]))
-    return _bold_header_cache[boldfile]
 
 
 _masker_cache = {}
@@ -390,7 +385,26 @@ def load_config(cfg_path: str) -> dict:
         raise SystemExit("config missing required 'model_conditions' section")
 
     full_cfg["model"] = merge_with_defaults(full_cfg.get("model", {}), default_model_config())
+    validate_test_decode_cv_config(full_cfg["model"].get("test_decode_cv"))
     return full_cfg
+
+
+def validate_test_decode_cv_config(test_decode_cv_cfg) -> None:
+    """Cheap, config-only validation of model.test_decode_cv -- run at config-load time
+    so a typo fails fast, before any (possibly slow) BOLD loading happens. The
+    data-dependent checks (do the referenced runs actually exist for this subject) still
+    happen later, in resolve_test_decode_folds, once the subject's data is available."""
+    if test_decode_cv_cfg is None:
+        return
+    strategy = test_decode_cv_cfg.get("strategy")
+    if strategy not in ("per_run", "group_kfold", "explicit_groups"):
+        raise SystemExit(
+            f"model.test_decode_cv.strategy must be one of 'per_run'/'group_kfold'/'explicit_groups', got {strategy!r}"
+        )
+    if strategy == "group_kfold" and not isinstance(test_decode_cv_cfg.get("n_splits"), int):
+        raise SystemExit("model.test_decode_cv.strategy='group_kfold' requires an integer 'n_splits'")
+    if strategy == "explicit_groups" and not isinstance(test_decode_cv_cfg.get("groups"), list):
+        raise SystemExit("model.test_decode_cv.strategy='explicit_groups' requires a 'groups' list")
 
 
 def dict_to_namespace(d):
@@ -400,10 +414,6 @@ def dict_to_namespace(d):
         return [dict_to_namespace(x) for x in d]
     else:
         return d
-
-
-def quick_safe(name):
-    return re.sub(r'[^A-Za-z0-9._-]', '_', str(name))
 
 
 def save_model_results(output_pattern, results, categories):
@@ -475,6 +485,19 @@ def save_model_results(output_pattern, results, categories):
             np.savetxt(output_file, x, delimiter=",", fmt="%.6f")
 
         print(f"[{metric}] saved -> {output_file} (shape={x.shape})")
+
+
+def average_fold_results(fold_results: list) -> dict:
+    """Average a list of model_performance-style result dicts (scalar or array-valued
+    metrics, all sharing the same keys/shapes) elementwise across folds."""
+    mean_results = {}
+    for k in fold_results[0].keys():
+        values = [res[k] for res in fold_results]
+        if np.isscalar(values[0]):
+            mean_results[k] = float(np.mean(values))
+        else:
+            mean_results[k] = np.mean(np.stack(values, axis=0), axis=0)
+    return mean_results
 
 
 # cross_validation
@@ -594,63 +617,238 @@ def model_performance(clf, xfeat, testing_data, testing_labels):
 
 
 def timecourse_decoding(clf, xfeat, timecourse_data, timecourse_labels, timecourse_df, regressor_categories):
+    """Predict the trained classifier on every already-recomputed timecourse-decoding
+    volume. Returns (raw, summary):
+      - raw: one row per volume actually decoded, with its own prediction and
+        evidence_<category> columns -- the actual per-TR data, not an average.
+      - summary: raw grouped by (window_index, regressor_label) and averaged across
+        every trial sharing that group -- the confusion-style timecourse view."""
 
     # apply feature selection
     timecourse_data_xfeat = timecourse_data[:, xfeat]
 
     predictions = clf.predict(timecourse_data_xfeat)
     global_accuracy = accuracy_score(timecourse_labels, predictions)
-
     print(f"Global accuracy: {global_accuracy:.4f}")
 
     evidence = decision_evidence(clf, timecourse_data_xfeat)
-    timecourse_df = timecourse_df.reset_index(drop=True)
-    timecourse_df["evidence"] = list(evidence)
 
-    # -------------------------------------------------
-    # Group-level metrics
-    # -------------------------------------------------
+    code_to_label = {i + 1: cat for i, cat in enumerate(regressor_categories)}
 
-    out = (
-        timecourse_df
-        .groupby(TIMECOURSE_GROUPING)
-        .apply(lambda x: x.index.tolist())
-        .reset_index(name="data_index")
-    )
+    raw = timecourse_df.reset_index(drop=True).copy()
+    raw["predicted_label"] = [code_to_label.get(p, p) for p in predictions]
+    raw["correct"] = predictions == timecourse_labels
+    for i, cat in enumerate(regressor_categories):
+        raw[f"evidence_{cat}"] = evidence[:, i]
 
-    for idx, row in out.iterrows():
-        inds = row["data_index"]
+    raw["threshold_p"] = cfg.featureSelection.feat_p
+    raw["selected_voxels"] = timecourse_data_xfeat.shape[1]
+    raw["whole_voxels"] = timecourse_data.shape[1]
+    raw["feature_percent"] = 100 * timecourse_data_xfeat.shape[1] / timecourse_data.shape[1]
 
-        out.loc[idx, "trial_count"] = len(inds)
+    evidence_cols = [c for c in raw.columns if c.startswith("evidence")]
+    other_cols = [c for c in raw.columns if not c.startswith("evidence")]
+    raw = raw[other_cols + evidence_cols]
+    raw.insert(1, "model_descr", model_descr)  # "subject" is already a column, from timecourse_df's own BIDS entity
 
-        group_acc = accuracy_score(
-            timecourse_labels[inds],
-            predictions[inds]
+    summary = summarize_decoding(raw, regressor_categories)
+
+    return raw, summary
+
+
+def summarize_decoding(raw: pd.DataFrame, regressor_categories: list) -> pd.DataFrame:
+    """Collapse a raw (one-row-per-decoded-TR) decoding table down to one row per
+    (window_index, regressor_label), averaging Accuracy/evidence across every trial
+    sharing that group -- used both for a single call's own summary and, in
+    test_decode_cv mode, to summarize the full pool of raw rows concatenated across
+    every fold (a proper trial-count-weighted mean, not an average of per-fold means)."""
+    rows = []
+    for (window_index, regressor_label), group in raw.groupby(TIMECOURSE_GROUPING, sort=False):
+        row = {
+            "subject": subject_id,
+            "model_descr": model_descr,
+            "window_index": window_index,
+            "regressor_label": regressor_label,
+            "trial_count": len(group),
+            "Accuracy": group["correct"].mean(),
+        }
+        for cat in regressor_categories:
+            row[f"evidence_{cat}"] = group[f"evidence_{cat}"].mean()
+        row["threshold_p"] = group["threshold_p"].mean()
+        row["selected_voxels"] = group["selected_voxels"].mean()
+        row["whole_voxels"] = group["whole_voxels"].mean()
+        row["feature_percent"] = group["feature_percent"].mean()
+        rows.append(row)
+
+    summary = pd.DataFrame(rows)
+    evidence_cols = [c for c in summary.columns if c.startswith("evidence")]
+    other_cols = [c for c in summary.columns if not c.startswith("evidence")]
+    return summary[other_cols + evidence_cols]
+
+
+def resolve_test_decode_folds(test_decode_cv_cfg: dict, testing_df: pd.DataFrame, timecourse_instr: pd.DataFrame) -> list:
+    """Return a list of held-out run-id groups implementing test_decode_cv_cfg's
+    strategy. Folds are built only over runs that actually appear in this subject's
+    testing/timecourse_decoding-eligible data -- not the whole master_spreadsheet --
+    so every fold corresponds to data that will actually be evaluated."""
+    strategy = test_decode_cv_cfg.get("strategy")
+    universe_runs = sorted(set(testing_df["run"]) | set(timecourse_instr["run"]))
+
+    if not universe_runs:
+        raise SystemExit(
+            "test_decode_cv: no runs found in testing/timecourse_decoding-eligible data for this "
+            "subject -- nothing to fold over."
         )
 
-        evidence_by_group = np.mean(evidence[inds], axis=0)
+    if strategy == "per_run":
+        return [[r] for r in universe_runs]
 
-        out.loc[idx, "Accuracy"] = group_acc
+    if strategy == "group_kfold":
+        n_splits = test_decode_cv_cfg.get("n_splits")
+        if not isinstance(n_splits, int) or isinstance(n_splits, bool) or n_splits < 2:
+            raise SystemExit(
+                f"test_decode_cv.strategy='group_kfold' requires an integer 'n_splits' >= 2, got {n_splits!r}"
+            )
+        if n_splits > len(universe_runs):
+            raise SystemExit(
+                f"test_decode_cv.n_splits={n_splits} exceeds the number of distinct runs available "
+                f"({len(universe_runs)}: {universe_runs})"
+            )
+        return [list(g) for g in np.array_split(np.array(universe_runs), n_splits)]
 
-        for i, cat in enumerate(regressor_categories):
-            out.loc[idx, f"evidence_{cat}"] = evidence_by_group[i]
+    if strategy == "explicit_groups":
+        groups = test_decode_cv_cfg.get("groups")
+        if not isinstance(groups, list) or not groups or not all(isinstance(g, list) and g for g in groups):
+            raise SystemExit(
+                "test_decode_cv.strategy='explicit_groups' requires a non-empty 'groups' list of "
+                "non-empty run-id lists"
+            )
+        covered = {r for g in groups for r in g}
+        uncovered = [r for r in universe_runs if r not in covered]
+        if uncovered:
+            print(f"(!) test_decode_cv.groups doesn't cover run(s) {uncovered} that appear in this "
+                  f"subject's testing/timecourse_decoding data -- those rows will never be evaluated in any fold")
+        unknown = sorted({r for g in groups for r in g if r not in universe_runs})
+        if unknown:
+            print(f"(!) test_decode_cv.groups references run(s) {unknown} that don't appear in this "
+                  f"subject's testing/timecourse_decoding-eligible data -- they'll produce empty folds")
+        return groups
 
-    out["threshold_p"] = cfg.featureSelection.feat_p
-    out["selected_voxels"] = timecourse_data_xfeat.shape[1]
-    out["whole_voxels"] = timecourse_data.shape[1]
-    out["feature_percent"] = 100 * timecourse_data_xfeat.shape[1] / timecourse_data.shape[1]
+    raise SystemExit(
+        f"test_decode_cv.strategy must be one of 'per_run'/'group_kfold'/'explicit_groups', got {strategy!r}"
+    )
 
-    evidence_cols = [c for c in out.columns if c.startswith("evidence")]
-    other_cols = [c for c in out.columns if not c.startswith("evidence")]
-    out = out[other_cols + evidence_cols]
 
-    out.insert(0, "subject", subject_id)
-    out.insert(1, "model_descr", model_descr)
+def run_test_decode_kfold(test_decode_cv_cfg, masker,
+                          training_df, training_data, training_labels,
+                          testing_df, testing_data, testing_labels,
+                          timecourse_instr, timecourse_data, timecourse_labels):
+    """Repeatedly hold out a group of runs: train on the rest, test+decode only on the
+    held-out group, then aggregate back into the same shapes the single full-model path
+    (model_classification -> model_performance -> timecourse_decoding once) produces.
+    Per-fold outputs are also saved -- for transparency, and so generate_report.py can
+    detect and render fold-variability panels. Returns (importance_map, model_xout,
+    raw_decoding, summary_decoding), matching what the non-kfold path returns."""
 
-    out.drop(columns="data_index", inplace=True)
+    fold_groups = resolve_test_decode_folds(test_decode_cv_cfg, testing_df, timecourse_instr)
+    print(f"test_decode_cv: {len(fold_groups)} fold(s), strategy={test_decode_cv_cfg.get('strategy')!r}")
 
-    return out
+    folds_manifest = {}
+    model_results, model_impas, decoding_raws = [], [], []
 
+    for fold_id, held_out_runs in enumerate(fold_groups, start=1):
+        folds_manifest[fold_id] = [int(r) for r in held_out_runs]
+
+        train_mask = ~training_df["run"].isin(held_out_runs)
+        test_mask = testing_df["run"].isin(held_out_runs)
+        tc_mask = timecourse_instr["run"].isin(held_out_runs)
+
+        if not test_mask.any() and not tc_mask.any():
+            print(f"  (!) fold {fold_id} (held-out runs {held_out_runs}): no testing or "
+                  f"timecourse_decoding rows -- skipping")
+            continue
+        if not train_mask.any():
+            print(f"  (!) fold {fold_id} (held-out runs {held_out_runs}): no training rows remain "
+                  f"once these runs are excluded -- skipping")
+            continue
+
+        print(f"  Fold {fold_id}: held-out runs {held_out_runs} "
+              f"({int(train_mask.sum())} train / {int(test_mask.sum())} test / {int(tc_mask.sum())} timecourse rows)")
+
+        xclf, xfeat = model_classification(
+            training_data[train_mask.to_numpy()], training_labels[train_mask.to_numpy()]
+        )
+
+        if test_mask.any():
+            xout, impa = model_performance(
+                xclf, xfeat, testing_data[test_mask.to_numpy()], testing_labels[test_mask.to_numpy()]
+            )
+            output_pattern = os.path.join(
+                analysis_output_dir, model_descr, subject_id, "model",
+                f"{subject_id}_fold{fold_id}" + "_model_results_{metric}.csv"
+            )
+            save_model_results(output_pattern, xout, regressor_categories)
+            model_results.append(xout)
+            model_impas.append(impa)
+
+            fold_impa_file = os.path.join(
+                analysis_output_dir, model_descr, subject_id, "model",
+                f"{subject_id}_fold{fold_id}_impa_native.nii.gz"
+            )
+            masker.inverse_transform(impa).to_filename(fold_impa_file)
+        else:
+            print(f"  (!) fold {fold_id}: no held-out testing rows -- skipping model_performance for this fold")
+
+        if tc_mask.any():
+            fold_raw, fold_summary = timecourse_decoding(
+                xclf, xfeat,
+                timecourse_data[tc_mask.to_numpy()], timecourse_labels[tc_mask.to_numpy()],
+                timecourse_instr.loc[tc_mask], regressor_categories,
+            )
+            fold_raw.insert(2, "fold", fold_id)
+            fold_summary.insert(2, "fold", fold_id)
+
+            fold_decoding_file = os.path.join(
+                analysis_output_dir, model_descr, subject_id, "decoding",
+                f"{subject_id}_fold{fold_id}_decoding_results.csv"
+            )
+            fold_summary_file = os.path.join(
+                analysis_output_dir, model_descr, subject_id, "decoding",
+                f"{subject_id}_fold{fold_id}_summary_decoding_results.csv"
+            )
+            Path(os.path.dirname(fold_decoding_file)).mkdir(parents=True, exist_ok=True)
+            fold_raw.to_csv(fold_decoding_file, index=False)
+            fold_summary.to_csv(fold_summary_file, index=False)
+            decoding_raws.append(fold_raw)
+        else:
+            print(f"  (!) fold {fold_id}: no held-out timecourse_decoding rows -- skipping decoding for this fold")
+
+    if not model_results:
+        raise SystemExit(
+            "test_decode_cv: every fold was skipped -- no held-out testing rows were ever available. "
+            "Check your fold strategy against the runs actually present in testing_conditions."
+        )
+
+    manifest_file = os.path.join(
+        analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}_test_decode_folds.json"
+    )
+    Path(os.path.dirname(manifest_file)).mkdir(parents=True, exist_ok=True)
+    with open(manifest_file, "w") as f:
+        json.dump(folds_manifest, f, indent=2)
+
+    aggregated_model_xout = average_fold_results(model_results)
+    aggregated_impa = np.mean(np.stack(model_impas, axis=0), axis=0)
+
+    # Raw rows from different folds are genuinely disjoint trials (folds partition
+    # runs), so the aggregate raw table is just a concatenation -- no averaging needed.
+    # The aggregate summary is then computed fresh from that pooled raw table, which
+    # weights every trial equally regardless of which fold it came from (rather than
+    # averaging each fold's own summary, which would implicitly weight folds equally
+    # even if they held out different numbers of trials).
+    aggregated_raw = pd.concat(decoding_raws, ignore_index=True) if decoding_raws else pd.DataFrame()
+    aggregated_summary = summarize_decoding(aggregated_raw, regressor_categories) if not aggregated_raw.empty else pd.DataFrame()
+
+    return aggregated_impa, aggregated_model_xout, aggregated_raw, aggregated_summary
 
 
 # =====================================================
@@ -696,17 +894,22 @@ def main():
 
     training_df = apply_regressor_codes(label_rows(subject_df, training_conditions), regressor_categories)
     testing_df = apply_regressor_codes(label_rows(subject_df, testing_conditions), regressor_categories)
+    timecourse_labeled = apply_regressor_codes(label_rows(subject_df, timecourse_conditions), regressor_categories)
+    timecourse_instr = build_timecourse_instructions(timecourse_labeled, timecourse_window)
 
     training_data, training_labels, training_ids, masker = load_images_and_mask(training_df)
     testing_data, testing_labels, testing_ids, masker = load_images_and_mask(testing_df)
+    timecourse_data, timecourse_labels, timecourse_ids, masker = load_images_and_mask(timecourse_instr)
 
     training_df = training_df.loc[training_ids, :]
     testing_df = testing_df.loc[testing_ids, :]
+    timecourse_instr = timecourse_instr.loc[timecourse_ids, :]
     print("...Done")
 
     # make sure labels are flat
     training_labels = training_labels.ravel()
     testing_labels = testing_labels.ravel()
+    timecourse_labels = timecourse_labels.ravel()
 
     # -------------------------------------------------
     # K-Fold Cross Validation
@@ -745,33 +948,40 @@ def main():
 
     print("Storing cross-validation performance metrics.")
 
-    # summarize model perfromance across all folds
-    mean_results = {}
-
-    for k in ii_results[0].keys():
-        values = [res[k] for res in ii_results]
-
-        if np.isscalar(values[0]):
-            mean_results[k] = float(np.mean(values))
-        else:
-            mean_results[k] = np.mean(np.stack(values, axis=0), axis=0)
-
+    # summarize model performance across all folds
+    mean_results = average_fold_results(ii_results)
     mean_kfold_importance_map = np.mean(np.stack(ii_impa, axis=0), axis=0)
 
     output_pattern = os.path.join(analysis_output_dir, model_descr, subject_id, "cv", f"{subject_id}" + "_cv_results_{metric}.csv")
     save_model_results(output_pattern, mean_results, regressor_categories)
 
     # -------------------------------------------------
-    # Model Classification
+    # Model Classification / Testing / Time Course Decoding
     # -------------------------------------------------
 
-    print("Training classifier...")
+    test_decode_cv_cfg = full_cfg["model"].get("test_decode_cv")
 
-    # train on full "training" set now
-    xclf, xfeat = model_classification(training_data, training_labels)
+    if test_decode_cv_cfg:
+        print(f"Training + testing + decoding via test_decode_cv...")
+        importance_map, xout, raw_decoding, summary_decoding = run_test_decode_kfold(
+            test_decode_cv_cfg, masker,
+            training_df, training_data, training_labels,
+            testing_df, testing_data, testing_labels,
+            timecourse_instr, timecourse_data, timecourse_labels,
+        )
+    else:
+        print("Training classifier...")
 
-    # record final model performance
-    xout, importance_map = model_performance(xclf, xfeat, testing_data, testing_labels)
+        # train on full "training" set now
+        xclf, xfeat = model_classification(training_data, training_labels)
+
+        # record final model performance
+        xout, importance_map = model_performance(xclf, xfeat, testing_data, testing_labels)
+
+        print("Time Course Decoding...")
+        raw_decoding, summary_decoding = timecourse_decoding(
+            xclf, xfeat, timecourse_data, timecourse_labels, timecourse_instr, regressor_categories
+        )
 
     output_pattern = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}" + "_model_results_{metric}.csv")
     save_model_results(output_pattern, xout, regressor_categories)
@@ -780,35 +990,30 @@ def main():
     # Importance Map
     # -------------------------------------------------
 
-    # kfold importance maps (averaged across folds)
-    img1 = masker.inverse_transform(importance_map)
+    # kfold importance maps (averaged across the internal training-CV folds above --
+    # a within-training generalization diagnostic, independent of test_decode_cv)
+    img1 = masker.inverse_transform(mean_kfold_importance_map)
     output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "cv", f"{subject_id}" + "_cv_impa_native.nii.gz")
     img1.to_filename(output_file)
 
-    # final trained model importance map
+    # final (or test_decode_cv-aggregated) model importance map
     img = masker.inverse_transform(importance_map)
     output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}" + "_impa_native.nii.gz")
     img.to_filename(output_file)
 
     # -------------------------------------------------
-    # Time Course Decoding
+    # Time Course Decoding output -- raw (one row per decoded TR) + summary
+    # (raw grouped by window_index/regressor_label and averaged across trials)
     # -------------------------------------------------
 
-    print("Time Course Decoding...")
-
-    timecourse_labeled = apply_regressor_codes(label_rows(subject_df, timecourse_conditions), regressor_categories)
-    timecourse_instr = build_timecourse_instructions(timecourse_labeled, timecourse_window)
-
-    timecourse_data, timecourse_labels, timecourse_ids, _ = load_images_and_mask(timecourse_instr)
-    timecourse_instr = timecourse_instr.loc[timecourse_ids, :]
-    timecourse_labels = timecourse_labels.ravel()
-
-    out = timecourse_decoding(xclf, xfeat, timecourse_data, timecourse_labels, timecourse_instr, regressor_categories)
     output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_decoding_results.csv")
     Path(os.path.dirname(output_file)).mkdir(parents=True, exist_ok=True)
-    out.to_csv(output_file, index=False)
+    raw_decoding.to_csv(output_file, index=False)
 
-    print(f"Results saved to: {output_file}")
+    summary_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_summary_decoding_results.csv")
+    summary_decoding.to_csv(summary_file, index=False)
+
+    print(f"Results saved to: {output_file} (raw) and {summary_file} (summary)")
 
 
 if __name__ == "__main__":

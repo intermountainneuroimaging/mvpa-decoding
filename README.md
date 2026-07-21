@@ -409,6 +409,54 @@ Omit any of `featureSelection`/`classifier`/`cv` and it falls back to a
 default (ANOVA @ p<0.05, `LogisticRegression`, `GroupKFold`) -- only `desc`
 and `mask` are meaningfully required.
 
+### `test_decode_cv` (optional): k-fold test/decode instead of one full model
+
+By default, `mvpa_workflow.py` trains **one** classifier on the entire
+`training` condition set and evaluates it **once** against the entire
+`testing`/`timecourse_decoding` condition sets -- a single train-once/
+test-once point estimate. Adding `test_decode_cv` to `model` replaces that
+with a proper k-fold procedure: repeatedly hold out a group of runs, train on
+the rest, test+decode only on the held-out group, then aggregate:
+
+```json
+"model": {
+  ...,
+  "test_decode_cv": {
+    "strategy": "per_run"
+  }
+}
+```
+
+Three strategies:
+
+| `strategy` | Meaning |
+|---|---|
+| `"per_run"` | Leave-one-run-out: every unique run number appearing in the testing/timecourse-eligible data becomes its own held-out fold. Simplest, and the recommended default. |
+| `"group_kfold"` | Requires `"n_splits": <int>`. Partitions the sorted unique run numbers into `n_splits` roughly-equal contiguous groups (deterministic, no shuffling) -- use when there are too many runs for per-run granularity to be practical. |
+| `"explicit_groups"` | Requires `"groups": [[1,2,3],[4,5,6],...]` -- you specify exactly which runs go in which held-out fold. Most control; a run left out of every group is flagged with a warning (its rows are never evaluated), and a listed run that doesn't actually appear in the data produces an empty fold (also warned). |
+
+Omitting `test_decode_cv` entirely preserves today's exact single train/test/
+decode behavior -- no config changes needed for existing setups.
+
+Each fold's results are saved alongside the aggregate, for transparency and
+so `generate_report.py` (see below) can detect and render fold-variability
+panels: `model/{subject}_fold{N}_model_results_{metric}.csv`,
+`model/{subject}_fold{N}_impa_native.nii.gz`,
+`decoding/{subject}_fold{N}_decoding_results.csv` (that fold's raw per-TR
+rows) and `decoding/{subject}_fold{N}_summary_decoding_results.csv` (that
+fold's own group-averaged summary), plus a
+`model/{subject}_test_decode_folds.json` manifest recording exactly which
+runs went into which fold.
+
+The aggregated files are written to the *same* filenames the single
+full-model path already used, so this is a drop-in replacement -- nothing
+downstream needs to know which mode produced them. For the decoding output
+specifically: `decoding_results.csv` is the straight concatenation of every
+fold's raw rows (each an actually-decoded, disjoint trial -- folds partition
+runs, so no double-counting), and `summary_decoding_results.csv` is computed
+fresh from that pooled raw table, not by averaging each fold's own summary
+-- so every trial is weighted equally regardless of which fold it came from.
+
 ## Running `mvpa_workflow.py`
 
 ```
@@ -443,8 +491,16 @@ comes from the one config plus `master_spreadsheet.csv`. For a given
    from `model_conditions.timecourse_decoding.window` and each event's
    `onset`/`duration`/`trial_index` (independent of whatever
    `hemodynamic_lag` was used to build `volume_of_interest` originally),
-   predicts with the trained classifier, and writes per-relative-timepoint
-   accuracy/evidence to `<analysis-output-dir>/<desc>/<subject>/decoding/`.
+   predicts with the trained classifier, and writes two files to
+   `<analysis-output-dir>/<desc>/<subject>/decoding/`:
+   - `{subject}_decoding_results.csv` -- **raw**, one row per volume actually
+     decoded, with its own `predicted_label` and `evidence_<category>`
+     columns. This is the real per-TR data -- use it for anything that needs
+     trial-level detail (custom stats, sanity-checking individual trials).
+   - `{subject}_summary_decoding_results.csv` -- the raw table grouped by
+     `(window_index, regressor_label)` and averaged across every trial in
+     that group (trial-count-weighted, not an average of averages) -- the
+     confusion-style timecourse view `generate_report.py` (section 6) reads.
 
 `examples/sample-data` has no `masks/` directory, so running this against it
 requires pointing `model.mask.mask_pattern` (and `mask_root`, if the mask
@@ -462,18 +518,63 @@ columns (`N` = the widest trial; shorter trials are NaN-padded). Useful for
 eyeballing whether the volume counts per trial look right -- not used by the
 modeling steps themselves.
 
+## 6. Generating a report (`generate_report.py`)
+
+Produces a multi-page PDF from `mvpa_workflow.py`'s output -- accuracy/AUC,
+confusion-style accuracy/evidence matrices, annotated timecourse decoding,
+and importance maps. One script, two scales, switched with `--subject`:
+
+```
+# group report -- aggregates every subject found under <dir>/<desc>/*/
+python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier \
+    --config examples/config-2.example.json --master-spreadsheet master_spreadsheet.csv
+
+# single-subject report -- scoped to just <dir>/<desc>/4057/
+python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier \
+    --subject 4057 --config examples/config-2.example.json --master-spreadsheet master_spreadsheet.csv
+```
+
+| Flag | Meaning |
+|---|---|
+| `--analysis-output-dir`/`--desc` | Same values used for `mvpa_workflow.py --analysis-output-dir`/the config's `model.desc`. |
+| `--subject` | *(optional)* Restrict the report to one subject. Omit to aggregate over every subject folder found under `<dir>/<desc>/`. |
+| `--config` | *(optional)* Supplies `model_conditions.timecourse_decoding` (conditions + window) for timecourse annotation. Without it, the timecourse page still renders, just unannotated. |
+| `--master-spreadsheet` | *(optional)* Needed alongside `--config` to compute each condition's median trial duration and each subject's TR (both derived from real data, not hardcoded) -- used to convert `window_index` to seconds and mark trial onset/end on the timecourse plot. Without it, the x-axis stays in raw `window_index` units and annotation is skipped. |
+| `--output` | *(optional)* Defaults to `<dir>/<desc>/report_<desc>.pdf` (group) or `<dir>/<desc>/<subject>/report_<subject>.pdf` (single-subject). |
+
+**Fold-variability panels are automatic, not configured.** If a subject's
+output was produced with `test_decode_cv` (section 5), `generate_report.py`
+detects the `_fold{N}_*` files that Feature 1 saves and uses them: in a
+single-subject report, the accuracy/AUC page overlays per-fold points on the
+aggregate bars, the timecourse page bands mean +/- SE **across folds**
+instead of a single point estimate, and an extra importance-map page shows a
+fold-to-fold consistency mosaic. Without `test_decode_cv`, those panels are
+silently omitted -- there's no repeated measure to band from.
+
+**Importance maps are never averaged across subjects.** Masks are
+native-space and per-subject -- there's no common voxel grid to average
+onto, unlike a normalized-space group analysis. The group report shows one
+page per subject instead; only within-subject fold-to-fold averaging (same
+subject, same grid) happens.
+
+The timecourse page always reads `summary_decoding_results.csv` (per
+subject, or per fold in single-subject `test_decode_cv` mode), never the raw
+per-TR `decoding_results.csv` -- group-level statistics need one
+already-averaged value per group per subject/fold, not individual trials.
+
 ## Tutorial: a real external dataset (Haxby et al. 2001 / OpenNeuro ds000105)
 
 See **[tutorial/README.md](tutorial/README.md)** for a full walkthrough
 against real public data (downloaded fresh, not checked into this repo) --
 every command, the actual output and results, including a minimal
-preprocessing pass (`tutorial/preprocess_haxby.py`: rigid motion correction,
-rigid coregistration to a common run, linear detrending) written into a
-`derivatives/` folder and picked up via `derivatives_root`/`bold_glob` -- and
-a detailed accounting of where the tutorial still oversimplifies (rigid-only
-alignment with deliberately cheap settings, no slice-timing correction, no
-normalization to a standard template, a crude intensity-based mask rather
-than an anatomical one). It's also the only example here with **8**
+preprocessing pass (`tutorial/preprocess_haxby.sh`, built on FSL's `mcflirt`/
+`flirt`/`applyxfm4D`/`fsl_glm`: motion correction, rigid coregistration to a
+common run, linear detrending) written into a `derivatives/` folder and
+picked up via `derivatives_root`/`bold_glob` -- and a detailed accounting of
+where the tutorial still oversimplifies (rigid-only alignment with default
+settings, no slice-timing correction, no normalization to a standard
+template, a crude `bet` brain mask rather than an anatomical one). It's also
+the only example here with **8**
 classification conditions (not 2) and no `ses-` entity in its filenames at
 all, which is what surfaced a real bug: `generate_master_spreadsheet.py`
 used to *require* `ses` and would have silently rejected every file in a

@@ -9,6 +9,7 @@ mvpa_workflow.py).
 import math
 import re
 
+import nibabel as nib
 import numpy as np
 import pandas as pd
 
@@ -221,3 +222,52 @@ def resolve_window_times(window: dict, onset: float, duration: float):
         return base + bound.get("offset_seconds", 0)
 
     return resolve(window["start"]), resolve(window["end"])
+
+
+# =====================================================
+# Small shared helpers (no dependency on any script's module-level state --
+# safe to import from mvpa_workflow.py, generate_report.py, or anywhere else)
+# =====================================================
+
+def quick_safe(name) -> str:
+    return re.sub(r'[^A-Za-z0-9._-]', '_', str(name))
+
+
+def label_rows(df: pd.DataFrame, conditions: dict) -> pd.DataFrame:
+    """Tag rows matching any condition's query with a 'regressor_label' column
+    (first matching condition wins, in dict-insertion order), dropping rows
+    that match none."""
+    labeled = []
+    for name, query in conditions.items():
+        mask = evaluate_query_node(query, df)
+        subset = df[mask].copy()
+        subset["regressor_label"] = name
+        labeled.append(subset)
+    combined = pd.concat(labeled)
+    return combined[~combined.index.duplicated(keep="first")]
+
+
+def get_single_match(pattern: str) -> str:
+    import glob
+    matches = glob.glob(pattern)
+
+    if len(matches) == 0:
+        raise FileNotFoundError(f"No files match pattern: {pattern}")
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"Expected 1 file, found {len(matches)}:\n" +
+            "\n".join(str(m) for m in matches)
+        )
+
+    return str(matches[0])
+
+
+_bold_header_cache = {}
+
+
+def get_bold_header_info(boldfile: str):
+    """Return (tr, n_frames) for a boldfile, read once and cached."""
+    if boldfile not in _bold_header_cache:
+        header = nib.load(boldfile).header
+        _bold_header_cache[boldfile] = (float(header.get_zooms()[3]), int(header.get_data_shape()[-1]))
+    return _bold_header_cache[boldfile]

@@ -9,7 +9,7 @@ a real analysis. **Read the "Where this tutorial oversimplifies" section
 before citing these numbers as anything more than a pipeline demonstration.**
 
 `config-haxby.example.json`, `expected_events_haxby.example.json`, and
-`preprocess_haxby.py` in this folder are the exact files used below.
+`preprocess_haxby.sh` in this folder are the exact files used below.
 
 ## The dataset
 
@@ -31,8 +31,10 @@ fMRIPrep derivatives dataset for ds000105, so this tutorial does its own
 - Network access to `s3.amazonaws.com` (OpenNeuro's public S3 mirror -- no
   account, API key, or `aws`/`datalad` CLI required, plain `curl` works).
 - The same Python environment the rest of this repo uses (`pandas`, `numpy`,
-  `nibabel`, `nilearn`, `scikit-learn`), plus `dipy` and `scipy` for the
-  preprocessing step (`pip install dipy`).
+  `nibabel`, `nilearn`, `scikit-learn`).
+- **FSL** (tested against 6.0.7) on `PATH`/`FSLDIR` set, for the preprocessing
+  step -- see [fsl.fmrib.ox.ac.uk/fsl/docs/#/install/index](https://fsl.fmrib.ox.ac.uk/fsl/docs/#/install/index)
+  if you don't already have it.
 - ~300MB free disk space for one subject's raw functional data (preprocessing
   writes a similarly-sized copy alongside it).
 
@@ -64,31 +66,42 @@ of the file being rejected.
 ## Step 2: Basic preprocessing
 
 **This step is deliberately minimal -- see the caveats below before treating
-it as a real preprocessing pipeline.** It does exactly three things, per run:
+it as a real preprocessing pipeline.** It does exactly three things, per run,
+using FSL command-line tools:
 
-1. **Motion correction**: rigid-body register every volume to that run's own
-   first volume.
-2. **Coregistration**: rigid-body register each run's (motion-corrected)
-   first volume to run 1's first volume -- the common template -- and apply
-   that single transform to the whole run.
-3. **Linear detrending**: remove each voxel's linear trend over time.
+1. **Motion correction** (`mcflirt`): align every volume to that run's own
+   mean volume.
+2. **Coregistration** (`flirt` + `applyxfm4D`): rigid-body (6 dof) register
+   each run's motion-corrected mean volume to run 1's mean volume -- the
+   common template -- then apply that single transform to every volume of
+   the run at once.
+3. **Linear detrending** (`fsl_glm`): fit a per-voxel GLM with a design of
+   `[intercept, centered linear ramp]` and keep the residual (`--out_res`)
+   -- exactly a linear detrend, voxel by voxel, along time. This leaves
+   intensities centered on ~0 (positive and negative), so a constant `+10000`
+   offset is added back afterward -- **only inside the brain mask** (via
+   `fslmaths -mul mask`, broadcast across the 4D series) -- to keep in-brain
+   voxels strictly positive, matching the nonnegative-intensity convention
+   raw BOLD data normally has. Voxels outside the mask are left at their
+   ~0 detrended value.
 
 ```bash
-python tutorial/preprocess_haxby.py
+export FSLDIR=/path/to/fsl   # if not already set
+bash tutorial/preprocess_haxby.sh
 ```
 
-The whole script is ~50 lines (`tutorial/preprocess_haxby.py`) built on
-`dipy`'s rigid registration (`AffineRegistration` + `RigidTransform3D`) and
-`scipy.signal.detrend`, and also (re)computes the whole-brain mask -- from
-the corrected-but-not-yet-detrended data, since detrending removes the
-intensity contrast `nilearn`'s mask heuristic relies on. It writes
-`..._desc-preproc_bold.nii.gz` files plus a mask into a
+The whole script is ~90 lines (`tutorial/preprocess_haxby.sh`) built entirely
+on FSL tools, and also computes one whole-brain mask (`bet`) from the average
+of every run's coregistered (pre-detrend) mean volume -- pre-detrend since
+detrending removes the intensity contrast `bet`'s segmentation relies on,
+and post-coregistration since that's the point at which every run shares one
+grid. It writes `..._desc-preproc_bold.nii.gz` files plus a mask into a
 `tutorial/haxby-data/derivatives/` folder, structured so the pipeline can
 find them via `derivatives_root` + `bold_glob` instead of `bids_root` --
 exactly the fMRIPrep-derivatives use case those fields exist for.
 
-Runtime: ~4 minutes for all 12 runs (registration settings are deliberately
-cheap -- see caveats).
+Runtime: ~9 minutes for all 12 runs (mostly `mcflirt` and `applyxfm4D`, each
+~20s/run).
 
 ## Step 3: The config
 
@@ -99,7 +112,7 @@ ways, driven by the dataset itself rather than by choice:
   `bids_root` -- `bids_root` still finds the events.tsv files (co-located
   with the *raw* BOLD, which is otherwise unused once preprocessing has run),
   while `bold_glob` matches the `_desc-preproc_bold.nii.gz` naming
-  `preprocess_haxby.py` writes.
+  `preprocess_haxby.sh` writes.
 - **Train/test split is by `run`, not `task`.** ds000105 has one task
   (`objectviewing`) repeated across all 12 runs -- there's no separate
   localizer task to train on like the other examples in this repo use. So
@@ -231,32 +244,34 @@ spurious) signal -- it is **not** a rigorous reanalysis of this dataset, and
 the specific numbers above shouldn't be treated as a proper replication.
 Concretely, relative to how this data would normally be analyzed:
 
-- **Preprocessing is minimal, not a real pipeline.** `preprocess_haxby.py`
-  does exactly three things -- rigid motion correction, rigid coregistration
-  to run 1, linear detrending -- and nothing else:
+- **Preprocessing is minimal, not a real pipeline.** `preprocess_haxby.sh`
+  does exactly three things (via `mcflirt`/`flirt`/`applyxfm4D`/`fsl_glm`) --
+  motion correction, rigid coregistration to run 1, linear detrending (plus a
+  constant in-mask offset to keep intensities positive) -- and nothing else:
   - **No slice-timing correction.**
-  - **Rigid-body only.** Coregistration to run 1 assumes a rigid transform
-    is sufficient (no affine/nonlinear warp), and run 1 itself is an
-    arbitrary native-space reference -- not a template (e.g. MNI) -- so
+  - **Rigid-body only.** Coregistration to run 1 assumes a rigid (6 dof)
+    transform is sufficient (no affine/nonlinear warp), and run 1 itself is
+    an arbitrary native-space reference -- not a template (e.g. MNI) -- so
     results are not in any standardized space and can't be directly compared
     across subjects.
-  - **Registration settings are deliberately cheap** (single-resolution
-    pyramid, 8 iterations, 15% voxel sampling, 16 histogram bins) purely for
-    tutorial runtime (~4 min for 12 runs). A real pipeline would use a finer,
-    multi-resolution schedule and verify convergence, not assume it.
-  - **Alignment is estimated once per run** (each run's first volume to the
-    template), not per-volume after within-run correction -- if within-run
-    motion is large, the single first-volume-to-template estimate may not
-    represent the whole run well.
+  - **Default FSL settings throughout** (`mcflirt`'s and `flirt`'s defaults,
+    no custom search/cost-function tuning) purely for tutorial simplicity. A
+    real pipeline would still want to inspect registration quality (e.g. via
+    `slicesdir`) rather than assume it converged.
+  - **Coregistration is estimated once per run** (each run's mean volume,
+    post-`mcflirt`, to the template), then applied to every volume of that
+    run via a single matrix -- if within-run motion is large relative to the
+    across-run misalignment, this single per-run estimate may not represent
+    the whole run's true alignment to the template equally well throughout.
   - **No confound regression** (motion parameters, physiological noise), no
     smoothing, no high-pass filtering beyond the linear detrend (which
     removes only a straight-line trend, not slower nonlinear drift).
-- **A crude, non-anatomical mask.** The mask is computed via
-  `nilearn.masking.compute_multi_epi_mask`, an intensity-thresholding
-  heuristic over the whole imaged volume, not a grey-matter segmentation or
-  an anatomically-defined ROI. The original Haxby et al. paper's classic
-  analyses used a hand-defined ventral temporal cortex mask; this tutorial's
-  mask has no anatomical specificity.
+- **A crude, non-anatomical mask.** The mask is computed via FSL's `bet`
+  (default settings) on the across-run average mean image -- standard brain
+  extraction, but not a grey-matter segmentation or an anatomically-defined
+  ROI. The original Haxby et al. paper's classic analyses used a hand-defined
+  ventral temporal cortex mask; this tutorial's mask has no anatomical
+  specificity.
 - **Per-event, not per-block, windowing.** Each of the 12 individual 0.5s
   stimulus presentations in a block is treated as its own event (own
   `trial_index`, own ~1-volume window), rather than modeling/averaging each
