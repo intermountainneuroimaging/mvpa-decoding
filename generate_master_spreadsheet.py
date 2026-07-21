@@ -58,22 +58,43 @@ def find_events_files(bids_root: str, events_glob: str):
     return sorted(glob.glob(os.path.join(bids_root, events_glob), recursive=True))
 
 
-def find_bold_file(derivatives_root: str, entities: dict, bold_glob: str = None):
+def find_bold_file(derivatives_root: str, entities: dict, bold_glob: str = None, verbose: bool = False):
     if bold_glob:
         pattern = bold_glob.format(
             subject=entities["sub"], session=entities.get("ses", ""),
             task=entities["task"], run=entities["run"],
         )
-        matches = sorted(glob.glob(os.path.join(derivatives_root, pattern), recursive=True))
+        search_path = os.path.join(derivatives_root, pattern)
+        matches = sorted(glob.glob(search_path, recursive=True))
+        search_desc = f"bold_glob={bold_glob!r} -> formatted={pattern!r} -> searched {search_path!r}"
     else:
         tokens = [f"sub-{entities['sub']}", f"task-{entities['task']}", f"run-{entities['run']}"]
         if "ses" in entities:
             tokens.append(f"ses-{entities['ses']}")
-        matches = [
-            f for f in glob.glob(os.path.join(derivatives_root, "**", "*.nii.gz"), recursive=True)
+        all_nii = glob.glob(os.path.join(derivatives_root, "**", "*.nii.gz"), recursive=True)
+        matches = sorted(
+            f for f in all_nii
             if "bold" in os.path.basename(f) and all(t in os.path.basename(f) for t in tokens)
-        ]
-        matches = sorted(matches)
+        )
+        search_desc = (
+            f"no bold_glob set -- scanned {len(all_nii)} *.nii.gz file(s) under "
+            f"derivatives_root={derivatives_root!r} for a basename containing 'bold' + all of {tokens}"
+        )
+
+    if verbose or not matches:
+        print(f"    bold search for entities={entities}: {search_desc} -> {len(matches)} match(es)")
+
+    if not matches:
+        near = sorted(glob.glob(os.path.join(derivatives_root, "**", f"*sub-{entities['sub']}*.nii.gz"), recursive=True))
+        if near:
+            print(f"    {len(near)} file(s) under derivatives_root do contain 'sub-{entities['sub']}' (showing up to 10) -- "
+                  f"check bold_glob/naming against these:")
+            for f in near[:10]:
+                print(f"      {f}")
+        else:
+            print(f"    no files at all under derivatives_root ({derivatives_root!r}) contain 'sub-{entities['sub']}' -- "
+                  f"derivatives_root is likely wrong (or this subject truly isn't there)")
+
     return matches
 
 
@@ -85,7 +106,7 @@ def load_expected_events(path: str) -> set:
     return set(loaded)
 
 
-def process_events_file(events_path: str, derivatives_root: str, hemodynamic_lag: float, bold_glob: str = None):
+def process_events_file(events_path: str, derivatives_root: str, hemodynamic_lag: float, bold_glob: str = None, verbose: bool = False):
     entities = parse_bids_entities(events_path)
     missing = [e for e in REQUIRED_ENTITIES if e not in entities]
     if missing:
@@ -93,12 +114,14 @@ def process_events_file(events_path: str, derivatives_root: str, hemodynamic_lag
         return None
     extra_entities = {k: v for k, v in entities.items() if k not in HANDLED_ENTITIES}
 
-    bold_matches = find_bold_file(derivatives_root, entities, bold_glob)
+    bold_matches = find_bold_file(derivatives_root, entities, bold_glob, verbose=verbose)
     if len(bold_matches) == 0:
-        print(f"  (!) skipping {events_path}: no matching BOLD file found")
+        print(f"  (!) skipping {events_path}: no matching BOLD file found (see search details above)")
         return None
     if len(bold_matches) > 1:
-        print(f"  (!) skipping {events_path}: {len(bold_matches)} ambiguous BOLD matches: {bold_matches}")
+        print(f"  (!) skipping {events_path}: {len(bold_matches)} ambiguous BOLD matches:")
+        for m in bold_matches:
+            print(f"      {m}")
         return None
     bold_path = bold_matches[0]
 
@@ -160,6 +183,7 @@ def main():
     parser.add_argument("--output", default=None, help="Override event_extraction's output_file")
     parser.add_argument("--hemodynamic-lag", type=float, default=None, help="Override event_extraction's hemodynamic_lag (seconds)")
     parser.add_argument("--expected-events", default=None, help="Override event_extraction's expected_events_file")
+    parser.add_argument("--verbose", action="store_true", help="Print the BOLD-file search details for every events file, not just failures")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -179,7 +203,7 @@ def main():
 
     all_rows = []
     for events_path in events_files:
-        df = process_events_file(events_path, derivatives_root, hemodynamic_lag, bold_glob)
+        df = process_events_file(events_path, derivatives_root, hemodynamic_lag, bold_glob, verbose=args.verbose)
         if df is not None and not df.empty:
             all_rows.append(df)
 

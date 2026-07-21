@@ -228,6 +228,22 @@ independently (e.g. a separate hand-drawn ROI directory) if needed.
 `examples/config-1.example.json` is a template showing all of these fields
 filled in.
 
+#### Diagnosing a "no matching BOLD file found" error
+
+Getting `derivatives_root`/`bold_glob` right on a real dataset is fiddly, so
+this failure prints real diagnostics, not just "not found": the parsed
+`sub`/`task`/`run` entities, the exact `bold_glob` template *and* what it
+formatted to *and* the full path actually searched (or, with no `bold_glob`,
+how many `.nii.gz` files were scanned and what tokens they were checked
+against), plus -- if nothing matched -- a listing of whatever `.nii.gz` files
+under `derivatives_root` *do* contain that subject ID, so you can compare
+their real naming against your `bold_glob`. If *nothing* contains the
+subject ID at all, `derivatives_root` itself is almost certainly wrong.
+
+Pass `--verbose` to `generate_master_spreadsheet.py` to print this same
+search detail for every events file, not just the ones that fail -- useful
+to confirm resolution is doing what you expect even when it "works".
+
 ## 4. `model_conditions`
 
 Read by `validate_model_config.py`. This defines, for each of three required
