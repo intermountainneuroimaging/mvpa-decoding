@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 import nibabel as nib
 
-from mvpa_common import parse_bids_entities, compute_volume_range
+from mvpa_common import parse_bids_entities, compute_volume_range, resolve_config_root
 
 # "ses" has a dedicated output column (session) whenever present, but -- per the
 # BIDS spec -- is optional in filenames for single-session datasets, so it's not
@@ -205,7 +205,7 @@ def main():
     event_cfg = cfg["event_extraction"]
 
     bids_root = event_cfg["bids_root"]
-    derivatives_root = event_cfg.get("derivatives_root", bids_root)
+    derivatives_root = resolve_config_root(event_cfg, "derivatives_root", bids_root, "event_extraction.derivatives_root")
     hemodynamic_lag = args.hemodynamic_lag if args.hemodynamic_lag is not None else event_cfg.get("hemodynamic_lag", 0)
     output_file = args.output or event_cfg.get("output_file", "master_spreadsheet.csv")
     bold_glob = event_cfg.get("bold_glob")

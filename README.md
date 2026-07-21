@@ -110,7 +110,7 @@ Read by `generate_master_spreadsheet.py`.
 | `hemodynamic_lag` | Seconds added to every event's `onset` before converting to volume indices. Override per-run with `--hemodynamic-lag`. |
 | `output_file` | Where the resulting table is written. Override with `--output`. |
 | `expected_events_file` | *(optional)* Path to a template of expected `trial_type` values -- see below. Override with `--expected-events`. |
-| `derivatives_root` | *(optional)* Directory to search under for BOLD files, if different from `bids_root` -- e.g. a separate fMRIPrep `derivatives/` tree. Defaults to `bids_root`. See [Using preprocessed/derivative data](#using-preprocessedderivative-data-eg-fmriprep). |
+| `derivatives_root` | *(optional)* Directory to search under for BOLD files, if different from `bids_root` -- e.g. a separate fMRIPrep `derivatives/` tree. Omit the key (or set it to `null`) to inherit `bids_root`. Setting it to `""` is **not** the same as omitting it -- an explicit empty string is honored literally (resolves to the current working directory) and prints a warning, since that's almost never what's intended. See [Using preprocessed/derivative data](#using-preprocessedderivative-data-eg-fmriprep). |
 | `bold_glob` | *(optional)* Needed whenever BOLD filenames don't follow the default lookup (match on `sub`/`ses`/`task`/`run` tokens + `"bold"` in the filename) -- e.g. fMRIPrep's `desc-`/`space-` suffixes, or when `derivatives_root` returns more than one match per run. A format string resolved relative to `derivatives_root`, with `{subject}`/`{session}`/`{task}`/`{run}` placeholders -- plus **any other BIDS entity found in the events filename is available under its own raw key**, e.g. `{dir}` for a `dir-pa`/`dir-ap` entity, `{acq}` for `acq-*`, etc. No code change needed for a new entity; if it's in the filename, it's usable in `bold_glob`. |
 
 ### `expected_events.json` (optional, separate file)
@@ -399,7 +399,7 @@ about *which rows* to use (that's `model_conditions`'s job):
 | Field | Meaning |
 |---|---|
 | `desc` | Short name for this classifier variant; sanitized into the output folder name. |
-| `mask.mask_root` | *(optional)* Directory to search under for mask files. Defaults to `event_extraction.derivatives_root` (which itself defaults to `bids_root`) -- override independently if masks live somewhere else, e.g. a separate ROI directory. |
+| `mask.mask_root` | *(optional)* Directory to search under for mask files. Omit the key (or set it to `null`) to inherit `event_extraction.derivatives_root` (which itself defaults to `bids_root`) -- override independently if masks live somewhere else, e.g. a separate ROI directory. As with `derivatives_root`, an explicit `""` is honored literally (current working directory) with a warning, rather than silently inheriting the default. |
 | `mask.mask_pattern` | Path to the per-subject mask NIfTI, resolved relative to `mask_root` with `{subject}`/`{session}` filled in from whichever row is being loaded (can still contain glob wildcards -- resolved the same way as bold-file lookups). |
 | `featureSelection` | ANOVA voxel-selection threshold used before fitting the classifier. |
 | `classifier` | Any importable scikit-learn-style estimator: `name` is a dotted import path, `params` are passed straight through as kwargs. |

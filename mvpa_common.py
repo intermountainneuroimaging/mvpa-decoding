@@ -24,6 +24,22 @@ def parse_bids_entities(filename: str) -> dict:
     return {m.group("key"): m.group("val") for m in BIDS_ENTITY_RE.finditer(Path(filename).name)}
 
 
+def resolve_config_root(section: dict, key: str, default: str, label: str) -> str:
+    """Read an optional root-path override (e.g. derivatives_root, mask_root) from a config
+    section. A missing key or explicit JSON null means "inherit `default`". An explicit empty
+    string is honored literally -- it resolves to the current working directory once joined
+    with a relative pattern -- since that's almost never what's intended, it's flagged with a
+    warning rather than silently treated the same as "unset"."""
+    value = section.get(key)
+    if key not in section or value is None:
+        return default
+    if value == "":
+        print(f"(!) {label} is explicitly set to \"\" in the config -- this is interpreted "
+              f"literally as the current working directory, NOT as \"inherit {default!r}\". "
+              f"If you meant to inherit the default, remove the {key!r} key or set it to null instead.")
+    return value
+
+
 def compute_volume_range(start_time: float, stop_time: float, tr: float, n_frames: int):
     """Return [start_vol, stop_vol) covering start_time for a span of (stop_time - start_time)
     seconds, clipped to n_frames.

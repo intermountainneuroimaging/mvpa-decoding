@@ -37,7 +37,7 @@ from sklearn.model_selection import PredefinedSplit
 from collections import defaultdict
 from sklearn.metrics import confusion_matrix, roc_auc_score
 
-from mvpa_common import evaluate_query_node, compute_volume_range, resolve_window_times, build_trial_pivot_table
+from mvpa_common import evaluate_query_node, compute_volume_range, resolve_window_times, build_trial_pivot_table, resolve_config_root
 
 # grouping used for the timecourse decoding output -- the relative timepoint
 # within each event's decode window, crossed with the classification label.
@@ -825,10 +825,14 @@ if __name__ == "__main__":
     full_cfg = load_config(args.config)
 
     event_cfg = full_cfg["event_extraction"]
-    derivatives_root = event_cfg.get("derivatives_root", event_cfg["bids_root"])
+    derivatives_root = resolve_config_root(
+        event_cfg, "derivatives_root", event_cfg["bids_root"], "event_extraction.derivatives_root"
+    )
     # masks are typically co-located with preprocessed/derivative BOLD data, but can
     # be overridden independently (e.g. a separate hand-drawn ROI directory).
-    mask_root = full_cfg["model"].get("mask", {}).get("mask_root", derivatives_root)
+    mask_root = resolve_config_root(
+        full_cfg["model"].get("mask", {}), "mask_root", derivatives_root, "model.mask.mask_root"
+    )
     model_conditions = full_cfg["model_conditions"]
 
     training_conditions = model_conditions["training"]["conditions"]
