@@ -25,9 +25,19 @@ def parse_bids_entities(filename: str) -> dict:
 
 
 def compute_volume_range(start_time: float, stop_time: float, tr: float, n_frames: int):
-    """Return [start_vol, stop_vol) covering start_time..stop_time, clipped to n_frames."""
+    """Return [start_vol, stop_vol) covering start_time for a span of (stop_time - start_time)
+    seconds, clipped to n_frames.
+
+    The volume *count* is derived from the duration (rounded to the nearest whole TR), not from
+    independently flooring start_time and ceiling stop_time -- that combination systematically
+    rounds outward at both ends, so a real-world onset that doesn't fall exactly on a TR boundary
+    (i.e. almost always) inflates the window by a full extra volume even when the duration is an
+    exact multiple of TR. At least 1 volume is always kept, so a duration shorter than one TR still
+    gets the single volume it overlaps rather than rounding down to zero.
+    """
     start_vol = int(math.floor(start_time / tr))
-    stop_vol = min(int(math.ceil(stop_time / tr)), n_frames)
+    n_volumes = max(1, round((stop_time - start_time) / tr))
+    stop_vol = min(start_vol + n_volumes, n_frames)
     return start_vol, max(stop_vol, start_vol)
 
 
