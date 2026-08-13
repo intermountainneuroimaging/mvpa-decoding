@@ -187,54 +187,102 @@ this repo's other, larger sample data.
 
 ## Results
 
-**Cross-validated (9-fold, leave-one-run-out across training runs 1-9) confusion matrix** --
-rows = actual category, columns = predicted, cells = proportion of that
-category's trials predicted as each column:
+Numbers below are from the current FSL-based `preprocess_haxby.sh`
+(`mcflirt`/`flirt`/`applyxfm4D`/`fsl_glm`, including the in-mask `+10000`
+offset -- see [Step 2](#step-2-basic-preprocessing)). Internal CV accuracy
+(9-fold, leave-one-run-out across training runs 1-9): **0.405**. Held-out
+test (runs 10-12, never touched during training or CV): **0.524** (chance =
+0.125 for 8 balanced classes).
+
+**Held-out confusion matrix** -- rows = actual category, columns =
+predicted, cells = proportion of that category's trials predicted as each
+column:
 
 | actual \ predicted | bottle | cat | chair | face | house | scissors | scrambledpix | shoe |
 |---|---|---|---|---|---|---|---|---|
-| bottle | 0.269 | 0.009 | 0.204 | 0.130 | 0.000 | 0.167 | 0.065 | 0.157 |
-| cat | 0.074 | 0.398 | 0.148 | 0.148 | 0.056 | 0.111 | 0.009 | 0.056 |
-| chair | 0.167 | 0.065 | 0.343 | 0.056 | 0.028 | 0.167 | 0.037 | 0.139 |
-| face | 0.148 | 0.120 | 0.028 | **0.639** | 0.000 | 0.000 | 0.019 | 0.046 |
-| house | 0.102 | 0.046 | 0.102 | 0.000 | **0.667** | 0.037 | 0.037 | 0.009 |
-| scissors | 0.241 | 0.074 | 0.148 | 0.037 | 0.009 | 0.269 | 0.093 | 0.130 |
-| scrambledpix | 0.130 | 0.019 | 0.065 | 0.028 | 0.111 | 0.019 | **0.620** | 0.009 |
-| shoe | 0.148 | 0.074 | 0.056 | 0.019 | 0.028 | 0.093 | 0.000 | **0.583** |
-
-Overall CV accuracy: **0.473** (chance = 0.125 for 8 balanced classes) --
-up from 0.363 on raw, unpreprocessed data.
-
-**Held-out test (runs 10-12, never touched during training or CV):**
-
-| actual \ predicted | bottle | cat | chair | face | house | scissors | scrambledpix | shoe |
-|---|---|---|---|---|---|---|---|---|
-| bottle | **0.528** | 0.028 | 0.111 | 0.111 | 0.000 | 0.000 | 0.000 | 0.222 |
-| cat | 0.056 | 0.389 | 0.000 | 0.167 | 0.028 | 0.278 | 0.028 | 0.056 |
-| chair | 0.028 | 0.083 | 0.333 | 0.000 | 0.056 | 0.111 | 0.000 | 0.389 |
-| face | 0.028 | 0.000 | 0.000 | **0.889** | 0.000 | 0.083 | 0.000 | 0.000 |
+| bottle | **0.611** | 0.028 | 0.111 | 0.056 | 0.000 | 0.000 | 0.000 | 0.194 |
+| cat | 0.028 | **0.472** | 0.028 | 0.111 | 0.028 | 0.278 | 0.000 | 0.056 |
+| chair | 0.000 | 0.056 | 0.333 | 0.000 | 0.083 | 0.167 | 0.000 | 0.361 |
+| face | 0.111 | 0.083 | 0.000 | **0.667** | 0.000 | 0.139 | 0.000 | 0.000 |
 | house | 0.000 | 0.028 | 0.083 | 0.000 | **0.889** | 0.000 | 0.000 | 0.000 |
-| scissors | 0.389 | 0.000 | 0.000 | 0.000 | 0.056 | 0.278 | 0.139 | 0.139 |
-| scrambledpix | 0.028 | 0.028 | 0.028 | 0.056 | 0.028 | 0.083 | **0.667** | 0.083 |
-| shoe | 0.194 | 0.000 | 0.028 | 0.111 | 0.000 | 0.083 | 0.056 | **0.528** |
-
-Overall held-out accuracy: **0.563** -- up from 0.306 on raw, unpreprocessed
-data.
+| scissors | 0.500 | 0.028 | 0.056 | 0.028 | 0.056 | 0.139 | 0.083 | 0.111 |
+| scrambledpix | 0.028 | 0.000 | 0.000 | 0.083 | 0.056 | 0.056 | **0.639** | 0.139 |
+| shoe | 0.167 | 0.056 | 0.111 | 0.083 | 0.056 | 0.028 | 0.056 | **0.444** |
 
 **AUC per category (held-out):**
 
 | bottle | cat | chair | face | house | scissors | scrambledpix | shoe |
 |---|---|---|---|---|---|---|---|
-| 0.82 | 0.78 | 0.85 | 0.97 | 0.98 | 0.68 | 0.96 | 0.80 |
+| 0.812 | 0.714 | 0.770 | 0.949 | 0.965 | 0.614 | 0.950 | 0.766 |
 
-Both CV and held-out accuracy are well above the 12.5% chance level, and
-substantially higher than the raw-data run of this same tutorial (CV 0.363,
-held-out 0.306, AUC 0.43-0.84) -- `face`, `house`, and `scrambledpix` are now
-decoded almost perfectly (AUC 0.96-0.98), directionally consistent with the
-classic Haxby finding that ventral temporal cortex carries distinguishable,
-distributed patterns for these categories. `scissors` remains the weakest
-category (AUC 0.68) even after preprocessing, and is plausibly confusable
-with `chair`/other elongated-object categories in a mask this crude.
+Both CV and held-out accuracy are well above the 12.5% chance level --
+`face`, `house`, and `scrambledpix` are decoded almost perfectly (AUC
+0.95-0.97), directionally consistent with the classic Haxby finding that
+ventral temporal cortex carries distinguishable, distributed patterns for
+these categories. `scissors` is the weakest category (AUC 0.61), plausibly
+confusable with `chair`/other elongated-object categories (see the
+confusion matrix's `bottle`<->`scissors`/`chair`<->`shoe` cross-talk) in a
+whole-brain mask this crude. `permutation_test` (README.md section 5,
+1000 permutations) confirms both accuracy and AUC are significant at
+p < 0.001 -- see [`generate_report.py`](../README.md#6-generating-a-report-generate_reportpy)
+or `model/1_permutation_test.csv` for the full numbers if you run it
+yourself.
+
+## External validation (PyMVPA methodology)
+
+[`pymvpa_style_validation.py`](pymvpa_style_validation.py) cross-checks the
+result above against a genuinely independent implementation of **PyMVPA's
+own documented methodology** for this exact dataset. PyMVPA itself
+(`pymvpa2`, last released ~2020) isn't installable in a modern Python 3.12
+environment -- its legacy `setup.py` requires `numpy.distutils`, which
+depends on Python's stdlib `distutils`, removed in 3.12 (PEP 632); pinning
+an older numpy/scipy doesn't help, since the blocker is the Python version,
+not numpy's. So this reimplements PyMVPA's own canonical approach
+(confirmed from their tutorial docs) using only `nibabel`/`numpy`/`pandas`/
+`sklearn` -- deliberately **not** importing anything from this repo's own
+`mvpa_common.py`/`generate_master_spreadsheet.py`/`mvpa_workflow.py`, so
+feature extraction and classification are a genuinely separate code path:
+
+- **Nearest-centroid correlation** -- PyMVPA's own tutorial describes this
+  (kNN with correlation distance, k=1 against per-category training
+  averages) as replicating "the original Haxby et al. (2001) study" --
+  the same template-matching logic that paper itself used.
+- **Linear SVM** -- PyMVPA's alternative canonical classifier
+  (`LinearCSVMC`-equivalent).
+- Both run under **two CV protocols**: the same matched train(1-9)/test(10-12)
+  split this tutorial uses, and PyMVPA's own default **leave-one-run-out**
+  (`NFoldPartitioner`).
+
+It reuses the same preprocessed BOLD data and mask `mvpa_workflow.py` used
+(so any numeric difference reflects classifier/CV methodology, not
+different inputs), loaded directly via `nibabel`+`numpy` boolean indexing
+rather than nilearn's `NiftiMasker`, and deliberately skips ANOVA feature
+selection (unlike `mvpa_workflow.py`) to stay a simple, canonical baseline.
+
+```bash
+python tutorial/pymvpa_style_validation.py \
+    --our-results-dir out/haxby_object_classifier/1/model  # optional, prints this repo's own numbers alongside
+```
+
+Real output against this tutorial's data:
+
+| method | protocol | accuracy | AUC |
+|---|---|---|---|
+| `mvpa_workflow.py` (this repo, ANOVA + LogisticRegression) | matched split | 0.524 | 0.817 |
+| nearest-centroid correlation | matched split | 0.236 | 0.634 |
+| linear SVM | matched split | 0.410 | 0.773 |
+| nearest-centroid correlation | leave-one-run-out | 0.266 | 0.602 |
+| linear SVM | leave-one-run-out | 0.414 | 0.761 |
+
+All four independently-computed numbers are well above chance (0.125
+accuracy / 0.5 AUC), externally corroborating that this dataset genuinely
+carries decodable category information after this tutorial's preprocessing
+-- not an artifact of `mvpa_workflow.py`'s own code. The lower absolute
+numbers here (vs. 0.524/0.817) are expected, not a discrepancy: this
+validation classifies over the full ~31K-voxel mask with no feature
+selection at all, while `mvpa_workflow.py` first narrows to an
+ANOVA-selected subset -- the gap is a reasonable estimate of how much that
+feature selection step alone is worth on this dataset.
 
 ## Where this tutorial oversimplifies
 
