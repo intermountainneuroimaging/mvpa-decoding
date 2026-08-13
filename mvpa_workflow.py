@@ -14,13 +14,11 @@ Works for any number of training/testing conditions (2 or more): class lists
 are always derived from what the classifier actually learned (clf.classes_),
 not from what happens to appear in a given fold's held-out data.
 
-Optional model.test_decode_cv (README.md section 5) replaces the single
-train-once/test-once evaluation with a proper k-fold procedure -- repeatedly
-holding out a group of runs, training on the rest, testing/decoding only on
-the held-out group, then aggregating -- via one of three strategies:
-"per_run" (leave-one-run-out), "group_kfold" (n_splits over runs), or
-"explicit_groups" (user-specified run lists). Omit it to keep today's
-single-model behavior.
+This script is dedicated to the independent-train/independent-test case --
+training and testing come from separate model_conditions sections and may
+be entirely different tasks/data. A separate k-fold workflow (same-data,
+split-by-run training/testing) is planned as its own script with its own
+config format, not a mode switch grafted onto this one.
 
 Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     <subject>_trial_pivot.csv           -- sanity check, pre-model_conditions
@@ -30,9 +28,6 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     model/<subject>_impa_native.nii.gz          -- final importance map
     decoding/<subject>_decoding_results.csv         -- raw, one row per decoded TR
     decoding/<subject>_summary_decoding_results.csv -- averaged per (window_index, regressor_label)
-If test_decode_cv is set, matching model/decoding/*_fold{N}_* files are also
-written per fold (see generate_report.py, which uses their presence to render
-fold-variability panels).
 
 Usage:
     python mvpa_workflow.py --subject 4057 --config examples/config-2.example.json \\
@@ -43,10 +38,7 @@ import os
 import argparse
 import numpy as np
 import pandas as pd
-import glob
-import nibabel as nib
 from pathlib import Path
-from types import SimpleNamespace
 import json
 import importlib
 
@@ -59,16 +51,13 @@ except Exception:
 from sklearn.preprocessing import StandardScaler
 
 # classification
-from sklearn.linear_model import LogisticRegression
-from sklearn.svm import SVC
-from sklearn.feature_selection import f_classif
-from sklearn.metrics import accuracy_score, roc_curve, auc
-from sklearn.model_selection import PredefinedSplit
-from collections import defaultdict
-from sklearn.metrics import confusion_matrix, roc_auc_score
+from sklearn.feature_selection import f_classif, GenericUnivariateSelect
+from sklearn.metrics import accuracy_score, roc_auc_score
+from sklearn.model_selection import PredefinedSplit, permutation_test_score
+from sklearn.pipeline import Pipeline
 
 from mvpa_common import (
-    evaluate_query_node, compute_volume_range, resolve_window_times, build_trial_pivot_table,
+    compute_volume_range, resolve_window_times, build_trial_pivot_table,
     resolve_config_root, quick_safe, label_rows, get_single_match, get_bold_header_info,
 )
 
@@ -203,32 +192,6 @@ def decision_evidence(clf, rawdata):
     return e / e.sum(axis=1, keepdims=True)
 
 
-def stack_patterns(df):
-    return np.vstack(df["patterns"].values).reshape(
-        df.shape[0],
-        len(df.patterns.iloc[0])
-    )
-
-
-def linear_weight_map(clf, n_voxels, feat_mask=None, class_index=0):
-    """
-    Returns full-length voxel weight vector (n_voxels,).
-    If feat_mask is provided (boolean mask of selected voxels),
-    fills unselected voxels with 0.
-    """
-    # For binary LR/SVM: coef_ shape is (1, n_features)
-    w = np.ravel(clf.coef_)  # (n_features_selected,) or (n_features_full,)
-
-    if feat_mask is None:
-        if w.size != n_voxels:
-            raise ValueError("n_voxels doesn't match coef_ length; provide feat_mask.")
-        return w
-
-    full = np.zeros(n_voxels, dtype=float)
-    full[feat_mask] = w
-    return full
-
-
 class ShapeError(Exception):
     pass
 
@@ -236,7 +199,7 @@ class ShapeError(Exception):
 _masker_cache = {}
 
 
-def load_images_and_mask(labeled_df: pd.DataFrame):
+def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str, mask_root: str):
     """Load BOLD patterns for every (subject, session, boldfile) group in
     labeled_df, z-score, and slice to each row's volume_of_interest."""
 
@@ -254,7 +217,7 @@ def load_images_and_mask(labeled_df: pd.DataFrame):
         mask_key = (subject, session)
 
         if mask_key not in _masker_cache:
-            mask_pattern = cfg.mask.mask_pattern.format(subject=subject, session=session)
+            mask_pattern = mask_pattern_template.format(subject=subject, session=session)
             mask_file = get_single_match(os.path.join(mask_root, mask_pattern))
             print(f"Using Mask File: {mask_file}")
             bold_tr, _ = get_bold_header_info(boldfile)
@@ -385,35 +348,7 @@ def load_config(cfg_path: str) -> dict:
         raise SystemExit("config missing required 'model_conditions' section")
 
     full_cfg["model"] = merge_with_defaults(full_cfg.get("model", {}), default_model_config())
-    validate_test_decode_cv_config(full_cfg["model"].get("test_decode_cv"))
     return full_cfg
-
-
-def validate_test_decode_cv_config(test_decode_cv_cfg) -> None:
-    """Cheap, config-only validation of model.test_decode_cv -- run at config-load time
-    so a typo fails fast, before any (possibly slow) BOLD loading happens. The
-    data-dependent checks (do the referenced runs actually exist for this subject) still
-    happen later, in resolve_test_decode_folds, once the subject's data is available."""
-    if test_decode_cv_cfg is None:
-        return
-    strategy = test_decode_cv_cfg.get("strategy")
-    if strategy not in ("per_run", "group_kfold", "explicit_groups"):
-        raise SystemExit(
-            f"model.test_decode_cv.strategy must be one of 'per_run'/'group_kfold'/'explicit_groups', got {strategy!r}"
-        )
-    if strategy == "group_kfold" and not isinstance(test_decode_cv_cfg.get("n_splits"), int):
-        raise SystemExit("model.test_decode_cv.strategy='group_kfold' requires an integer 'n_splits'")
-    if strategy == "explicit_groups" and not isinstance(test_decode_cv_cfg.get("groups"), list):
-        raise SystemExit("model.test_decode_cv.strategy='explicit_groups' requires a 'groups' list")
-
-
-def dict_to_namespace(d):
-    if isinstance(d, dict):
-        return SimpleNamespace(**{k: dict_to_namespace(v) for k, v in d.items()})
-    elif isinstance(d, list):
-        return [dict_to_namespace(x) for x in d]
-    else:
-        return d
 
 
 def save_model_results(output_pattern, results, categories):
@@ -500,38 +435,56 @@ def average_fold_results(fold_results: list) -> dict:
     return mean_results
 
 
-# cross_validation
-def model_classification(training_data, training_labels):
+def resolve_feature_threshold(training_data, training_labels, feat_p: float) -> float:
+    """The ANOVA p-value cutoff for feature selection, widened from feat_p
+    until it selects at least 5 voxels. Shared by model_classification() and
+    permutation_significance() so the permutation test's null-distribution
+    pipelines use the exact same selection rule the real model did, not a
+    different unwidened threshold."""
+    _, xP = f_classif(training_data, training_labels)
+    xP = np.nan_to_num(xP, nan=1.0)
+    thr = feat_p
+    while np.sum(xP < thr) < 5 and thr <= 1.0:
+        thr *= 1.1
+    return thr
 
-    "return feature selection idx and model object"
+
+def build_classifier_pipeline(thr: float, classifier_name: str, classifier_params: dict) -> Pipeline:
+    """An unfit Pipeline(ANOVA feature selection, classifier) using the given
+    p-value threshold. GenericUnivariateSelect(mode="fpr", param=thr) selects
+    features with p < thr -- the built-in sklearn equivalent of the manual
+    xP < thr mask this replaced (verified to select identical voxels,
+    including NaN p-value handling for zero-variance voxels)."""
+    Cls = import_from_path(classifier_name)
+    return Pipeline([
+        ("feature_selection", GenericUnivariateSelect(score_func=f_classif, mode="fpr", param=thr)),
+        ("classifier", Cls(**classifier_params)),
+    ])
+
+
+# cross_validation
+def model_classification(training_data, training_labels, feat_p: float, classifier_name: str, classifier_params: dict):
+    """Fit an ANOVA-feature-selection + classifier Pipeline. Bundling both
+    steps into one estimator -- rather than externally tracking a voxel
+    boolean mask, as before -- means the whole thing can be refit as a
+    single unit, which permutation_significance() below needs (it refits
+    fresh on every permutation's shuffled training labels)."""
 
     print("Training classifier...")
 
-    xF, xP = f_classif(training_data, training_labels)
-    xF = np.nan_to_num(xF)
-    xP[np.isnan(xP)] = 1
-    thr = cfg.featureSelection.feat_p
-    # ensure at least 5 voxels are selected for feature selection
-    while np.sum(xP < thr) < 5 and thr <= 1.0:
-        thr *= 1.1
+    thr = resolve_feature_threshold(training_data, training_labels, feat_p)
+    pipe = build_classifier_pipeline(thr, classifier_name, classifier_params)
+    pipe.fit(training_data, training_labels)
 
-    xfeat = xP < thr
-    n_selvoxs = np.sum(xfeat)
-
-    training_data_xfeat = training_data[:, xfeat]
-
-    # maximually flexible classifier
-    Cls = import_from_path(cfg.classifier.name)
-    classifier = Cls(**cfg.classifier.params.__dict__)
-
-    clf = classifier.fit(training_data_xfeat, training_labels)
-
-    return clf, xfeat
+    return pipe
 
 
-def model_performance(clf, xfeat, testing_data, testing_labels):
+def model_performance(pipe, testing_data, testing_labels):
 
     print("Testing model performance...")
+
+    clf = pipe.named_steps["classifier"]
+    xfeat = pipe.named_steps["feature_selection"].get_support()
 
     # classes the classifier was actually trained on -- not np.unique(testing_labels),
     # which would drift shape-to-shape if a given fold's held-out data happens to be
@@ -539,12 +492,12 @@ def model_performance(clf, xfeat, testing_data, testing_labels):
     xclass = clf.classes_
     n_class = len(xclass)
 
-    # prep testing data with feature selection / mask - keep info to recover original size
+    # keep original (whole-brain) feature count to size impa_full below
     n_samples, n_features = testing_data.shape
-    testing_data_xfeat = testing_data[:, xfeat]
 
-    # apply model
-    xpred = clf.predict(testing_data_xfeat)
+    # apply model -- the pipeline applies feature selection internally, so the
+    # full (unsliced) testing_data goes in
+    xpred = pipe.predict(testing_data)
 
     # total model accuracy
     ttl_score = accuracy_score(testing_labels, xpred)
@@ -558,7 +511,7 @@ def model_performance(clf, xfeat, testing_data, testing_labels):
         print(impa.shape)
 
         # evidence: sigmoid on decision function → class-1 prob; other is 1-p
-        d = clf.decision_function(testing_data_xfeat)
+        d = pipe.decision_function(testing_data)
         p1 = 1.0 / (1.0 + np.exp(-d))
         p0 = 1.0 - p1
         xevi = np.vstack([p0, p1]).T
@@ -569,7 +522,7 @@ def model_performance(clf, xfeat, testing_data, testing_labels):
         impa = clf.coef_
 
         # evidence: multinomial OV(A)R decision_function → pass through sigmoid per class
-        d = clf.decision_function(testing_data_xfeat)  # shape: (n, n_class)
+        d = pipe.decision_function(testing_data)  # shape: (n, n_class)
         xevi = 1.0 / (1.0 + np.exp(-d))
 
     # store importance values in original dataformat
@@ -615,8 +568,53 @@ def model_performance(clf, xfeat, testing_data, testing_labels):
     return xout, impa_full
 
 
+def permutation_significance(training_data, training_labels, testing_data, testing_labels, n_permutations, random_state,
+                              feat_p: float, classifier_name: str, classifier_params: dict):
+    """Real-vs-null significance for the held-out test evaluation, via
+    sklearn.model_selection.permutation_test_score (the tool nilearn's own
+    decoding docs recommend for exactly this fMRI-classification case).
 
-def timecourse_decoding(clf, xfeat, timecourse_data, timecourse_labels, timecourse_df, regressor_categories):
+    A PredefinedSplit with test_fold=-1 for every training row and =0 for
+    every testing row encodes today's fixed train/test partition as a single
+    CV fold. permutation_test_score then reshuffles the combined label
+    vector and reruns that same fit/score structure -- including feature
+    selection, since the Pipeline from model_classification() is refit fresh
+    each round -- which is the textbook-correct way to build a null
+    distribution for a fixed train/test split (not a naive shuffle done
+    outside the fit/CV structure, which would be optimistic).
+
+    One permutation_test_score call per metric (accuracy, roc_auc_ovr --
+    the same one-vs-rest convention model_performance()'s own AUC already
+    uses, just via sklearn's built-in scorer instead of a second hand-rolled
+    computation)."""
+    X = np.vstack([training_data, testing_data])
+    y = np.concatenate([training_labels, testing_labels])
+    test_fold = np.concatenate([
+        np.full(len(training_labels), -1),
+        np.zeros(len(testing_labels)),
+    ])
+    cv = PredefinedSplit(test_fold)
+
+    # same widened threshold the real model fit used (see resolve_feature_threshold),
+    # resolved once from the real (unpermuted) training data and held fixed as a
+    # pipeline hyperparameter across every permutation round
+    thr = resolve_feature_threshold(training_data, training_labels, feat_p)
+
+    rows = []
+    for metric in ("accuracy", "roc_auc_ovr"):
+        pipe = build_classifier_pipeline(thr, classifier_name, classifier_params)
+        score, _, p_value = permutation_test_score(
+            pipe, X, y, cv=cv, scoring=metric,
+            n_permutations=n_permutations, random_state=random_state, n_jobs=-1,
+        )
+        print(f"  permutation test [{metric}]: real={score:.4f}, p={p_value:.4g} ({n_permutations} permutations)")
+        rows.append({"metric": metric, "real_score": score, "p_value": p_value, "n_permutations": n_permutations})
+
+    return pd.DataFrame(rows)
+
+
+def timecourse_decoding(pipe, timecourse_data, timecourse_labels, timecourse_df, regressor_categories,
+                         feat_p: float, subject_id: str, model_descr: str):
     """Predict the trained classifier on every already-recomputed timecourse-decoding
     volume. Returns (raw, summary):
       - raw: one row per volume actually decoded, with its own prediction and
@@ -624,14 +622,12 @@ def timecourse_decoding(clf, xfeat, timecourse_data, timecourse_labels, timecour
       - summary: raw grouped by (window_index, regressor_label) and averaged across
         every trial sharing that group -- the confusion-style timecourse view."""
 
-    # apply feature selection
-    timecourse_data_xfeat = timecourse_data[:, xfeat]
-
-    predictions = clf.predict(timecourse_data_xfeat)
+    # pipeline applies feature selection internally -- full (unsliced) data goes in
+    predictions = pipe.predict(timecourse_data)
     global_accuracy = accuracy_score(timecourse_labels, predictions)
     print(f"Global accuracy: {global_accuracy:.4f}")
 
-    evidence = decision_evidence(clf, timecourse_data_xfeat)
+    evidence = decision_evidence(pipe, timecourse_data)
 
     code_to_label = {i + 1: cat for i, cat in enumerate(regressor_categories)}
 
@@ -641,27 +637,26 @@ def timecourse_decoding(clf, xfeat, timecourse_data, timecourse_labels, timecour
     for i, cat in enumerate(regressor_categories):
         raw[f"evidence_{cat}"] = evidence[:, i]
 
-    raw["threshold_p"] = cfg.featureSelection.feat_p
-    raw["selected_voxels"] = timecourse_data_xfeat.shape[1]
+    n_selected = int(pipe.named_steps["feature_selection"].get_support().sum())
+    raw["threshold_p"] = feat_p
+    raw["selected_voxels"] = n_selected
     raw["whole_voxels"] = timecourse_data.shape[1]
-    raw["feature_percent"] = 100 * timecourse_data_xfeat.shape[1] / timecourse_data.shape[1]
+    raw["feature_percent"] = 100 * n_selected / timecourse_data.shape[1]
 
     evidence_cols = [c for c in raw.columns if c.startswith("evidence")]
     other_cols = [c for c in raw.columns if not c.startswith("evidence")]
     raw = raw[other_cols + evidence_cols]
     raw.insert(1, "model_descr", model_descr)  # "subject" is already a column, from timecourse_df's own BIDS entity
 
-    summary = summarize_decoding(raw, regressor_categories)
+    summary = summarize_decoding(raw, regressor_categories, subject_id, model_descr)
 
     return raw, summary
 
 
-def summarize_decoding(raw: pd.DataFrame, regressor_categories: list) -> pd.DataFrame:
+def summarize_decoding(raw: pd.DataFrame, regressor_categories: list, subject_id: str, model_descr: str) -> pd.DataFrame:
     """Collapse a raw (one-row-per-decoded-TR) decoding table down to one row per
     (window_index, regressor_label), averaging Accuracy/evidence across every trial
-    sharing that group -- used both for a single call's own summary and, in
-    test_decode_cv mode, to summarize the full pool of raw rows concatenated across
-    every fold (a proper trial-count-weighted mean, not an average of per-fold means)."""
+    sharing that group."""
     rows = []
     for (window_index, regressor_label), group in raw.groupby(TIMECOURSE_GROUPING, sort=False):
         row = {
@@ -686,176 +681,43 @@ def summarize_decoding(raw: pd.DataFrame, regressor_categories: list) -> pd.Data
     return summary[other_cols + evidence_cols]
 
 
-def resolve_test_decode_folds(test_decode_cv_cfg: dict, testing_df: pd.DataFrame, timecourse_instr: pd.DataFrame) -> list:
-    """Return a list of held-out run-id groups implementing test_decode_cv_cfg's
-    strategy. Folds are built only over runs that actually appear in this subject's
-    testing/timecourse_decoding-eligible data -- not the whole master_spreadsheet --
-    so every fold corresponds to data that will actually be evaluated."""
-    strategy = test_decode_cv_cfg.get("strategy")
-    universe_runs = sorted(set(testing_df["run"]) | set(timecourse_instr["run"]))
-
-    if not universe_runs:
-        raise SystemExit(
-            "test_decode_cv: no runs found in testing/timecourse_decoding-eligible data for this "
-            "subject -- nothing to fold over."
-        )
-
-    if strategy == "per_run":
-        return [[r] for r in universe_runs]
-
-    if strategy == "group_kfold":
-        n_splits = test_decode_cv_cfg.get("n_splits")
-        if not isinstance(n_splits, int) or isinstance(n_splits, bool) or n_splits < 2:
-            raise SystemExit(
-                f"test_decode_cv.strategy='group_kfold' requires an integer 'n_splits' >= 2, got {n_splits!r}"
-            )
-        if n_splits > len(universe_runs):
-            raise SystemExit(
-                f"test_decode_cv.n_splits={n_splits} exceeds the number of distinct runs available "
-                f"({len(universe_runs)}: {universe_runs})"
-            )
-        return [list(g) for g in np.array_split(np.array(universe_runs), n_splits)]
-
-    if strategy == "explicit_groups":
-        groups = test_decode_cv_cfg.get("groups")
-        if not isinstance(groups, list) or not groups or not all(isinstance(g, list) and g for g in groups):
-            raise SystemExit(
-                "test_decode_cv.strategy='explicit_groups' requires a non-empty 'groups' list of "
-                "non-empty run-id lists"
-            )
-        covered = {r for g in groups for r in g}
-        uncovered = [r for r in universe_runs if r not in covered]
-        if uncovered:
-            print(f"(!) test_decode_cv.groups doesn't cover run(s) {uncovered} that appear in this "
-                  f"subject's testing/timecourse_decoding data -- those rows will never be evaluated in any fold")
-        unknown = sorted({r for g in groups for r in g if r not in universe_runs})
-        if unknown:
-            print(f"(!) test_decode_cv.groups references run(s) {unknown} that don't appear in this "
-                  f"subject's testing/timecourse_decoding-eligible data -- they'll produce empty folds")
-        return groups
-
-    raise SystemExit(
-        f"test_decode_cv.strategy must be one of 'per_run'/'group_kfold'/'explicit_groups', got {strategy!r}"
-    )
-
-
-def run_test_decode_kfold(test_decode_cv_cfg, masker,
-                          training_df, training_data, training_labels,
-                          testing_df, testing_data, testing_labels,
-                          timecourse_instr, timecourse_data, timecourse_labels):
-    """Repeatedly hold out a group of runs: train on the rest, test+decode only on the
-    held-out group, then aggregate back into the same shapes the single full-model path
-    (model_classification -> model_performance -> timecourse_decoding once) produces.
-    Per-fold outputs are also saved -- for transparency, and so generate_report.py can
-    detect and render fold-variability panels. Returns (importance_map, model_xout,
-    raw_decoding, summary_decoding), matching what the non-kfold path returns."""
-
-    fold_groups = resolve_test_decode_folds(test_decode_cv_cfg, testing_df, timecourse_instr)
-    print(f"test_decode_cv: {len(fold_groups)} fold(s), strategy={test_decode_cv_cfg.get('strategy')!r}")
-
-    folds_manifest = {}
-    model_results, model_impas, decoding_raws = [], [], []
-
-    for fold_id, held_out_runs in enumerate(fold_groups, start=1):
-        folds_manifest[fold_id] = [int(r) for r in held_out_runs]
-
-        train_mask = ~training_df["run"].isin(held_out_runs)
-        test_mask = testing_df["run"].isin(held_out_runs)
-        tc_mask = timecourse_instr["run"].isin(held_out_runs)
-
-        if not test_mask.any() and not tc_mask.any():
-            print(f"  (!) fold {fold_id} (held-out runs {held_out_runs}): no testing or "
-                  f"timecourse_decoding rows -- skipping")
-            continue
-        if not train_mask.any():
-            print(f"  (!) fold {fold_id} (held-out runs {held_out_runs}): no training rows remain "
-                  f"once these runs are excluded -- skipping")
-            continue
-
-        print(f"  Fold {fold_id}: held-out runs {held_out_runs} "
-              f"({int(train_mask.sum())} train / {int(test_mask.sum())} test / {int(tc_mask.sum())} timecourse rows)")
-
-        xclf, xfeat = model_classification(
-            training_data[train_mask.to_numpy()], training_labels[train_mask.to_numpy()]
-        )
-
-        if test_mask.any():
-            xout, impa = model_performance(
-                xclf, xfeat, testing_data[test_mask.to_numpy()], testing_labels[test_mask.to_numpy()]
-            )
-            output_pattern = os.path.join(
-                analysis_output_dir, model_descr, subject_id, "model",
-                f"{subject_id}_fold{fold_id}" + "_model_results_{metric}.csv"
-            )
-            save_model_results(output_pattern, xout, regressor_categories)
-            model_results.append(xout)
-            model_impas.append(impa)
-
-            fold_impa_file = os.path.join(
-                analysis_output_dir, model_descr, subject_id, "model",
-                f"{subject_id}_fold{fold_id}_impa_native.nii.gz"
-            )
-            masker.inverse_transform(impa).to_filename(fold_impa_file)
-        else:
-            print(f"  (!) fold {fold_id}: no held-out testing rows -- skipping model_performance for this fold")
-
-        if tc_mask.any():
-            fold_raw, fold_summary = timecourse_decoding(
-                xclf, xfeat,
-                timecourse_data[tc_mask.to_numpy()], timecourse_labels[tc_mask.to_numpy()],
-                timecourse_instr.loc[tc_mask], regressor_categories,
-            )
-            fold_raw.insert(2, "fold", fold_id)
-            fold_summary.insert(2, "fold", fold_id)
-
-            fold_decoding_file = os.path.join(
-                analysis_output_dir, model_descr, subject_id, "decoding",
-                f"{subject_id}_fold{fold_id}_decoding_results.csv"
-            )
-            fold_summary_file = os.path.join(
-                analysis_output_dir, model_descr, subject_id, "decoding",
-                f"{subject_id}_fold{fold_id}_summary_decoding_results.csv"
-            )
-            Path(os.path.dirname(fold_decoding_file)).mkdir(parents=True, exist_ok=True)
-            fold_raw.to_csv(fold_decoding_file, index=False)
-            fold_summary.to_csv(fold_summary_file, index=False)
-            decoding_raws.append(fold_raw)
-        else:
-            print(f"  (!) fold {fold_id}: no held-out timecourse_decoding rows -- skipping decoding for this fold")
-
-    if not model_results:
-        raise SystemExit(
-            "test_decode_cv: every fold was skipped -- no held-out testing rows were ever available. "
-            "Check your fold strategy against the runs actually present in testing_conditions."
-        )
-
-    manifest_file = os.path.join(
-        analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}_test_decode_folds.json"
-    )
-    Path(os.path.dirname(manifest_file)).mkdir(parents=True, exist_ok=True)
-    with open(manifest_file, "w") as f:
-        json.dump(folds_manifest, f, indent=2)
-
-    aggregated_model_xout = average_fold_results(model_results)
-    aggregated_impa = np.mean(np.stack(model_impas, axis=0), axis=0)
-
-    # Raw rows from different folds are genuinely disjoint trials (folds partition
-    # runs), so the aggregate raw table is just a concatenation -- no averaging needed.
-    # The aggregate summary is then computed fresh from that pooled raw table, which
-    # weights every trial equally regardless of which fold it came from (rather than
-    # averaging each fold's own summary, which would implicitly weight folds equally
-    # even if they held out different numbers of trials).
-    aggregated_raw = pd.concat(decoding_raws, ignore_index=True) if decoding_raws else pd.DataFrame()
-    aggregated_summary = summarize_decoding(aggregated_raw, regressor_categories) if not aggregated_raw.empty else pd.DataFrame()
-
-    return aggregated_impa, aggregated_model_xout, aggregated_raw, aggregated_summary
-
-
 # =====================================================
 # Main Workflow
 # =====================================================
 
-def main():
+def main(args):
+    subject_id = args.subject
+    analysis_output_dir = args.analysis_output_dir
+    master_spreadsheet_file = args.master_spreadsheet
+
+    full_cfg = load_config(args.config)
+
+    event_cfg = full_cfg["event_extraction"]
+    derivatives_root = resolve_config_root(
+        event_cfg, "derivatives_root", event_cfg["bids_root"], "event_extraction.derivatives_root"
+    )
+    # masks are typically co-located with preprocessed/derivative BOLD data, but can
+    # be overridden independently (e.g. a separate hand-drawn ROI directory).
+    mask_root = resolve_config_root(
+        full_cfg["model"].get("mask", {}), "mask_root", derivatives_root, "model.mask.mask_root"
+    )
+    model_conditions = full_cfg["model_conditions"]
+
+    training_conditions = model_conditions["training"]["conditions"]
+    testing_conditions = model_conditions["testing"]["conditions"]
+    timecourse_conditions = model_conditions["timecourse_decoding"]["conditions"]
+    timecourse_window = model_conditions["timecourse_decoding"]["window"]
+
+    # class label order shared across training/testing/timecourse regressor codes
+    regressor_categories = list(training_conditions.keys())
+
+    # model settings (mask/featureSelection/classifier/cv/desc)
+    model_cfg = full_cfg["model"]
+    model_descr = quick_safe(model_cfg["desc"])
+    mask_pattern_template = model_cfg["mask"]["mask_pattern"]
+    feat_p = model_cfg["featureSelection"]["feat_p"]
+    classifier_name = model_cfg["classifier"]["name"]
+    classifier_params = model_cfg["classifier"]["params"]
 
     print(f"Subject: {subject_id}")
 
@@ -897,9 +759,9 @@ def main():
     timecourse_labeled = apply_regressor_codes(label_rows(subject_df, timecourse_conditions), regressor_categories)
     timecourse_instr = build_timecourse_instructions(timecourse_labeled, timecourse_window)
 
-    training_data, training_labels, training_ids, masker = load_images_and_mask(training_df)
-    testing_data, testing_labels, testing_ids, masker = load_images_and_mask(testing_df)
-    timecourse_data, timecourse_labels, timecourse_ids, masker = load_images_and_mask(timecourse_instr)
+    training_data, training_labels, training_ids, masker = load_images_and_mask(training_df, mask_pattern_template, mask_root)
+    testing_data, testing_labels, testing_ids, masker = load_images_and_mask(testing_df, mask_pattern_template, mask_root)
+    timecourse_data, timecourse_labels, timecourse_ids, masker = load_images_and_mask(timecourse_instr, mask_pattern_template, mask_root)
 
     training_df = training_df.loc[training_ids, :]
     testing_df = testing_df.loc[testing_ids, :]
@@ -922,7 +784,6 @@ def main():
     # lets process model k-fold times -- use "run" to generate folds
     ps = PredefinedSplit(training_df_balanced["run"])
     folds = list(ps.split())
-    n_folds = len(folds)
 
     ii_results = []
     ii_impa = []
@@ -934,13 +795,13 @@ def main():
         xregs = training_labels[training_df_balanced.loc[train_idx, "index"].values]
         xpat  = training_data[training_df_balanced.loc[train_idx, "index"].values, :]
 
-        xclf, xfeat = model_classification(xpat, xregs)
+        xclf = model_classification(xpat, xregs, feat_p, classifier_name, classifier_params)
 
         # test model performance on hold out data
         holdout_xregs = training_labels[training_df_balanced.loc[test_idx, "index"].values]
         holdout_xpat  = training_data[training_df_balanced.loc[test_idx, "index"].values, :]
 
-        xout, impa = model_performance(xclf, xfeat, holdout_xpat, holdout_xregs)
+        xout, impa = model_performance(xclf, holdout_xpat, holdout_xregs)
 
         # store fold model performance and importance map (impa)
         ii_results.append(xout)
@@ -959,44 +820,53 @@ def main():
     # Model Classification / Testing / Time Course Decoding
     # -------------------------------------------------
 
-    test_decode_cv_cfg = full_cfg["model"].get("test_decode_cv")
+    print("Training classifier...")
 
-    if test_decode_cv_cfg:
-        print(f"Training + testing + decoding via test_decode_cv...")
-        importance_map, xout, raw_decoding, summary_decoding = run_test_decode_kfold(
-            test_decode_cv_cfg, masker,
-            training_df, training_data, training_labels,
-            testing_df, testing_data, testing_labels,
-            timecourse_instr, timecourse_data, timecourse_labels,
-        )
-    else:
-        print("Training classifier...")
+    # train on full "training" set now
+    xclf = model_classification(training_data, training_labels, feat_p, classifier_name, classifier_params)
 
-        # train on full "training" set now
-        xclf, xfeat = model_classification(training_data, training_labels)
+    # record final model performance
+    xout, importance_map = model_performance(xclf, testing_data, testing_labels)
 
-        # record final model performance
-        xout, importance_map = model_performance(xclf, xfeat, testing_data, testing_labels)
-
-        print("Time Course Decoding...")
-        raw_decoding, summary_decoding = timecourse_decoding(
-            xclf, xfeat, timecourse_data, timecourse_labels, timecourse_instr, regressor_categories
-        )
+    print("Time Course Decoding...")
+    raw_decoding, summary_decoding = timecourse_decoding(
+        xclf, timecourse_data, timecourse_labels, timecourse_instr, regressor_categories,
+        feat_p, subject_id, model_descr,
+    )
 
     output_pattern = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}" + "_model_results_{metric}.csv")
     save_model_results(output_pattern, xout, regressor_categories)
 
     # -------------------------------------------------
+    # Permutation-based significance test (optional -- model.permutation_test)
+    # -------------------------------------------------
+
+    permutation_test_cfg = full_cfg["model"].get("permutation_test")
+    if permutation_test_cfg is not None:
+        n_permutations = permutation_test_cfg.get("n_permutations", 1000)
+        random_state = permutation_test_cfg.get("random_state", 0)
+        print(f"Permutation testing ({n_permutations} permutations)...")
+        permutation_results = permutation_significance(
+            training_data, training_labels, testing_data, testing_labels, n_permutations, random_state,
+            feat_p, classifier_name, classifier_params,
+        )
+        permutation_file = os.path.join(
+            analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}_permutation_test.csv"
+        )
+        permutation_results.to_csv(permutation_file, index=False)
+        print(f"Permutation test results saved to: {permutation_file}")
+
+    # -------------------------------------------------
     # Importance Map
     # -------------------------------------------------
 
-    # kfold importance maps (averaged across the internal training-CV folds above --
-    # a within-training generalization diagnostic, independent of test_decode_cv)
+    # importance map averaged across the internal training-CV folds above --
+    # a within-training generalization diagnostic
     img1 = masker.inverse_transform(mean_kfold_importance_map)
     output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "cv", f"{subject_id}" + "_cv_impa_native.nii.gz")
     img1.to_filename(output_file)
 
-    # final (or test_decode_cv-aggregated) model importance map
+    # final model importance map
     img = masker.inverse_transform(importance_map)
     output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}" + "_impa_native.nii.gz")
     img.to_filename(output_file)
@@ -1017,41 +887,8 @@ def main():
 
 
 if __name__ == "__main__":
-
-    # access arguments from all functions
     args = parse_args()
     print(args)
 
-    subject_id = args.subject
-    analysis_output_dir = args.analysis_output_dir
-    master_spreadsheet_file = args.master_spreadsheet
-
-    # load mvpa configuration
-    full_cfg = load_config(args.config)
-
-    event_cfg = full_cfg["event_extraction"]
-    derivatives_root = resolve_config_root(
-        event_cfg, "derivatives_root", event_cfg["bids_root"], "event_extraction.derivatives_root"
-    )
-    # masks are typically co-located with preprocessed/derivative BOLD data, but can
-    # be overridden independently (e.g. a separate hand-drawn ROI directory).
-    mask_root = resolve_config_root(
-        full_cfg["model"].get("mask", {}), "mask_root", derivatives_root, "model.mask.mask_root"
-    )
-    model_conditions = full_cfg["model_conditions"]
-
-    training_conditions = model_conditions["training"]["conditions"]
-    testing_conditions = model_conditions["testing"]["conditions"]
-    timecourse_conditions = model_conditions["timecourse_decoding"]["conditions"]
-    timecourse_window = model_conditions["timecourse_decoding"]["window"]
-
-    # class label order shared across training/testing/timecourse regressor codes
-    regressor_categories = list(training_conditions.keys())
-
-    # model settings (mask/featureSelection/classifier/cv/desc), dot-access
-    cfg = dict_to_namespace(full_cfg["model"])
-    model_descr = quick_safe(cfg.desc)
-
-    # run main -- track performance
     with track_runtime():
-        main()
+        main(args)

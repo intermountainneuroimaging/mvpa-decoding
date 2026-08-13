@@ -1,0 +1,12 @@
+# Runtime dependencies for the mvpa_banich pipeline (generate_master_spreadsheet.py,
+# validate_model_config.py, mvpa_workflow.py, generate_report.py, mvpa_common.py).
+# Versions are floors, not pins -- set to what's actually been run and verified
+# against real data this project (numpy 2.4, pandas 3.0, scikit-learn 1.8, nibabel
+# 5.3, nilearn 0.13, scipy 1.17, matplotlib 3.10).
+numpy>=2.4
+pandas>=3.0
+scikit-learn>=1.8
+nibabel>=5.3
+nilearn>=0.13
+scipy>=1.17
+matplotlib>=3.10

@@ -25,6 +25,18 @@ against `examples/sample-data/`. `examples/config-1.example.json` is the same
 shape but written as a fill-in-your-own-paths template, including the
 derivative-data fields (`derivatives_root`, `mask_root`) described below.
 
+## Running tests
+
+```
+pip install -r requirements-dev.txt
+pytest
+```
+
+The suite (`tests/`) uses synthetic fixtures only -- no dependency on the
+gitignored real data under `examples/sample-data/` or `tutorial/haxby-data/`
+-- so it runs the same locally and in CI (`.github/workflows/tests.yml`,
+which runs on every push/PR to `main`).
+
 ## 1. What input data is assumed
 
 You need a directory tree containing, for every scan run you want in the table:
@@ -409,53 +421,61 @@ Omit any of `featureSelection`/`classifier`/`cv` and it falls back to a
 default (ANOVA @ p<0.05, `LogisticRegression`, `GroupKFold`) -- only `desc`
 and `mask` are meaningfully required.
 
-### `test_decode_cv` (optional): k-fold test/decode instead of one full model
+### `permutation_test` (optional): significance testing for the held-out result
 
-By default, `mvpa_workflow.py` trains **one** classifier on the entire
-`training` condition set and evaluates it **once** against the entire
-`testing`/`timecourse_decoding` condition sets -- a single train-once/
-test-once point estimate. Adding `test_decode_cv` to `model` replaces that
-with a proper k-fold procedure: repeatedly hold out a group of runs, train on
-the rest, test+decode only on the held-out group, then aggregate:
+Accuracy/AUC on their own don't say whether a classifier is doing better
+than chance -- add `permutation_test` to `model` to find out, via
+[`sklearn.model_selection.permutation_test_score`](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.permutation_test_score.html)
+(the tool nilearn's own decoding docs recommend for this exact fMRI
+classification case):
 
 ```json
 "model": {
   ...,
-  "test_decode_cv": {
-    "strategy": "per_run"
+  "permutation_test": {
+    "n_permutations": 1000,
+    "random_state": 0
   }
 }
 ```
 
-Three strategies:
+Omitting `permutation_test` entirely skips it -- no extra runtime, no output
+file, today's exact behavior. Present (even as `{}`) runs it, with
+`n_permutations` defaulting to 1000 and `random_state` to 0 if unset.
 
-| `strategy` | Meaning |
-|---|---|
-| `"per_run"` | Leave-one-run-out: every unique run number appearing in the testing/timecourse-eligible data becomes its own held-out fold. Simplest, and the recommended default. |
-| `"group_kfold"` | Requires `"n_splits": <int>`. Partitions the sorted unique run numbers into `n_splits` roughly-equal contiguous groups (deterministic, no shuffling) -- use when there are too many runs for per-run granularity to be practical. |
-| `"explicit_groups"` | Requires `"groups": [[1,2,3],[4,5,6],...]` -- you specify exactly which runs go in which held-out fold. Most control; a run left out of every group is flagged with a warning (its rows are never evaluated), and a listed run that doesn't actually appear in the data produces an empty fold (also warned). |
+For each of `accuracy` and `roc_auc_ovr`, the training/testing split is
+encoded as a single fixed `PredefinedSplit` fold, then
+`permutation_test_score` repeatedly reshuffles the combined label vector and
+refits the *entire* pipeline (feature selection + classifier, both) on each
+shuffle -- the textbook-correct way to build a null distribution for a fixed
+train/test split, not a naive shuffle done outside the fit structure. Writes
+`model/{subject}_permutation_test.csv` (`metric,real_score,p_value,n_permutations`).
 
-Omitting `test_decode_cv` entirely preserves today's exact single train/test/
-decode behavior -- no config changes needed for existing setups.
+`accuracy`'s `real_score` matches `model_results_total_scores.csv` exactly
+(same split, same fixed feature-selection threshold, same classifier
+config). `roc_auc_ovr`'s `real_score` will be *close to but not exactly*
+the mean of `model_results_auc.csv`'s per-category values -- sklearn's
+`roc_auc_ovr` scorer uses the classifier's `predict_proba()` (softmax
+across classes) as evidence, while `model_performance`'s own per-category
+AUC uses an independent sigmoid of `decision_function` per class (not
+softmax-normalized) -- both are legitimate one-vs-rest AUC computations,
+they just start from different per-class evidence, so don't expect
+bit-identical numbers between the two files for this metric. `p_value` is
+the fraction of permuted-label refits that scored as well or better than
+the real fit.
 
-Each fold's results are saved alongside the aggregate, for transparency and
-so `generate_report.py` (see below) can detect and render fold-variability
-panels: `model/{subject}_fold{N}_model_results_{metric}.csv`,
-`model/{subject}_fold{N}_impa_native.nii.gz`,
-`decoding/{subject}_fold{N}_decoding_results.csv` (that fold's raw per-TR
-rows) and `decoding/{subject}_fold{N}_summary_decoding_results.csv` (that
-fold's own group-averaged summary), plus a
-`model/{subject}_test_decode_folds.json` manifest recording exactly which
-runs went into which fold.
+This costs `n_permutations` extra fits (parallelized across cores via
+`n_jobs=-1`) on top of the one real fit -- cheap relative to a single
+subject's BOLD loading time in practice, but scales with `n_permutations`,
+so drop it for quick iteration and turn it on for a result you're about to
+report.
 
-The aggregated files are written to the *same* filenames the single
-full-model path already used, so this is a drop-in replacement -- nothing
-downstream needs to know which mode produced them. For the decoding output
-specifically: `decoding_results.csv` is the straight concatenation of every
-fold's raw rows (each an actually-decoded, disjoint trial -- folds partition
-runs, so no double-counting), and `summary_decoding_results.csv` is computed
-fresh from that pooled raw table, not by averaging each fold's own summary
--- so every trial is weighted equally regardless of which fold it came from.
+`mvpa_workflow.py` is currently dedicated to this independent-train/
+independent-test case (training and testing come from separate
+`model_conditions` sections, possibly different tasks entirely). A k-fold
+workflow -- same underlying data, split into training/testing by `run` per
+fold -- is planned as a separate script with its own config format, not a
+mode switch on this one.
 
 ## Running `mvpa_workflow.py`
 
@@ -542,14 +562,14 @@ python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifi
 | `--master-spreadsheet` | *(optional)* Needed alongside `--config` to compute each condition's median trial duration and each subject's TR (both derived from real data, not hardcoded) -- used to convert `window_index` to seconds and mark trial onset/end on the timecourse plot. Without it, the x-axis stays in raw `window_index` units and annotation is skipped. |
 | `--output` | *(optional)* Defaults to `<dir>/<desc>/report_<desc>.pdf` (group) or `<dir>/<desc>/<subject>/report_<subject>.pdf` (single-subject). |
 
-**Fold-variability panels are automatic, not configured.** If a subject's
-output was produced with `test_decode_cv` (section 5), `generate_report.py`
-detects the `_fold{N}_*` files that Feature 1 saves and uses them: in a
-single-subject report, the accuracy/AUC page overlays per-fold points on the
-aggregate bars, the timecourse page bands mean +/- SE **across folds**
-instead of a single point estimate, and an extra importance-map page shows a
-fold-to-fold consistency mosaic. Without `test_decode_cv`, those panels are
-silently omitted -- there's no repeated measure to band from.
+**Fold-variability panels are automatic, not configured, but currently
+dormant.** `generate_report.py` detects `_fold{N}_*` files (accuracy/AUC
+overlays, timecourse bands, an importance-map consistency mosaic) purely by
+their presence on disk -- `mvpa_workflow.py` doesn't currently produce them
+(it's dedicated to the single independent-train/independent-test case; a
+separate k-fold workflow that would write matching `_fold{N}_*` output is
+planned). Once that exists, these panels activate automatically with no
+report-side changes needed.
 
 **Importance maps are never averaged across subjects.** Masks are
 native-space and per-subject -- there's no common voxel grid to average
@@ -557,10 +577,10 @@ onto, unlike a normalized-space group analysis. The group report shows one
 page per subject instead; only within-subject fold-to-fold averaging (same
 subject, same grid) happens.
 
-The timecourse page always reads `summary_decoding_results.csv` (per
-subject, or per fold in single-subject `test_decode_cv` mode), never the raw
-per-TR `decoding_results.csv` -- group-level statistics need one
-already-averaged value per group per subject/fold, not individual trials.
+The timecourse page always reads `summary_decoding_results.csv`, never the
+raw per-TR `decoding_results.csv` -- group-level statistics need one
+already-averaged value per group per subject (or per fold, once fold-level
+output exists), not individual trials.
 
 ## Tutorial: a real external dataset (Haxby et al. 2001 / OpenNeuro ds000105)
 

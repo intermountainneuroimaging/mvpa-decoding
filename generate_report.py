@@ -103,7 +103,7 @@ def has_fold_files(analysis_output_dir: str, desc: str, subject: str) -> bool:
 
 def fold_paths(analysis_output_dir: str, desc: str, subject: str) -> dict:
     """{fold_id: {..same keys as subject_paths' model/decoding entries..}} for every
-    fold found for this subject (empty dict if test_decode_cv wasn't used)."""
+    fold found for this subject (empty dict if no fold-workflow output exists)."""
     base = os.path.join(analysis_output_dir, desc, subject)
     totals = sorted(glob.glob(os.path.join(base, "model", f"{subject}_fold*_model_results_total_scores.csv")))
     fold_ids = [int(os.path.basename(p).split("_fold")[1].split("_")[0]) for p in totals]
