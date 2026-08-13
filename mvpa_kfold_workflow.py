@@ -113,8 +113,8 @@ def validate_kfold_cv_config(kfold_cv_cfg) -> None:
         raise SystemExit(f"model.kfold_cv.strategy must be one of {KFOLD_STRATEGIES}, got {strategy!r}")
     if strategy == "group_kfold" and not isinstance(kfold_cv_cfg.get("n_splits"), int):
         raise SystemExit("model.kfold_cv.strategy='group_kfold' requires an integer 'n_splits'")
-    if strategy == "explicit_groups" and not isinstance(kfold_cv_cfg.get("groups"), list):
-        raise SystemExit("model.kfold_cv.strategy='explicit_groups' requires a 'groups' list")
+    if strategy == "explicit_groups" and not isinstance(kfold_cv_cfg.get("held_out_runs"), list):
+        raise SystemExit("model.kfold_cv.strategy='explicit_groups' requires a 'held_out_runs' list")
 
 
 def resolve_kfold_folds(kfold_cv_cfg: dict, testing_df: pd.DataFrame, timecourse_instr: pd.DataFrame) -> list:
@@ -148,22 +148,24 @@ def resolve_kfold_folds(kfold_cv_cfg: dict, testing_df: pd.DataFrame, timecourse
         return [list(g) for g in np.array_split(np.array(universe_runs), n_splits)]
 
     if strategy == "explicit_groups":
-        groups = kfold_cv_cfg.get("groups")
-        if not isinstance(groups, list) or not groups or not all(isinstance(g, list) and g for g in groups):
+        held_out_run_groups = kfold_cv_cfg.get("held_out_runs")
+        if not isinstance(held_out_run_groups, list) or not held_out_run_groups or not all(
+            isinstance(g, list) and g for g in held_out_run_groups
+        ):
             raise SystemExit(
-                "model.kfold_cv.strategy='explicit_groups' requires a non-empty 'groups' list of "
-                "non-empty run-id lists"
+                "model.kfold_cv.strategy='explicit_groups' requires a non-empty 'held_out_runs' list of "
+                "non-empty run-id lists -- one inner list per fold, listing the run(s) held out for that fold"
             )
-        covered = {r for g in groups for r in g}
+        covered = {r for g in held_out_run_groups for r in g}
         uncovered = [r for r in universe_runs if r not in covered]
         if uncovered:
-            print(f"(!) model.kfold_cv.groups doesn't cover run(s) {uncovered} that appear in this "
+            print(f"(!) model.kfold_cv.held_out_runs doesn't cover run(s) {uncovered} that appear in this "
                   f"subject's testing/timecourse_decoding data -- those rows will never be evaluated in any fold")
-        unknown = sorted({r for g in groups for r in g if r not in universe_runs})
+        unknown = sorted({r for g in held_out_run_groups for r in g if r not in universe_runs})
         if unknown:
-            print(f"(!) model.kfold_cv.groups references run(s) {unknown} that don't appear in this "
+            print(f"(!) model.kfold_cv.held_out_runs references run(s) {unknown} that don't appear in this "
                   f"subject's testing/timecourse_decoding-eligible data -- they'll produce empty folds")
-        return groups
+        return held_out_run_groups
 
     raise SystemExit(f"model.kfold_cv.strategy must be one of {KFOLD_STRATEGIES}, got {strategy!r}")
 

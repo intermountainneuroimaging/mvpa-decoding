@@ -36,7 +36,7 @@ class TestValidateKfoldCvConfig:
         with pytest.raises(SystemExit):
             validate_kfold_cv_config({"strategy": "group_kfold"})
 
-    def test_explicit_groups_missing_groups_raises(self):
+    def test_explicit_groups_missing_held_out_runs_raises(self):
         with pytest.raises(SystemExit):
             validate_kfold_cv_config({"strategy": "explicit_groups"})
 
@@ -47,7 +47,7 @@ class TestValidateKfoldCvConfig:
         validate_kfold_cv_config({"strategy": "group_kfold", "n_splits": 3})  # no exception
 
     def test_valid_explicit_groups_passes(self):
-        validate_kfold_cv_config({"strategy": "explicit_groups", "groups": [[1], [2]]})  # no exception
+        validate_kfold_cv_config({"strategy": "explicit_groups", "held_out_runs": [[1], [2]]})  # no exception
 
 
 # =====================================================
@@ -81,20 +81,22 @@ class TestResolveKfoldFolds:
     def test_explicit_groups_returned_as_is(self):
         testing_df = _df_with_runs([1, 2, 3, 4])
         timecourse_instr = _df_with_runs([])
-        groups = [[1, 2], [3, 4]]
-        folds = resolve_kfold_folds({"strategy": "explicit_groups", "groups": groups}, testing_df, timecourse_instr)
-        assert folds == groups
+        held_out_runs = [[1, 2], [3, 4]]
+        folds = resolve_kfold_folds(
+            {"strategy": "explicit_groups", "held_out_runs": held_out_runs}, testing_df, timecourse_instr
+        )
+        assert folds == held_out_runs
 
     def test_explicit_groups_uncovered_run_warns(self, capsys):
         testing_df = _df_with_runs([1, 2, 3])
         timecourse_instr = _df_with_runs([])
-        resolve_kfold_folds({"strategy": "explicit_groups", "groups": [[1, 2]]}, testing_df, timecourse_instr)
+        resolve_kfold_folds({"strategy": "explicit_groups", "held_out_runs": [[1, 2]]}, testing_df, timecourse_instr)
         assert "doesn't cover" in capsys.readouterr().out
 
     def test_explicit_groups_unknown_run_warns(self, capsys):
         testing_df = _df_with_runs([1, 2])
         timecourse_instr = _df_with_runs([])
-        resolve_kfold_folds({"strategy": "explicit_groups", "groups": [[1, 2, 99]]}, testing_df, timecourse_instr)
+        resolve_kfold_folds({"strategy": "explicit_groups", "held_out_runs": [[1, 2, 99]]}, testing_df, timecourse_instr)
         assert "references run(s)" in capsys.readouterr().out
 
     def test_no_runs_at_all_raises(self):

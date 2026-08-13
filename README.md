@@ -580,12 +580,65 @@ are split into folds:
 |---|---|
 | `"per_run"` | Automatic, leave-one-run-out -- one fold per run found in this subject's testing/timecourse_decoding-eligible data. |
 | `"group_kfold"` | Automatic -- requires an integer `n_splits` (>= 2, <= the number of distinct runs); runs are split into `n_splits` contiguous groups. |
-| `"explicit_groups"` | User-defined -- requires `"groups"`, a list of run-ID lists, e.g. `"groups": [[1, 2], [3, 4], [5, 6]]`. Warns (doesn't error) if a run present in the data isn't covered by any group, or if a group references a run that isn't present. |
+| `"explicit_groups"` | User-defined -- requires `"held_out_runs"`. See below. |
 
 Whichever strategy is used, the resolved fold membership is always written
 to `model/{subject}_kfold_folds.json` (`{fold_id: [held-out run ids]}`) --
 so an automatic split is just as inspectable after the fact as an explicit
 one.
+
+#### `strategy: "explicit_groups"` and `held_out_runs`
+
+`held_out_runs` is a list of lists -- **one inner list per fold, and each
+inner list is that fold's held-out run(s)**, not what to train on:
+
+```json
+"kfold_cv": {
+  "strategy": "explicit_groups",
+  "held_out_runs": [[1, 2], [3, 4], [5, 6]]
+}
+```
+
+This example produces 3 folds. For fold 1 (`[1, 2]`): training uses every
+training-condition row whose `run` is *not* 1 or 2; testing/timecourse_decoding
+use only rows whose `run` *is* 1 or 2. Folds 2 and 3 work the same way against
+`[3, 4]` and `[5, 6]`. Each fold trains and evaluates independently -- run IDs
+that never appear in `held_out_runs` are simply never held out, so they're
+always available for training but never scored on their own.
+
+A few things worth knowing before writing your own:
+
+- **The lists don't have to partition the runs.** A run can appear in more
+  than one fold's held-out set (evaluated more than once, in different
+  folds), and runs can be left out of `held_out_runs` entirely (always
+  trained on, never held out and scored). Use this deliberately -- e.g. to
+  build unequal-sized folds, or to only ever evaluate a specific subset of
+  runs -- not by accident.
+- **Coverage is checked, but only warned about, not enforced.** If a run
+  present in this subject's testing/timecourse_decoding data isn't covered
+  by any group in `held_out_runs`, you'll see `(!) model.kfold_cv.held_out_runs
+  doesn't cover run(s) [...]` -- those rows are simply never evaluated in any
+  fold, the run itself is not an error. Conversely, if `held_out_runs`
+  references a run ID that doesn't exist in this subject's data at all,
+  you'll see `(!) model.kfold_cv.held_out_runs references run(s) [...] that
+  don't appear ...` and that fold ends up with 0 test/timecourse rows
+  (skipped at runtime with its own warning, not a crash).
+- **Run IDs must match exactly, no type coercion.** `training_df["run"]` /
+  `testing_df["run"]` (from `master_spreadsheet.csv`) are typically integers,
+  and `held_out_runs` is matched against them with `.isin()` -- a JSON string
+  `"1"` will never match integer `1`, it'll just silently produce an empty
+  fold (with the "references run(s) that don't appear" warning above) rather
+  than raising. If your runs come out as strings, write `held_out_runs` as
+  strings too (`"held_out_runs": [["1", "2"]]`), matching whatever
+  `master_spreadsheet.csv`'s `run` column actually contains.
+- **Which config `run` values are valid to reference** -- the "universe" of
+  runs `held_out_runs` is checked against is the set of `run` values present
+  across `model_conditions.testing` and `model_conditions.timecourse_decoding`'s
+  *matched* rows for this subject, not every run in `master_spreadsheet.csv`.
+  A run with no testing/timecourse rows for this subject (e.g. it only has
+  training-condition trials) won't show up in that universe, so referencing
+  it in `held_out_runs` triggers the "doesn't appear" warning even though the
+  run genuinely exists in the data -- it just has nothing to evaluate on.
 
 `model.permutation_test` (see above) works the same way here as in
 `mvpa_workflow.py`, except it runs **once per fold**, on that fold's own
