@@ -17,9 +17,14 @@ One JSON config, three top-level sections, three scripts:
 | 2. Define & validate MVPA conditions | `validate_model_config.py` | `model_conditions` |
 | 3. Train/decode | `mvpa_workflow.py` | `model` (+ `model_conditions` to select/label rows) |
 
-All three scripts take the **same** config file via `--config`. Shared logic
-(BIDS filename parsing, the query DSL, window math) lives in `mvpa_common.py`,
-imported by all three. Everything below is grounded in
+Step 3 has two interchangeable scripts, same config format: `mvpa_workflow.py`
+for independent train/test data (possibly different tasks entirely -- the
+default, described first) or `mvpa_kfold_workflow.py` for same-task data
+split into folds by `run` (section 6) -- pick whichever matches your design,
+not both. All scripts take the **same** config file via `--config`. Shared
+logic -- BIDS filename parsing, the query DSL, window math, and (for the two
+train/decode scripts) the actual classification/decoding primitives -- lives
+in `mvpa_common.py`, imported by all of them. Everything below is grounded in
 `examples/config-2.example.json`, a complete config that runs end-to-end
 against `examples/sample-data/`. `examples/config-1.example.json` is the same
 shape but written as a fill-in-your-own-paths template, including the
@@ -470,12 +475,12 @@ subject's BOLD loading time in practice, but scales with `n_permutations`,
 so drop it for quick iteration and turn it on for a result you're about to
 report.
 
-`mvpa_workflow.py` is currently dedicated to this independent-train/
-independent-test case (training and testing come from separate
-`model_conditions` sections, possibly different tasks entirely). A k-fold
-workflow -- same underlying data, split into training/testing by `run` per
-fold -- is planned as a separate script with its own config format, not a
-mode switch on this one.
+`mvpa_workflow.py` is dedicated to this independent-train/independent-test
+case (training and testing come from separate `model_conditions` sections,
+possibly different tasks entirely). For same-task data split into
+training/testing by `run` per fold, see `mvpa_kfold_workflow.py` and
+`model.kfold_cv` below instead -- a separate script, not a mode switch on
+this one.
 
 ## Running `mvpa_workflow.py`
 
@@ -538,7 +543,82 @@ columns (`N` = the widest trial; shorter trials are NaN-padded). Useful for
 eyeballing whether the volume counts per trial look right -- not used by the
 modeling steps themselves.
 
-## 6. Generating a report (`generate_report.py`)
+## 6. K-fold workflow (`mvpa_kfold_workflow.py`)
+
+For same-task data: `model_conditions.training`/`testing` may still be
+different conditions, but both are expected to be drawn from the same task's
+runs. Instead of one train-once/test-once split, `mvpa_kfold_workflow.py`
+repeatedly holds out a group of runs, trains on the rest, tests + decodes
+only on the held-out group, then aggregates every fold into one final
+answer -- the same `model_classification`/`model_performance`/
+`timecourse_decoding` steps `mvpa_workflow.py` uses (both scripts import
+them from `mvpa_common.py`, so they can never drift apart on how a model is
+actually fit or scored). See `examples/config-kfold.example.json` for a
+complete example (3-run leave-one-run-out over `examples/sample-data`'s
+`loc` task).
+
+```
+python mvpa_kfold_workflow.py --subject 4057 --config examples/config-kfold.example.json \
+    --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out
+```
+
+### `model.kfold_cv`
+
+Required for this script (it's the whole point of running it) -- how runs
+are split into folds:
+
+```json
+"model": {
+  ...,
+  "kfold_cv": {
+    "strategy": "per_run"
+  }
+}
+```
+
+| `strategy` | Meaning |
+|---|---|
+| `"per_run"` | Automatic, leave-one-run-out -- one fold per run found in this subject's testing/timecourse_decoding-eligible data. |
+| `"group_kfold"` | Automatic -- requires an integer `n_splits` (>= 2, <= the number of distinct runs); runs are split into `n_splits` contiguous groups. |
+| `"explicit_groups"` | User-defined -- requires `"groups"`, a list of run-ID lists, e.g. `"groups": [[1, 2], [3, 4], [5, 6]]`. Warns (doesn't error) if a run present in the data isn't covered by any group, or if a group references a run that isn't present. |
+
+Whichever strategy is used, the resolved fold membership is always written
+to `model/{subject}_kfold_folds.json` (`{fold_id: [held-out run ids]}`) --
+so an automatic split is just as inspectable after the fact as an explicit
+one.
+
+`model.permutation_test` (see above) works the same way here as in
+`mvpa_workflow.py`, except it runs **once per fold**, on that fold's own
+train/test split -- `model/{subject}_fold{N}_permutation_test.csv`. Folds
+aren't combined into one pooled p-value; interpret them fold-by-fold.
+
+### Outputs
+
+Per-fold files (fold `N`'s own held-out evaluation) alongside aggregated
+files (averaged/pooled across every fold, same filenames `mvpa_workflow.py`
+writes -- so `generate_report.py` and other downstream consumers don't need
+to know which workflow produced a given subject's results):
+
+| Per-fold | Aggregated |
+|---|---|
+| `model/{subject}_fold{N}_model_results_{metric}.csv` | `model/{subject}_model_results_{metric}.csv` |
+| `model/{subject}_fold{N}_impa_native.nii.gz` | `model/{subject}_impa_native.nii.gz` |
+| `model/{subject}_fold{N}_permutation_test.csv` *(optional)* | -- (not combined across folds) |
+| `decoding/{subject}_fold{N}_decoding_results.csv` | `decoding/{subject}_decoding_results.csv` |
+| `decoding/{subject}_fold{N}_summary_decoding_results.csv` | `decoding/{subject}_summary_decoding_results.csv` |
+
+Aggregation: scalar/matrix metrics and importance maps are averaged across
+folds; decoding rows from different folds are genuinely disjoint trials
+(folds partition runs), so the aggregated raw table is a concatenation, and
+the aggregated summary is recomputed fresh from that pooled table
+(trial-count-weighted, not an average of per-fold averages).
+
+`generate_report.py` already detects `_fold{N}_*` files purely by their
+presence on disk (see section 7) -- fold-variability panels (accuracy/AUC
+overlays, timecourse bands, an importance-map consistency mosaic) render
+automatically against this script's output with no changes needed.
+
+## 7. Generating a report (`generate_report.py`)
 
 Produces a multi-page PDF from `mvpa_workflow.py`'s output -- accuracy/AUC,
 confusion-style accuracy/evidence matrices, annotated timecourse decoding,
@@ -562,14 +642,13 @@ python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifi
 | `--master-spreadsheet` | *(optional)* Needed alongside `--config` to compute each condition's median trial duration and each subject's TR (both derived from real data, not hardcoded) -- used to convert `window_index` to seconds and mark trial onset/end on the timecourse plot. Without it, the x-axis stays in raw `window_index` units and annotation is skipped. |
 | `--output` | *(optional)* Defaults to `<dir>/<desc>/report_<desc>.pdf` (group) or `<dir>/<desc>/<subject>/report_<subject>.pdf` (single-subject). |
 
-**Fold-variability panels are automatic, not configured, but currently
-dormant.** `generate_report.py` detects `_fold{N}_*` files (accuracy/AUC
-overlays, timecourse bands, an importance-map consistency mosaic) purely by
-their presence on disk -- `mvpa_workflow.py` doesn't currently produce them
-(it's dedicated to the single independent-train/independent-test case; a
-separate k-fold workflow that would write matching `_fold{N}_*` output is
-planned). Once that exists, these panels activate automatically with no
-report-side changes needed.
+**Fold-variability panels are automatic, not configured.**
+`generate_report.py` detects `_fold{N}_*` files (accuracy/AUC overlays,
+timecourse bands, an importance-map consistency mosaic) purely by their
+presence on disk -- `mvpa_workflow.py`'s single independent-train/
+independent-test case doesn't produce them, but `mvpa_kfold_workflow.py`
+(section 6) does, so these panels render automatically for its output with
+no report-side changes needed.
 
 **Importance maps are never averaged across subjects.** Masks are
 native-space and per-subject -- there's no common voxel grid to average
@@ -579,8 +658,8 @@ subject, same grid) happens.
 
 The timecourse page always reads `summary_decoding_results.csv`, never the
 raw per-TR `decoding_results.csv` -- group-level statistics need one
-already-averaged value per group per subject (or per fold, once fold-level
-output exists), not individual trials.
+already-averaged value per group per subject (or per fold), not individual
+trials.
 
 ## Tutorial: a real external dataset (Haxby et al. 2001 / OpenNeuro ds000105)
 
