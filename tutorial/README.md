@@ -177,7 +177,7 @@ correctly resolved to the preprocessed derivatives.
 ## Step 6: Train and evaluate
 
 ```
-python mvpa_workflow.py --subject 1 --config tutorial/config-haxby.example.json \
+python mvpa_generalization_workflow.py --subject 1 --config tutorial/config-haxby.example.json \
     --master-spreadsheet master_spreadsheet_haxby.csv --analysis-output-dir ./haxby_out
 ```
 
@@ -240,7 +240,7 @@ an older numpy/scipy doesn't help, since the blocker is the Python version,
 not numpy's. So this reimplements PyMVPA's own canonical approach
 (confirmed from their tutorial docs) using only `nibabel`/`numpy`/`pandas`/
 `sklearn` -- deliberately **not** importing anything from this repo's own
-`mvpa_common.py`/`generate_master_spreadsheet.py`/`mvpa_workflow.py`, so
+`mvpa_common.py`/`generate_master_spreadsheet.py`/`mvpa_generalization_workflow.py`, so
 feature extraction and classification are a genuinely separate code path:
 
 - **Nearest-centroid correlation** -- PyMVPA's own tutorial describes this
@@ -253,11 +253,11 @@ feature extraction and classification are a genuinely separate code path:
   split this tutorial uses, and PyMVPA's own default **leave-one-run-out**
   (`NFoldPartitioner`).
 
-It reuses the same preprocessed BOLD data and mask `mvpa_workflow.py` used
+It reuses the same preprocessed BOLD data and mask `mvpa_generalization_workflow.py` used
 (so any numeric difference reflects classifier/CV methodology, not
 different inputs), loaded directly via `nibabel`+`numpy` boolean indexing
 rather than nilearn's `NiftiMasker`, and deliberately skips ANOVA feature
-selection (unlike `mvpa_workflow.py`) to stay a simple, canonical baseline.
+selection (unlike `mvpa_generalization_workflow.py`) to stay a simple, canonical baseline.
 
 ```bash
 python tutorial/pymvpa_style_validation.py \
@@ -268,7 +268,7 @@ Real output against this tutorial's data:
 
 | method | protocol | accuracy | AUC |
 |---|---|---|---|
-| `mvpa_workflow.py` (this repo, ANOVA + LogisticRegression) | matched split | 0.524 | 0.817 |
+| `mvpa_generalization_workflow.py` (this repo, ANOVA + LogisticRegression) | matched split | 0.524 | 0.817 |
 | nearest-centroid correlation | matched split | 0.236 | 0.634 |
 | linear SVM | matched split | 0.410 | 0.773 |
 | nearest-centroid correlation | leave-one-run-out | 0.266 | 0.602 |
@@ -277,10 +277,10 @@ Real output against this tutorial's data:
 All four independently-computed numbers are well above chance (0.125
 accuracy / 0.5 AUC), externally corroborating that this dataset genuinely
 carries decodable category information after this tutorial's preprocessing
--- not an artifact of `mvpa_workflow.py`'s own code. The lower absolute
+-- not an artifact of `mvpa_generalization_workflow.py`'s own code. The lower absolute
 numbers here (vs. 0.524/0.817) are expected, not a discrepancy: this
 validation classifies over the full ~31K-voxel mask with no feature
-selection at all, while `mvpa_workflow.py` first narrows to an
+selection at all, while `mvpa_generalization_workflow.py` first narrows to an
 ANOVA-selected subset -- the gap is a reasonable estimate of how much that
 feature selection step alone is worth on this dataset.
 

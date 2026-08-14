@@ -36,17 +36,17 @@ subject=`ls -d $DATAROOT/sub-* | rev | cut -d"/" -f1 | rev | cut -d"-" -f2 | sed
 # --------------------------------------------
 # vvs category classifier
 # --------------------------------------------
-python mvpa_workflow.py --subject $subject --config $CONFIG_DIR/vvs_object_classifier.json \
+python mvpa_generalization_workflow.py --subject $subject --config $CONFIG_DIR/vvs_object_classifier.json \
     --master-spreadsheet $MASTER_SPREADSHEET --analysis-output-dir $OUTPUT_DIR
 
 # --------------------------------------------
 # gm category classifier
 # --------------------------------------------
-python mvpa_workflow.py --subject $subject --config $CONFIG_DIR/gm_object_classifier.json \
+python mvpa_generalization_workflow.py --subject $subject --config $CONFIG_DIR/gm_object_classifier.json \
     --master-spreadsheet $MASTER_SPREADSHEET --analysis-output-dir $OUTPUT_DIR
 
 # --------------------------------------------
 # gm valence classifier
 # --------------------------------------------
-python mvpa_workflow.py --subject $subject --config $CONFIG_DIR/gm_valence_classifier.json \
+python mvpa_generalization_workflow.py --subject $subject --config $CONFIG_DIR/gm_valence_classifier.json \
     --master-spreadsheet $MASTER_SPREADSHEET --analysis-output-dir $OUTPUT_DIR

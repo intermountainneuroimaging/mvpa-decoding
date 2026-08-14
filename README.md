@@ -15,9 +15,9 @@ One JSON config, three top-level sections, three scripts:
 |---|---|---|
 | 1. Build the volume table | `generate_master_spreadsheet.py` | `event_extraction` (+ optional `expected_events.json`) |
 | 2. Define & validate MVPA conditions | `validate_model_config.py` | `model_conditions` |
-| 3. Train/decode | `mvpa_workflow.py` | `model` (+ `model_conditions` to select/label rows) |
+| 3. Train/decode | `mvpa_generalization_workflow.py` | `model` (+ `model_conditions` to select/label rows) |
 
-Step 3 has two interchangeable scripts, same config format: `mvpa_workflow.py`
+Step 3 has two interchangeable scripts, same config format: `mvpa_generalization_workflow.py`
 for independent train/test data (possibly different tasks entirely -- the
 default, described first) or `mvpa_kfold_workflow.py` for same-task data
 split into folds by `run` (section 6) -- pick whichever matches your design,
@@ -25,8 +25,8 @@ not both. All scripts take the **same** config file via `--config`. Shared
 logic -- BIDS filename parsing, the query DSL, window math, and (for the two
 train/decode scripts) the actual classification/decoding primitives -- lives
 in `mvpa_common.py`, imported by all of them. Everything below is grounded in
-`examples/config-2.example.json`, a complete config that runs end-to-end
-against `examples/sample-data/`. `examples/config-1.example.json` is the same
+`examples/config-generalization.example.json`, a complete config that runs end-to-end
+against `examples/sample-data/`. `examples/config-generalization-template.example.json` is the same
 shape but written as a fill-in-your-own-paths template, including the
 derivative-data fields (`derivatives_root`, `mask_root`) described below.
 
@@ -90,8 +90,8 @@ entirely.
 
 ## 2. The config file
 
-One JSON file with three top-level sections. `examples/config-2.example.json`
-is a complete, runnable example (`examples/config-1.example.json` is the same
+One JSON file with three top-level sections. `examples/config-generalization.example.json`
+is a complete, runnable example (`examples/config-generalization-template.example.json` is the same
 shape as a fill-in-your-own-paths template):
 
 ```json
@@ -166,7 +166,7 @@ conditions). This is how a stray-space typo like `"positive _face_image"` in
 ### Running it
 
 ```
-python generate_master_spreadsheet.py --config examples/config-2.example.json
+python generate_master_spreadsheet.py --config examples/config-generalization.example.json
 ```
 
 Output (`master_spreadsheet.csv`) -- one row per BOLD volume that overlapped
@@ -177,7 +177,7 @@ an event's active window:
 | `subject`, `session`, `task`, `run` | *Inferred* from the events filename. |
 | `volume_of_interest` | *Computed*: the BOLD frame index, from `onset + hemodynamic_lag` through `onset + hemodynamic_lag + duration`, using the BOLD file's own TR, clipped to its frame count. |
 | `trial_type` | Verbatim from the events file -- never reinterpreted, split, or renamed. |
-| `trial_index` | *Computed*: 1-based sequential index (in onset order) among this run's *retained* events -- i.e. after the hardcoded exclusions below, so it's always contiguous. Identifies "which event produced this volume," used by `mvpa_workflow.py` for trial-balancing and for recomputing `timecourse_decoding`'s window. |
+| `trial_index` | *Computed*: 1-based sequential index (in onset order) among this run's *retained* events -- i.e. after the hardcoded exclusions below, so it's always contiguous. Identifies "which event produced this volume," used by `mvpa_generalization_workflow.py` for trial-balancing and for recomputing `timecourse_decoding`'s window. |
 | `onset`, `duration` | Verbatim from the events file, repeated across every volume belonging to that event. |
 | `boldfile`, `eventfile` | Resolved source file paths, for traceability/sorting. |
 | *(varies)* | Any other BIDS entity found in the filename, e.g. `dir` -- *inferred*, present only if that entity appears in your filenames. |
@@ -242,7 +242,7 @@ Two config fields decouple BOLD-file discovery from the events-file layout:
 mask files, and defaults to `derivatives_root` -- masks are usually derivative
 products co-located with preprocessed BOLD data, but can be pointed elsewhere
 independently (e.g. a separate hand-drawn ROI directory) if needed.
-`examples/config-1.example.json` is a template showing all of these fields
+`examples/config-generalization-template.example.json` is a template showing all of these fields
 filled in.
 
 #### Diagnosing a "no matching BOLD file found" error
@@ -351,7 +351,7 @@ past the event's end."
 ### Running it
 
 ```
-python validate_model_config.py --config examples/config-2.example.json \
+python validate_model_config.py --config examples/config-generalization.example.json \
     --master-spreadsheet master_spreadsheet.csv
 ```
 
@@ -370,7 +370,7 @@ additionally get:
 Example output against `examples/sample-data`:
 
 ```
-Validating examples/config-2.example.json against master_spreadsheet.csv
+Validating examples/config-generalization.example.json against master_spreadsheet.csv
   [training] 'face': 524 rows
   [training] 'place': 536 rows
   [testing] 'face': 2020 rows
@@ -383,7 +383,7 @@ Validating examples/config-2.example.json against master_spreadsheet.csv
 
 ## 5. `model`
 
-Read by `mvpa_workflow.py`. Everything the analysis itself needs that isn't
+Read by `mvpa_generalization_workflow.py`. Everything the analysis itself needs that isn't
 about *which rows* to use (that's `model_conditions`'s job):
 
 ```json
@@ -405,10 +405,6 @@ about *which rows* to use (that's `model_conditions`'s job):
       "max_iter": 10000,
       "class_weight": "balanced"
     }
-  },
-  "cv": {
-    "strategy": "GroupKFold",
-    "n_splits": "infer"
   }
 }
 ```
@@ -420,11 +416,18 @@ about *which rows* to use (that's `model_conditions`'s job):
 | `mask.mask_pattern` | Path to the per-subject mask NIfTI, resolved relative to `mask_root` with `{subject}`/`{session}` filled in from whichever row is being loaded (can still contain glob wildcards -- resolved the same way as bold-file lookups). |
 | `featureSelection` | ANOVA voxel-selection threshold used before fitting the classifier. |
 | `classifier` | Any importable scikit-learn-style estimator: `name` is a dotted import path, `params` are passed straight through as kwargs. |
-| `cv` | Cross-validation bookkeeping (folds are actually built from the `run` column via `PredefinedSplit`). |
 
-Omit any of `featureSelection`/`classifier`/`cv` and it falls back to a
-default (ANOVA @ p<0.05, `LogisticRegression`, `GroupKFold`) -- only `desc`
-and `mask` are meaningfully required.
+Omit either of `featureSelection`/`classifier` and it falls back to a
+default (ANOVA @ p<0.05, `LogisticRegression`) -- only `desc` and `mask` are
+meaningfully required.
+
+There's no `model.cv` field -- `mvpa_generalization_workflow.py`'s internal
+training-diagnostic cross-validation (the `cv/` output files below) always
+splits by the `run` column directly via `PredefinedSplit`; the fold count is
+just however many distinct `run` values exist in the training data, not a
+configurable knob. (For same-task data where you want to control fold
+membership yourself, that's `model.kfold_cv` on `mvpa_kfold_workflow.py`
+instead -- see section 6.)
 
 ### `permutation_test` (optional): significance testing for the held-out result
 
@@ -475,17 +478,17 @@ subject's BOLD loading time in practice, but scales with `n_permutations`,
 so drop it for quick iteration and turn it on for a result you're about to
 report.
 
-`mvpa_workflow.py` is dedicated to this independent-train/independent-test
+`mvpa_generalization_workflow.py` is dedicated to this independent-train/independent-test
 case (training and testing come from separate `model_conditions` sections,
 possibly different tasks entirely). For same-task data split into
 training/testing by `run` per fold, see `mvpa_kfold_workflow.py` and
 `model.kfold_cv` below instead -- a separate script, not a mode switch on
 this one.
 
-## Running `mvpa_workflow.py`
+## Running `mvpa_generalization_workflow.py`
 
 ```
-python mvpa_workflow.py --subject 4057 --config examples/config-2.example.json \
+python mvpa_generalization_workflow.py --subject 4057 --config examples/config-generalization.example.json \
     --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out
 ```
 
@@ -551,7 +554,7 @@ runs. Instead of one train-once/test-once split, `mvpa_kfold_workflow.py`
 repeatedly holds out a group of runs, trains on the rest, tests + decodes
 only on the held-out group, then aggregates every fold into one final
 answer -- the same `model_classification`/`model_performance`/
-`timecourse_decoding` steps `mvpa_workflow.py` uses (both scripts import
+`timecourse_decoding` steps `mvpa_generalization_workflow.py` uses (both scripts import
 them from `mvpa_common.py`, so they can never drift apart on how a model is
 actually fit or scored). See `examples/config-kfold.example.json` for a
 complete example (3-run leave-one-run-out over `examples/sample-data`'s
@@ -641,14 +644,14 @@ A few things worth knowing before writing your own:
   run genuinely exists in the data -- it just has nothing to evaluate on.
 
 `model.permutation_test` (see above) works the same way here as in
-`mvpa_workflow.py`, except it runs **once per fold**, on that fold's own
+`mvpa_generalization_workflow.py`, except it runs **once per fold**, on that fold's own
 train/test split -- `model/{subject}_fold{N}_permutation_test.csv`. Folds
 aren't combined into one pooled p-value; interpret them fold-by-fold.
 
 ### Outputs
 
 Per-fold files (fold `N`'s own held-out evaluation) alongside aggregated
-files (averaged/pooled across every fold, same filenames `mvpa_workflow.py`
+files (averaged/pooled across every fold, same filenames `mvpa_generalization_workflow.py`
 writes -- so `generate_report.py` and other downstream consumers don't need
 to know which workflow produced a given subject's results):
 
@@ -673,23 +676,23 @@ automatically against this script's output with no changes needed.
 
 ## 7. Generating a report (`generate_report.py`)
 
-Produces a multi-page PDF from `mvpa_workflow.py`'s output -- accuracy/AUC,
+Produces a multi-page PDF from `mvpa_generalization_workflow.py`'s output -- accuracy/AUC,
 confusion-style accuracy/evidence matrices, annotated timecourse decoding,
 and importance maps. One script, two scales, switched with `--subject`:
 
 ```
 # group report -- aggregates every subject found under <dir>/<desc>/*/
 python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier \
-    --config examples/config-2.example.json --master-spreadsheet master_spreadsheet.csv
+    --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
 
 # single-subject report -- scoped to just <dir>/<desc>/4057/
 python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier \
-    --subject 4057 --config examples/config-2.example.json --master-spreadsheet master_spreadsheet.csv
+    --subject 4057 --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--analysis-output-dir`/`--desc` | Same values used for `mvpa_workflow.py --analysis-output-dir`/the config's `model.desc`. |
+| `--analysis-output-dir`/`--desc` | Same values used for `mvpa_generalization_workflow.py --analysis-output-dir`/the config's `model.desc`. |
 | `--subject` | *(optional)* Restrict the report to one subject. Omit to aggregate over every subject folder found under `<dir>/<desc>/`. |
 | `--config` | *(optional)* Supplies `model_conditions.timecourse_decoding` (conditions + window) for timecourse annotation. Without it, the timecourse page still renders, just unannotated. |
 | `--master-spreadsheet` | *(optional)* Needed alongside `--config` to compute each condition's median trial duration and each subject's TR (both derived from real data, not hardcoded) -- used to convert `window_index` to seconds and mark trial onset/end on the timecourse plot. Without it, the x-axis stays in raw `window_index` units and annotation is skipped. |
@@ -698,7 +701,7 @@ python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifi
 **Fold-variability panels are automatic, not configured.**
 `generate_report.py` detects `_fold{N}_*` files (accuracy/AUC overlays,
 timecourse bands, an importance-map consistency mosaic) purely by their
-presence on disk -- `mvpa_workflow.py`'s single independent-train/
+presence on disk -- `mvpa_generalization_workflow.py`'s single independent-train/
 independent-test case doesn't produce them, but `mvpa_kfold_workflow.py`
 (section 6) does, so these panels render automatically for its output with
 no report-side changes needed.

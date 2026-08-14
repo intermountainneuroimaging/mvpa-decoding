@@ -2,18 +2,20 @@
 
 """
 Generate a PDF report (accuracy/AUC, confusion-style matrices, timecourse
-decoding, importance maps) from mvpa_workflow.py's output -- either for one
-subject, or aggregated across every subject found for a given classifier
-("desc").
+decoding, importance maps) from mvpa_generalization_workflow.py's or
+mvpa_kfold_workflow.py's output -- either for one subject, or aggregated
+across every subject found for a given classifier ("desc"). Fold-variability
+panels render automatically when the input is mvpa_kfold_workflow.py's
+output (detected by the presence of `_fold{N}_*` files).
 
 Usage:
     # group report -- aggregates every subject found under <dir>/<desc>/*/
     python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier \\
-        --config examples/config-2.example.json --master-spreadsheet master_spreadsheet.csv
+        --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
 
     # single-subject report -- scoped to just <dir>/<desc>/4057/
     python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier \\
-        --subject 4057 --config examples/config-2.example.json --master-spreadsheet master_spreadsheet.csv
+        --subject 4057 --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
 
 --config/--master-spreadsheet are both optional and only needed for
 timecourse-decoding annotation (median event duration + TR, both derived
@@ -48,7 +50,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--analysis-output-dir", required=True,
-        help="Same --analysis-output-dir passed to mvpa_workflow.py -- results are read from "
+        help="Same --analysis-output-dir passed to mvpa_generalization_workflow.py -- results are read from "
              "<this>/<desc>/*/{cv,model,decoding}/"
     )
     parser.add_argument("--desc", required=True, help="Classifier folder name (model.desc, sanitized) under analysis-output-dir")

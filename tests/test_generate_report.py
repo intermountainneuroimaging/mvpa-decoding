@@ -1,6 +1,6 @@
 """generate_report.py: subject-scope discovery + file layout + small CSV
 loaders. Fake directory trees built under tmp_path -- no dependency on real
-mvpa_workflow.py output."""
+mvpa_generalization_workflow.py output."""
 
 import numpy as np
 import pandas as pd

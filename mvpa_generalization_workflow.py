@@ -8,7 +8,7 @@ timecourse_decoding window built independently of however volume_of_interest
 was computed in master_spreadsheet.csv. Reads the merged config (event_extraction
 + model_conditions + model sections) plus master_spreadsheet.csv produced by
 generate_master_spreadsheet.py -- see README.md sections 3-5 for the config
-format and "Running mvpa_workflow.py" for what each step does.
+format and "Running mvpa_generalization_workflow.py" for what each step does.
 
 Works for any number of training/testing conditions (2 or more): class lists
 are always derived from what the classifier actually learned (clf.classes_),
@@ -31,7 +31,8 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     decoding/<subject>_summary_decoding_results.csv -- averaged per (window_index, regressor_label)
 
 Usage:
-    python mvpa_workflow.py --subject 4057 --config examples/config-2.example.json \\
+    python mvpa_generalization_workflow.py --subject 4057 \\
+        --config examples/config-generalization.example.json \\
         --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out
 """
 

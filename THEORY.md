@@ -1,7 +1,7 @@
 # Theoretical background & use case
 
 This pipeline (`generate_master_spreadsheet.py` → `validate_model_config.py` →
-`mvpa_workflow.py`) is a config-driven replication of the multivariate
+`mvpa_generalization_workflow.py`) is a config-driven replication of the multivariate
 pattern analysis (MVPA) approach in:
 
 > Kim, H., Smolker, H. R., Smith, L. L., Banich, M. T., & Lewis-Peacock, J. A.
@@ -67,7 +67,7 @@ down faster or further than simply maintaining the item is evidence that the
 item's representation is being actively removed from the focus of attention,
 not just passively decaying.
 
-This repo's `mvpa_workflow.py` reproduces that logic directly:
+This repo's `mvpa_generalization_workflow.py` reproduces that logic directly:
 `build_timecourse_instructions()` recomputes, per trial, exactly this kind of
 onset-locked window (via `onset`/`duration`/`trial_index`, independent of the
 `hemodynamic_lag` used to build the table), predicts the trained classifier at

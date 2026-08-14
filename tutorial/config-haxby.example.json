@@ -534,9 +534,9 @@
         "class_weight": "balanced"
       }
     },
-    "cv": {
-      "strategy": "GroupKFold",
-      "n_splits": "infer"
+    "permutation_test": {
+      "n_permutations": 1000,
+      "random_state": 0
     }
   }
 }

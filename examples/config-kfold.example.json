@@ -89,6 +89,10 @@
     },
     "kfold_cv": {
       "strategy": "per_run"
+    },
+    "permutation_test": {
+      "n_permutations": 1000,
+      "random_state": 0
     }
   }
 }

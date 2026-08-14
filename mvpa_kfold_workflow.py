@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 
 """
-Same-task k-fold MVPA decoding: unlike mvpa_workflow.py's independent-train/
+Same-task k-fold MVPA decoding: unlike mvpa_generalization_workflow.py's independent-train/
 independent-test case, this script assumes model_conditions.training and
 model_conditions.testing (possibly different conditions) are drawn from the
 same task/run pool. Runs are split into folds (model.kfold_cv), and for each
 fold: train on every run NOT in the held-out group, test + timecourse-decode
 only on the held-out group's rows, then aggregate every fold's results into
 one final answer -- same classifier/accuracy/decoding steps as
-mvpa_workflow.py, reused from mvpa_common.py so the two scripts can never
+mvpa_generalization_workflow.py, reused from mvpa_common.py so the two scripts can never
 drift apart on how a model is actually fit or scored.
 
 Fold membership can be automatic (leave-one-run-out, or an n-way split over
@@ -29,7 +29,7 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     decoding/<subject>_decoding_results.csv               -- aggregated raw (pooled across folds)
     decoding/<subject>_summary_decoding_results.csv       -- aggregated summary
 
-The aggregated files use the exact same names mvpa_workflow.py writes, so
+The aggregated files use the exact same names mvpa_generalization_workflow.py writes, so
 generate_report.py (and any other downstream consumer) doesn't need to know
 which workflow produced a given subject's results -- and its existing
 `_fold{N}_*`-detection already renders fold-variability panels against the
@@ -106,7 +106,7 @@ def validate_kfold_cv_config(kfold_cv_cfg) -> None:
     if kfold_cv_cfg is None:
         raise SystemExit(
             "model.kfold_cv is required for mvpa_kfold_workflow.py -- see README.md's K-fold "
-            "workflow section, or use mvpa_workflow.py for the independent-train/independent-test case."
+            "workflow section, or use mvpa_generalization_workflow.py for the independent-train/independent-test case."
         )
     strategy = kfold_cv_cfg.get("strategy")
     if strategy not in KFOLD_STRATEGIES:
@@ -410,7 +410,7 @@ def main(args):
     )
 
     # -------------------------------------------------
-    # Aggregated outputs -- same filenames mvpa_workflow.py uses, so
+    # Aggregated outputs -- same filenames mvpa_generalization_workflow.py uses, so
     # generate_report.py and other downstream consumers don't need to know
     # which workflow produced a given subject's results.
     # -------------------------------------------------

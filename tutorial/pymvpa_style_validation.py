@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-External validation of mvpa_workflow.py's Haxby-dataset results, using
+External validation of mvpa_generalization_workflow.py's Haxby-dataset results, using
 PyMVPA's own documented methodology instead of PyMVPA itself -- pymvpa2
 (last released ~2020) isn't installable here: its legacy setup.py needs
 numpy.distutils, which depends on Python's stdlib distutils, removed in
@@ -21,10 +21,10 @@ dataset, grounded in their tutorial docs (fetched from pymvpa.org):
     here) via NFoldPartitioner.
 
 Deliberately does NOT import anything from mvpa_common.py/
-generate_master_spreadsheet.py/mvpa_workflow.py -- only nibabel/numpy/
+generate_master_spreadsheet.py/mvpa_generalization_workflow.py -- only nibabel/numpy/
 pandas/sklearn -- so this is a genuinely separate feature-extraction and
 classification code path, not a re-skin of our own pipeline. It does reuse
-the same preprocessed BOLD data and mask mvpa_workflow.py used (so any
+the same preprocessed BOLD data and mask mvpa_generalization_workflow.py used (so any
 difference in the numbers reflects classifier/CV methodology, not
 different inputs), loaded directly via nibabel + numpy boolean indexing
 rather than nilearn's NiftiMasker.
@@ -60,7 +60,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--our-results-dir", default=None,
-        help="Path to mvpa_workflow.py's model/ output dir (<analysis-output-dir>/<desc>/<subject>/model) "
+        help="Path to mvpa_generalization_workflow.py's model/ output dir (<analysis-output-dir>/<desc>/<subject>/model) "
              "to print alongside for comparison. Omit to skip that comparison row."
     )
     return parser.parse_args()
@@ -140,7 +140,7 @@ def nearest_centroid_correlation(X_train, y_train, X_test, categories):
 def linear_svm(X_train, y_train, X_test, categories):
     """PyMVPA's alternative canonical classifier (LinearCSVMC analog).
     decision_function -> sigmoid evidence, the same AUC methodology
-    model_performance() in mvpa_workflow.py already uses, so only the
+    model_performance() in mvpa_generalization_workflow.py already uses, so only the
     classifier differs between the two pipelines, not the scoring formula."""
     clf = SVC(kernel="linear", class_weight="balanced")
     clf.fit(X_train, y_train)
@@ -237,7 +237,7 @@ def main():
     if args.our_results_dir:
         our = load_our_results(args.our_results_dir)
         if our:
-            print(f"{'mvpa_workflow.py (this repo)':45s} {'matched split':20s} {our[0]:.4f}     {our[1]:.4f}")
+            print(f"{'mvpa_generalization_workflow.py (this repo)':45s} {'matched split':20s} {our[0]:.4f}     {our[1]:.4f}")
     for method, (acc, auc) in matched.items():
         print(f"{method:45s} {'matched split':20s} {acc:.4f}     {auc:.4f}")
     for method, (acc, auc) in loro.items():

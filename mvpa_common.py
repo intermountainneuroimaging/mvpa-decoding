@@ -3,9 +3,9 @@
 Shared utilities for the mvpa_banich toolchain: BIDS filename parsing, the
 onset/duration -> BOLD volume-range math, the model_conditions query DSL, and
 the config-loading/classification/decoding primitives used by both
-mvpa_workflow.py (independent train/test) and mvpa_kfold_workflow.py
-(same-task, split-by-run k-fold) -- also used directly by
-generate_master_spreadsheet.py and validate_model_config.py.
+mvpa_generalization_workflow.py (independent train/test) and
+mvpa_kfold_workflow.py (same-task, split-by-run k-fold) -- also used directly
+by generate_master_spreadsheet.py and validate_model_config.py.
 """
 
 import importlib
@@ -246,7 +246,7 @@ def resolve_window_times(window: dict, onset: float, duration: float):
 
 # =====================================================
 # Small shared helpers (no dependency on any script's module-level state --
-# safe to import from mvpa_workflow.py, generate_report.py, or anywhere else)
+# safe to import from mvpa_generalization_workflow.py, generate_report.py, or anywhere else)
 # =====================================================
 
 def quick_safe(name) -> str:
@@ -342,10 +342,6 @@ def default_model_config() -> dict:
                 "class_weight": "balanced"
             }
         },
-        "cv": {
-            "strategy": "GroupKFold",
-            "n_splits": "infer"
-        }
     }
 
 
