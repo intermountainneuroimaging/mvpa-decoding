@@ -2,13 +2,16 @@
 
 """
 Within-subject MVPA decoding: trains a classifier on model_conditions.training,
-cross-validates internally on that same training data (GroupKFold on `run`),
-evaluates on model_conditions.testing, and predicts at every TR across a
-timecourse_decoding window built independently of however volume_of_interest
-was computed in master_spreadsheet.csv. Reads the merged config (event_extraction
-+ model_conditions + model sections) plus master_spreadsheet.csv produced by
-generate_master_spreadsheet.py -- see README.md sections 3-5 for the config
-format and "Running mvpa_generalization_workflow.py" for what each step does.
+cross-validates internally on that same training data as a sanity-check
+diagnostic (leave-one-run-out when every training run contains the same
+conditions, otherwise a single stratified 25% holdout split by trial --
+see resolve_internal_cv_folds), evaluates on model_conditions.testing, and
+predicts at every TR across a timecourse_decoding window built independently
+of however volume_of_interest was computed in master_spreadsheet.csv. Reads
+the merged config (event_extraction + model_conditions + model sections)
+plus master_spreadsheet.csv produced by generate_master_spreadsheet.py --
+see README.md sections 3-5 for the config format and "Running
+mvpa_generalization_workflow.py" for what each step does.
 
 Works for any number of training/testing conditions (2 or more): class lists
 are always derived from what the classifier actually learned (clf.classes_),
@@ -86,6 +89,74 @@ def parse_args():
     )
 
     return parser.parse_args()
+
+
+# =====================================================
+# Internal training-CV fold selection
+# =====================================================
+
+def training_runs_have_matching_conditions(training_df_balanced: pd.DataFrame) -> bool:
+    """Whether every run in the (balanced) training set contains the same set of
+    regressor_label conditions -- i.e. every run is a full replicate of the
+    training task. Leave-one-run-out is only a fair internal-CV fold under that
+    assumption: if some run is missing a condition entirely, holding it out (or
+    training without it) silently removes that condition from one side of the
+    fold, which isn't a meaningful sanity check anymore."""
+    per_run_conditions = training_df_balanced.groupby("run")["regressor_label"].agg(lambda s: frozenset(s.unique()))
+    return per_run_conditions.nunique() == 1
+
+
+def stratified_trial_holdout_split(training_df_balanced: pd.DataFrame, test_size: float = 0.25, random_state: int = 0):
+    """A single (train_idx, test_idx) fold -- test_size fraction of *trials*
+    (not individual volumes) held out, chosen independently per condition so
+    class balance is preserved. Splitting is done at the (run, trial_index)
+    level, not the row level, so every volume belonging to one event stays on
+    the same side of the split -- otherwise correlated volumes from the same
+    trial could leak across train/test. Used as a fallback internal-CV fold
+    when training_runs_have_matching_conditions() is False, since
+    leave-one-run-out isn't meaningful there."""
+    rng = np.random.default_rng(random_state)
+
+    trials = (
+        training_df_balanced[["run", "trial_index", "regressor_label"]]
+        .drop_duplicates(subset=["run", "trial_index"])
+        .reset_index(drop=True)
+    )
+
+    test_mask = pd.Series(False, index=trials.index)
+    for regressor_label, group in trials.groupby("regressor_label"):
+        n = len(group)
+        if n < 2:
+            print(f"(!) condition {regressor_label!r} has only {n} trial(s) in training data -- "
+                  f"keeping it entirely in the training split (nothing held out for this condition)")
+            continue
+        n_test = min(max(1, round(n * test_size)), n - 1)
+        chosen = rng.choice(group.index.to_numpy(), size=n_test, replace=False)
+        test_mask.loc[chosen] = True
+
+    test_trials = trials.loc[test_mask, ["run", "trial_index"]]
+    row_is_test = training_df_balanced.set_index(["run", "trial_index"]).index.isin(
+        pd.MultiIndex.from_frame(test_trials)
+    )
+
+    test_idx = np.where(row_is_test)[0]
+    train_idx = np.where(~row_is_test)[0]
+    return train_idx, test_idx
+
+
+def resolve_internal_cv_folds(training_df_balanced: pd.DataFrame):
+    """Leave-one-run-out (PredefinedSplit on `run`) when every training run
+    contains the same conditions; otherwise a single stratified 25% holdout
+    split by trial, with a warning, since leave-one-run-out would risk
+    dropping a condition from a fold entirely."""
+    if training_runs_have_matching_conditions(training_df_balanced):
+        return list(PredefinedSplit(training_df_balanced["run"]).split())
+
+    print("(!) training runs do not all contain the same condition(s) -- leave-one-run-out "
+          "would risk some fold missing a condition entirely. Falling back to a single "
+          "stratified 25% holdout split (by trial, balanced per condition) for the internal "
+          "training-CV diagnostic.")
+    return [stratified_trial_holdout_split(training_df_balanced, test_size=0.25, random_state=0)]
 
 
 # =====================================================
@@ -188,9 +259,10 @@ def main(args):
     training_df_balanced = balance(training_df)
     training_df_balanced.reset_index(inplace=True)
 
-    # lets process model k-fold times -- use "run" to generate folds
-    ps = PredefinedSplit(training_df_balanced["run"])
-    folds = list(ps.split())
+    # leave-one-run-out when every run is a full replicate of the training
+    # conditions; a single stratified 25% holdout split by trial otherwise
+    # (see resolve_internal_cv_folds)
+    folds = resolve_internal_cv_folds(training_df_balanced)
 
     ii_results = []
     ii_impa = []

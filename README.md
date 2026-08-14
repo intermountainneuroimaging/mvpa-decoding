@@ -421,13 +421,32 @@ Omit either of `featureSelection`/`classifier` and it falls back to a
 default (ANOVA @ p<0.05, `LogisticRegression`) -- only `desc` and `mask` are
 meaningfully required.
 
-There's no `model.cv` field -- `mvpa_generalization_workflow.py`'s internal
-training-diagnostic cross-validation (the `cv/` output files below) always
-splits by the `run` column directly via `PredefinedSplit`; the fold count is
-just however many distinct `run` values exist in the training data, not a
-configurable knob. (For same-task data where you want to control fold
-membership yourself, that's `model.kfold_cv` on `mvpa_kfold_workflow.py`
-instead -- see section 6.)
+There's no `model.cv` field -- it's not a configurable knob, it's determined
+automatically from the training data itself (`resolve_internal_cv_folds` in
+`mvpa_generalization_workflow.py`):
+
+- **Leave-one-run-out** (`PredefinedSplit` on the `run` column, one fold per
+  distinct run) when every training run contains the same set of conditions
+  -- i.e. every run is a full replicate of the training task. This is the
+  default case, and matches the leave-one-run-out scheme in the paper this
+  pipeline replicates (see [THEORY.md](THEORY.md)).
+- **A single stratified 25% holdout split, by trial** (grouped by
+  `(run, trial_index)` so every volume from one event stays on the same side
+  -- and independently balanced per condition, not per row) when runs
+  *don't* all share the same conditions -- holding out a whole run in that
+  case would risk silently dropping a condition from one side of the fold
+  entirely. A warning is printed when this fallback triggers.
+
+Either way this only ever touches `model_conditions.training` data -- it
+never looks at `testing`/`timecourse_decoding` rows. It's a sanity-check
+diagnostic (does the classifier find real signal within its own training
+task at all?), separate from and complementary to the actual held-out test
+against `testing_conditions` (does that pattern generalize to new/different
+data?) -- `generate_report.py`'s accuracy/AUC page (section 7) plots both
+side by side as "internal CV (training)" vs. "held-out test". (For same-task
+data where you want to control fold membership yourself for the *actual*
+evaluation, not just this internal diagnostic, that's `model.kfold_cv` on
+`mvpa_kfold_workflow.py` instead -- see section 6.)
 
 ### `permutation_test` (optional): significance testing for the held-out result
 
