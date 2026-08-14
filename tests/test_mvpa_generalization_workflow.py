@@ -1,6 +1,7 @@
 """mvpa_generalization_workflow.py: internal training-CV fold selection --
 leave-one-run-out when every training run replicates the same conditions,
-otherwise a stratified trial-level holdout fallback. Synthetic data only."""
+otherwise n_splits-fold stratified CV over trials pooled across all runs
+(fold membership not scoped to any one run). Synthetic data only."""
 
 import numpy as np
 import pandas as pd
@@ -8,14 +9,14 @@ import pytest
 
 from mvpa_generalization_workflow import (
     training_runs_have_matching_conditions,
-    stratified_trial_holdout_split,
+    stratified_trial_kfold_split,
     resolve_internal_cv_folds,
 )
 
 
-def _trial_volumes(run, trial_index, regressor_label, regressor, n_volumes=3):
+def _trial_volumes(run, trial_index, regressor_label, n_volumes=3):
     return [
-        {"run": run, "trial_index": trial_index, "regressor_label": regressor_label, "regressor": regressor}
+        {"run": run, "trial_index": trial_index, "regressor_label": regressor_label}
         for _ in range(n_volumes)
     ]
 
@@ -25,8 +26,7 @@ def _balanced_multi_run_df(n_runs=3, n_trials_per_condition_per_run=10, n_volume
     for run in range(1, n_runs + 1):
         for trial_index in range(1, n_trials_per_condition_per_run * 2 + 1):
             label = "face" if trial_index % 2 == 0 else "place"
-            code = 1 if label == "face" else 2
-            rows.extend(_trial_volumes(run, trial_index, label, code, n_volumes))
+            rows.extend(_trial_volumes(run, trial_index, label, n_volumes))
     return pd.DataFrame(rows)
 
 
@@ -55,49 +55,71 @@ class TestTrainingRunsHaveMatchingConditions:
 
 
 # =====================================================
-# stratified_trial_holdout_split
+# stratified_trial_kfold_split
 # =====================================================
 
-class TestStratifiedTrialHoldoutSplit:
-    def test_no_row_overlap_between_train_and_test(self):
+class TestStratifiedTrialKfoldSplit:
+    def test_returns_n_splits_folds(self):
         df = _balanced_multi_run_df()
-        train_idx, test_idx = stratified_trial_holdout_split(df, test_size=0.25, random_state=0)
-        assert len(set(train_idx) & set(test_idx)) == 0
-        assert len(train_idx) + len(test_idx) == len(df)
+        folds = stratified_trial_kfold_split(df, n_splits=4, random_state=0)
+        assert len(folds) == 4
 
-    def test_no_trial_split_across_train_and_test(self):
+    def test_no_row_overlap_within_any_fold(self):
         df = _balanced_multi_run_df()
-        train_idx, test_idx = stratified_trial_holdout_split(df, test_size=0.25, random_state=0)
-        train_trials = set(map(tuple, df.iloc[train_idx][["run", "trial_index"]].to_numpy()))
-        test_trials = set(map(tuple, df.iloc[test_idx][["run", "trial_index"]].to_numpy()))
-        assert train_trials & test_trials == set()
+        for train_idx, test_idx in stratified_trial_kfold_split(df, n_splits=4, random_state=0):
+            assert len(set(train_idx) & set(test_idx)) == 0
+            assert len(train_idx) + len(test_idx) == len(df)
 
-    def test_test_fraction_is_approximately_25_percent(self):
+    def test_no_trial_split_across_train_and_test_within_any_fold(self):
         df = _balanced_multi_run_df()
-        train_idx, test_idx = stratified_trial_holdout_split(df, test_size=0.25, random_state=0)
-        fraction = len(test_idx) / len(df)
-        assert fraction == pytest.approx(0.25, abs=0.05)
+        for train_idx, test_idx in stratified_trial_kfold_split(df, n_splits=4, random_state=0):
+            train_trials = set(map(tuple, df.iloc[train_idx][["run", "trial_index"]].to_numpy()))
+            test_trials = set(map(tuple, df.iloc[test_idx][["run", "trial_index"]].to_numpy()))
+            assert train_trials & test_trials == set()
 
-    def test_class_balance_preserved_in_test_set(self):
+    def test_every_row_is_tested_exactly_once_across_all_folds(self):
         df = _balanced_multi_run_df()
-        train_idx, test_idx = stratified_trial_holdout_split(df, test_size=0.25, random_state=0)
-        counts = df.iloc[test_idx]["regressor_label"].value_counts()
-        assert counts["face"] == counts["place"]
+        folds = stratified_trial_kfold_split(df, n_splits=4, random_state=0)
+        test_counts = np.zeros(len(df), dtype=int)
+        for _, test_idx in folds:
+            test_counts[test_idx] += 1
+        assert (test_counts == 1).all()
+
+    def test_class_balance_approximately_preserved_in_each_fold(self):
+        df = _balanced_multi_run_df()
+        for _, test_idx in stratified_trial_kfold_split(df, n_splits=4, random_state=0):
+            counts = df.iloc[test_idx]["regressor_label"].value_counts()
+            assert counts["face"] == pytest.approx(counts["place"], abs=3)
 
     def test_deterministic_given_same_random_state(self):
         df = _balanced_multi_run_df()
-        train_idx1, test_idx1 = stratified_trial_holdout_split(df, test_size=0.25, random_state=0)
-        train_idx2, test_idx2 = stratified_trial_holdout_split(df, test_size=0.25, random_state=0)
-        np.testing.assert_array_equal(sorted(test_idx1), sorted(test_idx2))
+        folds1 = stratified_trial_kfold_split(df, n_splits=4, random_state=0)
+        folds2 = stratified_trial_kfold_split(df, n_splits=4, random_state=0)
+        for (_, test1), (_, test2) in zip(folds1, folds2):
+            np.testing.assert_array_equal(sorted(test1), sorted(test2))
 
-    def test_condition_with_fewer_than_2_trials_kept_entirely_in_train(self, capsys):
-        rows = _trial_volumes(1, 1, "rare", 3, n_volumes=2)  # only 1 trial for "rare"
-        rows += _balanced_multi_run_df(n_runs=1, n_trials_per_condition_per_run=5).to_dict("records")
+    def test_reduces_n_splits_when_rarest_condition_has_fewer_trials(self, capsys):
+        rows = []
+        for run in (1, 2):
+            for trial_index in range(1, 7):
+                rows.extend(_trial_volumes(run, trial_index, "common"))
+        rows.extend(_trial_volumes(1, 100, "rare"))
+        rows.extend(_trial_volumes(2, 100, "rare"))
+        df = pd.DataFrame(rows)  # "rare" has 2 trials total -- fewer than the default n_splits=4
+
+        folds = stratified_trial_kfold_split(df, n_splits=4, random_state=0)
+        assert len(folds) == 2
+        assert "reducing internal-CV from 4 to 2 fold(s)" in capsys.readouterr().out
+
+    def test_raises_when_rarest_condition_has_fewer_than_2_trials(self):
+        rows = []
+        for trial_index in range(1, 7):
+            rows.extend(_trial_volumes(1, trial_index, "common"))
+        rows.extend(_trial_volumes(1, 100, "rare"))  # only 1 trial
         df = pd.DataFrame(rows)
-        train_idx, test_idx = stratified_trial_holdout_split(df, test_size=0.25, random_state=0)
-        rare_rows = df[df["regressor_label"] == "rare"]
-        assert set(rare_rows.index) <= set(train_idx)
-        assert "only 1 trial(s)" in capsys.readouterr().out
+
+        with pytest.raises(SystemExit):
+            stratified_trial_kfold_split(df, n_splits=4, random_state=0)
 
 
 # =====================================================
@@ -114,10 +136,16 @@ class TestResolveInternalCvFolds:
         folds = resolve_internal_cv_folds(df)
         assert len(folds) == 3  # one fold per distinct run
 
-    def test_heterogeneous_runs_fall_back_to_single_stratified_split(self, capsys):
+    def test_heterogeneous_runs_fall_back_to_4_fold_stratified_split(self, capsys):
         df = _balanced_multi_run_df()
         # make run 3 missing the "place" condition entirely
         df = df[~((df["run"] == 3) & (df["regressor_label"] == "place"))].reset_index(drop=True)
         folds = resolve_internal_cv_folds(df)
-        assert len(folds) == 1
+        assert len(folds) == 4
         assert "do not all contain the same condition" in capsys.readouterr().out
+
+    def test_n_splits_is_configurable(self):
+        df = _balanced_multi_run_df()
+        df = df[~((df["run"] == 3) & (df["regressor_label"] == "place"))].reset_index(drop=True)
+        folds = resolve_internal_cv_folds(df, n_splits=3)
+        assert len(folds) == 3

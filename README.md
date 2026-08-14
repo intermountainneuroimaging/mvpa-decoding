@@ -430,12 +430,21 @@ automatically from the training data itself (`resolve_internal_cv_folds` in
   -- i.e. every run is a full replicate of the training task. This is the
   default case, and matches the leave-one-run-out scheme in the paper this
   pipeline replicates (see [THEORY.md](THEORY.md)).
-- **A single stratified 25% holdout split, by trial** (grouped by
-  `(run, trial_index)` so every volume from one event stays on the same side
-  -- and independently balanced per condition, not per row) when runs
-  *don't* all share the same conditions -- holding out a whole run in that
-  case would risk silently dropping a condition from one side of the fold
-  entirely. A warning is printed when this fallback triggers.
+- **4-fold stratified CV over trials pooled across all runs** (not scoped to
+  any one run) when runs *don't* all share the same conditions -- holding
+  out a whole run in that case would risk silently dropping a condition from
+  one side of a fold entirely, so fold membership is built directly from
+  trials instead. Each condition's trials are gathered from every run
+  together and partitioned into 4 folds independently (`StratifiedKFold`),
+  grouped by `(run, trial_index)` so every volume belonging to one event
+  stays on the same side of its fold -- row-level splitting would let
+  correlated volumes from the same trial leak across train/test. If the
+  rarest condition has fewer than 4 trials, the fold count is reduced
+  automatically (down to a minimum of 2) so every fold still gets at least
+  one trial of every condition; fewer than 2 trials for the rarest condition
+  is a hard error. A warning is printed when this fallback triggers, and
+  each fold's train/test row counts and held-out trials are logged as
+  they're built.
 
 Either way this only ever touches `model_conditions.training` data -- it
 never looks at `testing`/`timecourse_decoding` rows. It's a sanity-check
