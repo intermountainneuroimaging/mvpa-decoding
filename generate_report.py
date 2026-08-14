@@ -450,19 +450,31 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
     # Masks are native-space, per subject -- there is no common voxel grid across
     # subjects, so importance maps are never averaged across subjects (only across
     # folds, within one subject, where the grid is guaranteed shared).
+    #
+    # model_impa means something different depending on which workflow produced it
+    # (fold_flags[s] is exactly that signal, via has_fold_files -- see subject_paths):
+    #   - mvpa_generalization_workflow.py: the one classifier fit on the full
+    #     training set, evaluated against the held-out test set. Nothing is
+    #     averaged -- this is that single fit's own weights.
+    #   - mvpa_kfold_workflow.py: the mean importance map across every fold's own
+    #     fit (each fold trained on a different subset of runs) -- a genuine
+    #     aggregate, further broken out fold-by-fold in the mosaic below.
     if len(subjects) > 1:
         for s in subjects:
             p = subject_paths(analysis_output_dir, desc, s)
             if os.path.exists(p["model_impa"]):
-                _plot_categories_page(pdf, p["model_impa"], s, regressor_categories)
+                label = "aggregated across folds" if fold_flags.get(s) else "full training set"
+                _plot_categories_page(pdf, p["model_impa"], f"{s} ({label})", regressor_categories)
         return
 
     s = subjects[0]
     p = subject_paths(analysis_output_dir, desc, s)
+    is_kfold = fold_flags.get(s)
     if os.path.exists(p["model_impa"]):
-        _plot_categories_page(pdf, p["model_impa"], f"{s} (aggregated)", regressor_categories)
+        label = "aggregated across folds" if is_kfold else "full training set"
+        _plot_categories_page(pdf, p["model_impa"], f"{s} ({label})", regressor_categories)
 
-    if fold_flags.get(s):
+    if is_kfold:
         folds = fold_paths(analysis_output_dir, desc, s)
         fold_files = {fid: f["model_impa"] for fid, f in folds.items() if os.path.exists(f["model_impa"])}
         if fold_files and os.path.exists(p["model_impa"]):
