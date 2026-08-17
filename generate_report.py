@@ -130,6 +130,13 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str) -> dict:
         "model_accuracy": os.path.join(base, "model", f"{subject}_model_results_accuracy.csv"),
         "model_evidence": os.path.join(base, "model", f"{subject}_model_results_evidence.csv"),
         "model_impa": os.path.join(base, "model", f"{subject}_impa_native.nii.gz"),
+        # never written by the workflow scripts (they only ever write native-space
+        # maps) -- this is the expected filename if the user has separately
+        # resampled model_impa into MNI space via `hcp_resample.py --direction
+        # native2mni --output .../model/{subject}_impa_mni.nii.gz`. Its presence is
+        # how render_importance_pages decides a cross-subject group average is
+        # spatially valid -- see resolve_group_impa_mni.
+        "model_impa_mni": os.path.join(base, "model", f"{subject}_impa_mni.nii.gz"),
         # "decoding" (the pre-aggregated summary) isn't read by the timecourse page
         # itself -- it reads "decoding_raw" instead, so trial-to-trial variability
         # within each subject/fold (never retained in the summary) is available for
@@ -281,22 +288,43 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
 
     # --- left: internal-CV vs held-out test accuracy ---
     ax = axes[0]
-    x = np.arange(len(subjects))
-    width = 0.35
-    ax.bar(x - width / 2, [cv_totals.get(s, np.nan) for s in subjects], width, label="internal CV (training)")
-    ax.bar(x + width / 2, [model_totals.get(s, np.nan) for s in subjects], width, label="held-out test")
+    if len(subjects) > 1:
+        # group report -- one bar per metric (mean across subjects), with each
+        # subject's own value scattered on top (beeswarm-style, deterministic
+        # spread rather than random jitter so the figure is reproducible)
+        labels_acc = ["internal CV\n(training)", "held-out test"]
+        per_metric_vals = [
+            [cv_totals[s] for s in subjects if s in cv_totals],
+            [model_totals[s] for s in subjects if s in model_totals],
+        ]
+        means = [np.mean(vals) if vals else np.nan for vals in per_metric_vals]
+        ax.bar(labels_acc, means, color=["C0", "C1"], alpha=0.7, zorder=1)
 
-    if len(subjects) == 1 and fold_flags.get(subjects[0]):
-        folds = fold_paths(analysis_output_dir, desc, subjects[0])
-        fold_vals = [load_scalar_csv(f["model_total"]) for f in folds.values() if os.path.exists(f["model_total"])]
-        if fold_vals:
-            ax.scatter([x[0] + width / 2] * len(fold_vals), fold_vals, color="black", zorder=3, s=20, label="per-fold test")
+        for xi, vals in enumerate(per_metric_vals):
+            if not vals:
+                continue
+            jitter = np.linspace(-0.12, 0.12, len(vals)) if len(vals) > 1 else np.array([0.0])
+            ax.scatter(xi + jitter, vals, color="black", zorder=3, s=20)
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(subjects, rotation=45, ha="right")
+        ax.set_title("Accuracy: internal CV vs. held-out test\n(bars = mean, dots = individual subjects)")
+    else:
+        x = np.arange(len(subjects))
+        width = 0.35
+        ax.bar(x - width / 2, [cv_totals.get(s, np.nan) for s in subjects], width, label="internal CV (training)")
+        ax.bar(x + width / 2, [model_totals.get(s, np.nan) for s in subjects], width, label="held-out test")
+
+        if fold_flags.get(subjects[0]):
+            folds = fold_paths(analysis_output_dir, desc, subjects[0])
+            fold_vals = [load_scalar_csv(f["model_total"]) for f in folds.values() if os.path.exists(f["model_total"])]
+            if fold_vals:
+                ax.scatter([x[0] + width / 2] * len(fold_vals), fold_vals, color="black", zorder=3, s=20, label="per-fold test")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(subjects, rotation=45, ha="right")
+        ax.legend(fontsize=8)
+        ax.set_title("Accuracy: internal CV vs. held-out test")
+
     ax.set_ylabel("Accuracy")
-    ax.legend(fontsize=8)
-    ax.set_title("Accuracy: internal CV vs. held-out test")
 
     # --- right: per-class AUC ---
     ax = axes[1]
@@ -313,8 +341,7 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
                     if os.path.exists(f["model_auc"]):
                         fold_auc = load_labeled_csv(f["model_auc"]).iloc[:, 0].reindex(categories)
                         ax.scatter(categories, fold_auc.values, color="black", s=15, zorder=3)
-        ax.set_xticks(range(len(categories)))
-        ax.set_xticklabels(categories, rotation=45, ha="right")
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
         ax.set_ylabel("AUC")
         ax.axhline(0.5, linestyle="--", color="gray", linewidth=1)
     ax.set_title("Per-class AUC" + (" across subjects" if len(subjects) > 1 else ""))
@@ -490,10 +517,12 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
     plt.close(fig)
 
 
-def _plot_categories_page(pdf, impa_path, title, regressor_categories):
+def _plot_categories_page(pdf, impa, title, regressor_categories):
+    """impa is either a path to a NIfTI file, or an already-loaded/in-memory
+    nibabel image (e.g. a group-average built without ever touching disk)."""
     from nilearn import plotting
 
-    img = nib.load(impa_path)
+    img = nib.load(impa) if isinstance(impa, (str, os.PathLike)) else impa
     data = img.get_fdata()
     n_cat = data.shape[3] if data.ndim == 4 else 1
 
@@ -545,10 +574,28 @@ def _render_fold_mosaic(pdf, fold_files: dict, mean_file: str, regressor_categor
     plt.close(fig)
 
 
+def resolve_group_impa_mni(analysis_output_dir: str, desc: str, subjects: list) -> tuple:
+    """Which subjects have an MNI-registered importance map (model_impa_mni --
+    never written by the workflow scripts themselves, only by the user separately
+    running `hcp_resample.py --direction native2mni` on their own model_impa
+    file). Returns ({subject: path}, [subjects missing it]) -- pure path-existence
+    check, no image I/O; shape compatibility is checked separately at load time."""
+    available, missing = {}, []
+    for s in subjects:
+        p = subject_paths(analysis_output_dir, desc, s)
+        if os.path.exists(p["model_impa_mni"]):
+            available[s] = p["model_impa_mni"]
+        else:
+            missing.append(s)
+    return available, missing
+
+
 def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags, regressor_categories):
-    # Masks are native-space, per subject -- there is no common voxel grid across
-    # subjects, so importance maps are never averaged across subjects (only across
-    # folds, within one subject, where the grid is guaranteed shared).
+    # Native-space maps have no common voxel grid across subjects, so they're
+    # never averaged across subjects (only across folds, within one subject,
+    # where the grid is guaranteed shared) -- see resolve_group_impa_mni for the
+    # one exception: if the user has separately resampled model_impa into MNI
+    # space (shared grid), a real group average becomes possible.
     #
     # model_impa means something different depending on which workflow produced it
     # (fold_flags[s] is exactly that signal, via has_fold_files -- see subject_paths):
@@ -559,6 +606,29 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
     #     fit (each fold trained on a different subset of runs) -- a genuine
     #     aggregate, further broken out fold-by-fold in the mosaic below.
     if len(subjects) > 1:
+        mni_paths, missing = resolve_group_impa_mni(analysis_output_dir, desc, subjects)
+        if mni_paths:
+            if missing:
+                print(f"  (!) {len(missing)} subject(s) have no MNI-registered importance map "
+                      f"({', '.join(missing)}) -- group map averaged across the remaining {len(mni_paths)}")
+
+            imgs = {s: nib.load(path) for s, path in mni_paths.items()}
+            ref_subject, ref_img = next(iter(imgs.items()))
+            mismatched = [s for s, img in imgs.items() if img.shape != ref_img.shape]
+            if mismatched:
+                print(f"  (!) {len(mismatched)} subject(s) MNI importance map shape doesn't match "
+                      f"the reference grid ({ref_subject}'s {ref_img.shape}): {', '.join(mismatched)} -- "
+                      f"excluded from the group average")
+
+            included = [s for s in imgs if s not in mismatched]
+            mean_data = np.mean([imgs[s].get_fdata() for s in included], axis=0)
+            mean_img = nib.Nifti1Image(mean_data, ref_img.affine)
+            _plot_categories_page(pdf, mean_img, f"group mean, MNI space (n={len(included)} subjects)", regressor_categories)
+            return
+
+        print("  (!) no subject has an MNI-registered importance map (model/{subject}_impa_mni.nii.gz) -- "
+              "falling back to per-subject native-space maps, which aren't spatially comparable across subjects. "
+              "Resample each subject's model_impa via `hcp_resample.py --direction native2mni` to enable a group map.")
         for s in subjects:
             p = subject_paths(analysis_output_dir, desc, s)
             if os.path.exists(p["model_impa"]):

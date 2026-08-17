@@ -764,11 +764,30 @@ independent-test case doesn't produce them, but `mvpa_kfold_workflow.py`
 (section 6) does, so these panels render automatically for its output with
 no report-side changes needed.
 
-**Importance maps are never averaged across subjects.** Masks are
-native-space and per-subject -- there's no common voxel grid to average
-onto, unlike a normalized-space group analysis. The group report shows one
-page per subject instead; only within-subject fold-to-fold averaging (same
-subject, same grid) happens.
+**Group accuracy/AUC panels show mean + per-subject scatter.** For a
+multi-subject report, the accuracy panel plots one bar each for mean
+internal-CV and mean held-out-test accuracy, with every subject's own value
+scattered on top (deterministic beeswarm spread, not random jitter, so the
+figure is reproducible run to run); the AUC panel does the analogous thing
+per category via a boxplot. Single-subject reports keep the original
+per-subject/per-fold bar chart instead, since there's only one point per
+metric.
+
+**Importance maps are averaged across subjects only when they share a
+common grid.** `model_impa` (`model/{subject}_impa_native.nii.gz`) is
+always native-space and per-subject -- there's no common voxel grid to
+average onto directly, unlike a normalized-space group analysis, so by
+default the group report shows one native-space page per subject instead
+(only within-subject fold-to-fold averaging, same subject same grid,
+happens automatically). If you resample each subject's `model_impa` into a
+shared MNI grid yourself -- via `hcp_resample.py --direction native2mni`
+(section 8) -- and save the result as `model/{subject}_impa_mni.nii.gz`
+right alongside it, `generate_report.py` detects that suffix and plots a
+single group-mean page in MNI space instead of per-subject native pages.
+Subjects missing `_impa_mni.nii.gz`, or whose map doesn't match the other
+subjects' grid shape, are excluded from the average with a printed warning
+rather than failing the whole report; the group page's title records how
+many subjects went into the average.
 
 The timecourse page always reads the raw per-TR `decoding_results.csv`, not
 `summary_decoding_results.csv` -- the summary only ever kept each group's
@@ -805,7 +824,9 @@ This pipeline's masks/classification are entirely native-space (see the
 Pipelines is commonly in MNI space and needs to move between the two --
 e.g. bringing an MNI-space preprocessed BOLD run into native space to match
 this pipeline's native masks, or bringing this pipeline's own native-space
-importance map into MNI space for group-level comparison.
+importance map into MNI space for group-level comparison (save the result
+as `model/{subject}_impa_mni.nii.gz` to have `generate_report.py`'s group
+report pick it up automatically -- see section 7).
 `hcp_resample.py` is a standalone script for exactly that, independent of
 the classification/reporting scripts (`model_conditions`/`model` don't
 apply here at all -- it takes plain CLI flags, one file at a time, same as

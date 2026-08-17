@@ -19,6 +19,7 @@ from generate_report import (
     summarize_raw_for_timecourse,
     load_annotation_info,
     resolve_desc,
+    resolve_group_impa_mni,
 )
 
 
@@ -68,6 +69,8 @@ class TestSubjectPaths:
         assert paths["cv_total"] == "/out/desc1/01/cv/01_cv_results_total_scores.csv"
         assert paths["decoding"] == "/out/desc1/01/decoding/01_summary_decoding_results.csv"
         assert paths["decoding_raw"] == "/out/desc1/01/decoding/01_decoding_results.csv"
+        assert paths["model_impa"] == "/out/desc1/01/model/01_impa_native.nii.gz"
+        assert paths["model_impa_mni"] == "/out/desc1/01/model/01_impa_mni.nii.gz"
 
 
 # =====================================================
@@ -91,6 +94,37 @@ class TestFoldFiles:
         assert folds[1]["model_total"] == str(base / "model" / "01_fold1_model_results_total_scores.csv")
         assert folds[2]["decoding"] == str(base / "decoding" / "01_fold2_summary_decoding_results.csv")
         assert folds[2]["decoding_raw"] == str(base / "decoding" / "01_fold2_decoding_results.csv")
+
+
+# =====================================================
+# resolve_group_impa_mni
+# =====================================================
+
+class TestResolveGroupImpaMni:
+    def test_no_subjects_have_mni_map(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")
+        _make_subject(tmp_path, "desc1", "02")
+        available, missing = resolve_group_impa_mni(str(tmp_path), "desc1", ["01", "02"])
+        assert available == {}
+        assert missing == ["01", "02"]
+
+    def test_some_subjects_have_mni_map(self, tmp_path):
+        base01 = _make_subject(tmp_path, "desc1", "01")
+        _make_subject(tmp_path, "desc1", "02")
+        (base01 / "model" / "01_impa_mni.nii.gz").write_text("fake")
+
+        available, missing = resolve_group_impa_mni(str(tmp_path), "desc1", ["01", "02"])
+        assert available == {"01": str(base01 / "model" / "01_impa_mni.nii.gz")}
+        assert missing == ["02"]
+
+    def test_all_subjects_have_mni_map(self, tmp_path):
+        for sub in ("01", "02"):
+            base = _make_subject(tmp_path, "desc1", sub)
+            (base / "model" / f"{sub}_impa_mni.nii.gz").write_text("fake")
+
+        available, missing = resolve_group_impa_mni(str(tmp_path), "desc1", ["01", "02"])
+        assert sorted(available.keys()) == ["01", "02"]
+        assert missing == []
 
 
 # =====================================================
