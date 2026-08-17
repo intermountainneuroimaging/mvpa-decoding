@@ -16,11 +16,10 @@
 # irrelevant to spreadsheet generation).
 #
 # Stage 2 of 0_submit_mvpa_pipeline.sh (mask resample -> master spreadsheet ->
-# k-fold classifier -> group report). Can also be run standalone.
-#
-# Not the same script as sbatch_generate_master_spreadsheet.sh -- that one
-# points at the mindmem study's config/dataroot and is unrelated to this
-# pipeline.
+# k-fold classifier -> group report). Can also be run standalone -- but,
+# like the orchestrator, must be submitted from the repo root (`sbatch
+# slurm/2_sbatch_generate_master_spreadsheet.sh`), not from within slurm/,
+# since its own paths (workflows/, configs/, logs/) are all repo-root-relative.
 
 umask g+w
 

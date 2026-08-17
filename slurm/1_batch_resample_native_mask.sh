@@ -25,7 +25,10 @@
 # check with: ls -d $HCPPIPE_ROOT/sub-* | wc -l
 #
 # Stage 1 of 0_submit_mvpa_pipeline.sh (mask resample -> master spreadsheet ->
-# k-fold classifier -> group report). Can also be run standalone.
+# k-fold classifier -> group report). Can also be run standalone -- but,
+# like the orchestrator, must be submitted from the repo root (`sbatch
+# slurm/1_batch_resample_native_mask.sh`), not from within slurm/, since its
+# own paths (workflows/, utils/, configs/, logs/) are all repo-root-relative.
 
 umask g+w
 

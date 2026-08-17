@@ -781,14 +781,17 @@ average onto directly, unlike a normalized-space group analysis, so by
 default the group report shows one native-space page per subject instead
 (only within-subject fold-to-fold averaging, same subject same grid,
 happens automatically). If you resample each subject's `model_impa` into a
-shared MNI grid yourself -- via `hcp_resample.py --direction native2mni`
-(section 8) -- and save the result as `model/{subject}_impa_mni.nii.gz`
-right alongside it, `generate_report.py` detects that suffix and plots a
-single group-mean page in MNI space instead of per-subject native pages.
-Subjects missing `_impa_mni.nii.gz`, or whose map doesn't match the other
-subjects' grid shape, are excluded from the average with a printed warning
-rather than failing the whole report; the group page's title records how
-many subjects went into the average.
+shared MNI grid -- via `hcp_resample.py --direction native2mni` (section 8)
+-- and save the result as `model/{subject}_impa_mni.nii.gz` right alongside
+it, `generate_report.py` detects that suffix and plots a single group-mean
+page in MNI space instead of per-subject native pages. Subjects missing
+`_impa_mni.nii.gz`, or whose map doesn't match the other subjects' grid
+shape, are excluded from the average with a printed warning rather than
+failing the whole report; the group page's title records how many subjects
+went into the average. `slurm/4_sbatch_generate_report.sh` (section 9) runs
+this resampling automatically for every subject before generating the report --
+manual `hcp_resample.py` calls are only needed if you're generating a
+report outside that pipeline.
 
 The timecourse page always reads the raw per-TR `decoding_results.csv`, not
 `summary_decoding_results.csv` -- the summary only ever kept each group's
@@ -872,16 +875,21 @@ Standard HCP Pipelines output layout, under each subject's
 `--xfm-pattern` overrides this if your derivatives tree organizes these
 differently.
 
-## 9. Running the full pipeline end-to-end (`0_submit_mvpa_pipeline.sh`)
+## 9. Running the full pipeline end-to-end (`slurm/0_submit_mvpa_pipeline.sh`)
 
-`0_submit_mvpa_pipeline.sh` chains every stage above into one SLURM
+`slurm/0_submit_mvpa_pipeline.sh` chains every stage above into one SLURM
 submission, so there's a single command that goes from HCP Pipelines output
 to a group PDF report. The four stage scripts are numbered `1_`-`4_` to match
 the order they run in (`0_` for the orchestrator itself, so it sorts first
-in a directory listing too):
+in a directory listing too). All five live under `slurm/`, but every path
+inside them (each other, plus `workflows/`, `utils/`, `configs/`, `logs/`)
+is relative to the **repo root**, not to `slurm/` -- `sbatch` runs a job in
+whatever directory it was submitted from, not the submitted script's own
+directory, so both the orchestrator and every stage script (if run
+standalone) must be invoked from the repo root:
 
 ```
-bash 0_submit_mvpa_pipeline.sh
+bash slurm/0_submit_mvpa_pipeline.sh
 ```
 
 It submits the four numbered jobs via `sbatch --parsable`, each depending on
@@ -890,18 +898,19 @@ fires once *every* array task has succeeded):
 
 | Stage | Script | Type |
 |---|---|---|
-| 1. Mask resample | `1_batch_resample_native_mask.sh` | per-subject/session array job (section 8) |
-| 2. Master spreadsheet | `2_sbatch_generate_master_spreadsheet_kfold.sh` | single job (section 1) |
-| 3. K-fold classifier | `3_batch_run_mvpa_kfold_workflow.sh` | per-subject array job (section 6) |
-| 4. Group report | `4_sbatch_generate_kfold_report.sh` | single job (section 7) |
+| 1. Mask resample | `slurm/1_batch_resample_native_mask.sh` | per-subject/session array job (section 8) |
+| 2. Master spreadsheet | `slurm/2_sbatch_generate_master_spreadsheet.sh` | single job (section 1) |
+| 3. K-fold classifier | `slurm/3_batch_run_mvpa_workflow.sh` | per-subject array job (section 6); also writes each subject's own single-subject report |
+| 4. Group report | `slurm/4_sbatch_generate_report.sh` | single job (section 7); resamples every subject's importance map to MNI (section 8) before building the group report |
 
 Each stage script hardcodes this pipeline's own paths/config (Clearvale,
 `configs/config-kfold.clearvale-operation.json`) the same way every other
 SLURM script in this repo does -- copy and repoint them for a different
 study/config rather than parameterizing in place. Every stage script can
-also still be run standalone with plain `sbatch <script>.sh` (e.g. to rerun
-just one stage after fixing a subject-specific failure) -- the orchestrator
-only adds the dependency chaining on top, it doesn't own any logic itself.
+also still be run standalone from the repo root with plain
+`sbatch slurm/<script>.sh` (e.g. to rerun just one stage after fixing a
+subject-specific failure) -- the orchestrator only adds the dependency
+chaining on top, it doesn't own any logic itself.
 
 `logs/` is created automatically; each stage's own `logs/<job>_%A_%a.{out,err}`
 (or `_%j.{out,err}` for the two single jobs) is where to look first if a

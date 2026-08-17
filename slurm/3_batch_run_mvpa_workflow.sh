@@ -14,9 +14,10 @@
 # Per-subject k-fold classifier array job (mvpa_kfold_workflow.py, not
 # mvpa_generalization_workflow.py -- same-task data, split into folds by
 # run). Expects master_spreadsheet.csv to already exist -- generate it first
-# (2_sbatch_generate_master_spreadsheet_kfold.sh / 0_submit_mvpa_pipeline.sh).
+# (2_sbatch_generate_master_spreadsheet.sh / 0_submit_mvpa_pipeline.sh).
 # `logs/` must also already exist (sbatch does not create --output's parent
-# dir).
+# dir). Also writes each subject's own single-subject report right after
+# their classifier run finishes (workflows/generate_report.py --subject).
 #
 # --time is a rough starting estimate, not a measured one: a k-fold run
 # with model.kfold_cv.strategy="per_run" and model.permutation_test both
@@ -29,7 +30,10 @@
 #   ls -d $DATAROOT/sub-* | wc -l
 #
 # Stage 3 of 0_submit_mvpa_pipeline.sh (mask resample -> master spreadsheet ->
-# k-fold classifier -> group report). Can also be run standalone.
+# k-fold classifier -> group report). Can also be run standalone -- but,
+# like the orchestrator, must be submitted from the repo root (`sbatch
+# slurm/3_batch_run_mvpa_workflow.sh`), not from within slurm/, since its own
+# paths (workflows/, configs/, logs/) are all repo-root-relative.
 
 umask g+w
 
