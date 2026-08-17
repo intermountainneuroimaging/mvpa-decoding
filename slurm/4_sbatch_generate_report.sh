@@ -44,7 +44,7 @@ OUTPUT_DIR=out
 CONFIG_DIR=configs
 
 HCPPIPE_ROOT=/pl/active/banich/studies/Clearvale/analysis/HCPPipe
-GROUP_MASK=/pl/active/banich/studies/Clearvale/analysis/feat/group-analyses/bin_wager_gm_mask.nii.gz
+GROUP_MASK=$FSLDIR/data/standard/MNI152_T1_2mm_brain.nii.gz
 
 # --------------------------------------------
 # resample each subject's aggregated importance map into MNI space
