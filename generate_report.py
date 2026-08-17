@@ -42,6 +42,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.patches import Patch
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -129,13 +130,11 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str) -> dict:
         "model_accuracy": os.path.join(base, "model", f"{subject}_model_results_accuracy.csv"),
         "model_evidence": os.path.join(base, "model", f"{subject}_model_results_evidence.csv"),
         "model_impa": os.path.join(base, "model", f"{subject}_impa_native.nii.gz"),
-        # the timecourse page normally uses this pre-aggregated summary (one row
-        # per window_index/regressor_label) rather than the raw per-TR file --
-        # group-level stats (mean +/- SE across subjects or folds) need one value
-        # per group per subject/fold, not individual trials. "decoding_raw" is only
-        # read when model_conditions.timecourse_decoding.overlay is configured,
-        # since the overlay category (e.g. trial_type-derived) doesn't survive into
-        # the summary -- see summarize_raw_with_overlay.
+        # "decoding" (the pre-aggregated summary) isn't read by the timecourse page
+        # itself -- it reads "decoding_raw" instead, so trial-to-trial variability
+        # within each subject/fold (never retained in the summary) is available for
+        # the plot -- see summarize_raw_for_timecourse. Kept here for any other
+        # consumer that wants the plain one-row-per-group summary.
         "decoding": os.path.join(base, "decoding", f"{subject}_summary_decoding_results.csv"),
         "decoding_raw": os.path.join(base, "decoding", f"{subject}_decoding_results.csv"),
     }
@@ -365,26 +364,31 @@ def render_confusion_matrices_page(pdf, analysis_output_dir, desc, subjects):
     plt.close(fig)
 
 
-def summarize_raw_with_overlay(raw_df: pd.DataFrame, overlay_conditions: dict) -> pd.DataFrame:
-    """One row per (window_index, regressor_label, overlay_label), averaging
-    evidence_* columns within this subject's/fold's own rows -- the same
-    within-subject/fold collapse mvpa_common.summarize_decoding() already does
-    to produce the summary CSVs the timecourse page reads by default, just with
-    overlay_label (tagged via label_rows against overlay_conditions, e.g. a
-    trial_type-derived category unrelated to the classifier's own conditions)
-    as an extra grouping key. Rows matching no overlay condition are dropped,
-    same as label_rows's own unmatched-row behavior."""
-    labeled = label_rows(raw_df, overlay_conditions, label_column="overlay_label")
-    dropped = len(raw_df) - len(labeled)
-    if dropped:
-        print(f"  (!) {dropped} row(s) matched no overlay condition -- dropped from the overlay timecourse plot")
+def summarize_raw_for_timecourse(raw_df: pd.DataFrame, overlay_conditions: dict = None) -> pd.DataFrame:
+    """One row per (window_index, regressor_label[, overlay_label]) -- for each
+    evidence_* column, both the mean *and* the trial-to-trial standard error
+    (std across the trials sharing that group, within this one subject's/fold's
+    own raw rows, /sqrt(n)), suffixed evidence_*_se. Computed directly from the
+    raw per-TR file rather than the pre-aggregated summary CSV specifically so
+    this trial-level spread is available at all -- the summary only ever kept
+    the mean (mvpa_common.summarize_decoding() has no equivalent). When
+    overlay_conditions is given, rows are additionally tagged via label_rows
+    (dropping unmatched rows, count printed) and grouped by overlay_label as
+    an extra key."""
+    df = raw_df
+    group_cols = ["window_index", "regressor_label"]
+    if overlay_conditions:
+        df = label_rows(df, overlay_conditions, label_column="overlay_label")
+        dropped = len(raw_df) - len(df)
+        if dropped:
+            print(f"  (!) {dropped} row(s) matched no overlay condition -- dropped from the timecourse plot")
+        group_cols = group_cols + ["overlay_label"]
 
-    evidence_cols = [c for c in labeled.columns if c.startswith("evidence_")]
-    return (
-        labeled.groupby(["window_index", "regressor_label", "overlay_label"])[evidence_cols]
-        .mean()
-        .reset_index()
-    )
+    evidence_cols = [c for c in df.columns if c.startswith("evidence_")]
+    grouped = df.groupby(group_cols)[evidence_cols]
+    means = grouped.mean()
+    ses = grouped.agg(lambda v: v.std(ddof=1) / np.sqrt(len(v)) if len(v) > 1 else 0.0).add_suffix("_se")
+    return pd.concat([means, ses], axis=1).reset_index()
 
 
 def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags, window, tr, median_duration,
@@ -400,20 +404,15 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
             per_group_paths = [subject_paths(analysis_output_dir, desc, s)]
 
         for p in per_group_paths:
-            if overlay_conditions:
-                if os.path.exists(p["decoding_raw"]):
-                    frames.append(summarize_raw_with_overlay(pd.read_csv(p["decoding_raw"]), overlay_conditions))
-            else:
-                if os.path.exists(p["decoding"]):
-                    frames.append(pd.read_csv(p["decoding"]))
+            if os.path.exists(p["decoding_raw"]):
+                frames.append(summarize_raw_for_timecourse(pd.read_csv(p["decoding_raw"]), overlay_conditions))
 
     if not frames:
-        missing = "decoding_results.csv" if overlay_conditions else "summary_decoding_results.csv"
-        print(f"(!) no {missing} found for the subjects in scope -- skipping timecourse page")
+        print("(!) no decoding_results.csv found for the subjects in scope -- skipping timecourse page")
         return
 
     combined = pd.concat(frames, ignore_index=True)
-    evidence_cols = [c for c in combined.columns if c.startswith("evidence_")]
+    evidence_cols = [c for c in combined.columns if c.startswith("evidence_") and not c.endswith("_se")]
     categories = [c.replace("evidence_", "") for c in evidence_cols]
     true_conditions = sorted(combined["regressor_label"].unique())
     overlay_categories = sorted(combined["overlay_label"].unique()) if overlay_conditions else [None]
@@ -424,7 +423,8 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
         return
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2.5 * n_rows), sharex=True, sharey=True, squeeze=False)
-    variability_label = "+/- SE across folds" if use_fold_variability else "+/- SE across subjects"
+    group_unit = "folds" if use_fold_variability else "subjects"
+    variability_label = f"darker band: +/- SE across {group_unit}; lighter band: +/- trial-to-trial SE"
     x_is_seconds = tr is not None
     x_label = "Time from window start (s)" if x_is_seconds else "window_index"
     overlay_colors = plt.get_cmap("tab10").colors
@@ -437,15 +437,26 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
                 line = subset if overlay_cat is None else subset[subset["overlay_label"] == overlay_cat]
                 color = "black" if overlay_cat is None else overlay_colors[k % len(overlay_colors)]
                 agg = (
-                    line.groupby("window_index")[f"evidence_{cat}"]
-                    .agg(mean="mean", se=lambda v: v.std(ddof=1) / np.sqrt(len(v)) if len(v) > 1 else 0.0)
+                    line.groupby("window_index").agg(
+                        mean=(f"evidence_{cat}", "mean"),
+                        se=(f"evidence_{cat}", lambda v: v.std(ddof=1) / np.sqrt(len(v)) if len(v) > 1 else 0.0),
+                        # mean of each subject's/fold's own within-group trial-to-trial
+                        # SE -- distinct from `se` above (SE *across* subjects/folds)
+                        trial_se=(f"evidence_{cat}_se", "mean"),
+                    )
                     .reset_index()
                     .sort_values("window_index")
                 )
                 x = agg["window_index"] * tr if x_is_seconds else agg["window_index"]
                 plot_kwargs = {"label": overlay_cat} if overlay_cat is not None else {}
-                ax.plot(x, agg["mean"], color=color, linewidth=1.5, **plot_kwargs)
-                ax.fill_between(x, agg["mean"] - agg["se"], agg["mean"] + agg["se"], alpha=0.25, color=color)
+                # lighter/wider trial-to-trial band drawn first (behind), then the
+                # more opaque subject/fold-level band on top, then the mean line --
+                # keeps both regions individually legible even where they overlap
+                ax.fill_between(x, agg["mean"] - agg["trial_se"], agg["mean"] + agg["trial_se"],
+                                 alpha=0.12, color=color, zorder=1)
+                ax.fill_between(x, agg["mean"] - agg["se"], agg["mean"] + agg["se"],
+                                 alpha=0.25, color=color, zorder=2)
+                ax.plot(x, agg["mean"], color=color, linewidth=1.5, zorder=3, **plot_kwargs)
 
             if window is not None and x_is_seconds:
                 dur = median_duration.get(true_cond)
@@ -467,11 +478,13 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
             if i == n_rows - 1:
                 ax.set_xlabel(x_label, fontsize=9)
 
-    if overlay_conditions:
-        handles, labels = axes[0][0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc="outside upper right", fontsize=8, title="overlay")
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    trial_se_proxy = Patch(facecolor="black", alpha=0.12)
+    handles = handles + [trial_se_proxy]
+    labels = labels + ["trial-to-trial SE"]
+    fig.legend(handles, labels, loc="outside upper right", fontsize=8, title="overlay" if overlay_conditions else None)
 
-    fig.suptitle(f"{desc}: timecourse decoding ({variability_label})", fontsize=14, fontweight="bold")
+    fig.suptitle(f"{desc}: timecourse decoding\n({variability_label})", fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     pdf.savefig(fig)
     plt.close(fig)

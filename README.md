@@ -770,17 +770,33 @@ onto, unlike a normalized-space group analysis. The group report shows one
 page per subject instead; only within-subject fold-to-fold averaging (same
 subject, same grid) happens.
 
-The timecourse page reads `summary_decoding_results.csv` by default -- never
-the raw per-TR `decoding_results.csv`, since group-level statistics need one
-already-averaged value per group per subject (or per fold), not individual
-trials. The one exception is when `model_conditions.timecourse_decoding.overlay`
-is set in `--config` (see section 4): then it reads the raw file instead
-(needed since the overlay category doesn't survive into the summary),
-averages within each subject/fold itself first to preserve that same
-group-level-not-per-trial statistic, then overlays one colored line per
-overlay category within each subplot instead of a single line, with a
-shared legend. Without `overlay` configured, the timecourse page is
-unaffected -- same file, same single line per subplot, as always.
+The timecourse page always reads the raw per-TR `decoding_results.csv`, not
+`summary_decoding_results.csv` -- the summary only ever kept each group's
+mean, never the spread across the trials that went into it, so it can't
+supply what's plotted now (see below). `summarize_raw_for_timecourse`
+first collapses the raw rows to one row per subject/fold (mean *and*
+trial-to-trial SE per `(window_index, regressor_label[, overlay_label])`),
+exactly mirroring the within-subject/fold averaging
+`mvpa_common.summarize_decoding()` already does for the summary CSV, just
+computed independently so the trial-level spread survives too.
+
+Each panel plots **two** overlapping shaded bands around the mean line
+(same color, different opacity, drawn so both stay legible where they
+overlap), and they answer different questions:
+- **Darker band -- SE across subjects (or folds, for `mvpa_kfold_workflow.py`
+  output)**: how consistent is the *group-level* estimate? Degenerates to a
+  zero-width band for a single-subject, no-fold report -- nothing to
+  average across when there's only one value.
+- **Lighter band -- trial-to-trial SE**: how consistent is decoding across
+  an individual subject's *own* trials, averaged across whatever's in
+  scope (one subject, or several)? This is what fills in the single-subject
+  case above with real information instead of a zero-width band, and is
+  shown in every scope, band or no band.
+
+Both compose with `model_conditions.timecourse_decoding.overlay` (section 4)
+when it's configured -- each overlay category gets its own color, its own
+two bands, plus a legend explaining both the categories and what the
+lighter band means.
 
 ## 8. Resampling MNI <-> native space (`hcp_resample.py`)
 

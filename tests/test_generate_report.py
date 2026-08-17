@@ -16,7 +16,7 @@ from generate_report import (
     load_scalar_csv,
     load_labeled_csv,
     infer_categories,
-    summarize_raw_with_overlay,
+    summarize_raw_for_timecourse,
     load_annotation_info,
     resolve_desc,
 )
@@ -130,10 +130,40 @@ class TestInferCategories:
 
 
 # =====================================================
-# summarize_raw_with_overlay
+# summarize_raw_for_timecourse
 # =====================================================
 
-class TestSummarizeRawWithOverlay:
+class TestSummarizeRawForTimecourse:
+    def test_groups_by_window_index_and_regressor_label_without_overlay(self):
+        raw = pd.DataFrame({
+            "window_index": [0, 0, 0, 0],
+            "regressor_label": ["face", "face", "face", "face"],
+            "evidence_face": [0.8, 0.6, 0.4, 0.2],
+            "evidence_place": [0.2, 0.4, 0.6, 0.8],
+        })
+        result = summarize_raw_for_timecourse(raw)
+
+        assert "overlay_label" not in result.columns
+        assert set(result.columns) >= {"window_index", "regressor_label", "evidence_face", "evidence_face_se", "evidence_place"}
+        row = result.iloc[0]
+        assert row["evidence_face"] == pytest.approx(0.5)  # mean(0.8, 0.6, 0.4, 0.2)
+
+    def test_trial_to_trial_se_is_std_error_across_trials(self):
+        # 4 trials, sample std = 0.2582, se = std/sqrt(4)
+        raw = pd.DataFrame({
+            "window_index": [0, 0, 0, 0],
+            "regressor_label": ["face", "face", "face", "face"],
+            "evidence_face": [0.8, 0.6, 0.4, 0.2],
+        })
+        result = summarize_raw_for_timecourse(raw)
+        expected_se = pd.Series([0.8, 0.6, 0.4, 0.2]).std(ddof=1) / (4 ** 0.5)
+        assert result.iloc[0]["evidence_face_se"] == pytest.approx(expected_se)
+
+    def test_se_is_zero_for_a_single_trial(self):
+        raw = pd.DataFrame({"window_index": [0], "regressor_label": ["face"], "evidence_face": [0.8]})
+        result = summarize_raw_for_timecourse(raw)
+        assert result.iloc[0]["evidence_face_se"] == 0.0
+
     def test_groups_by_window_index_regressor_label_overlay_label(self):
         raw = pd.DataFrame({
             "window_index": [0, 0, 0, 0],
@@ -146,9 +176,9 @@ class TestSummarizeRawWithOverlay:
             "maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"},
             "suppress": {"column": "trial_type", "match": "regex", "value": ".*suppress.*"},
         }
-        result = summarize_raw_with_overlay(raw, overlay_conditions)
+        result = summarize_raw_for_timecourse(raw, overlay_conditions)
 
-        assert set(result.columns) >= {"window_index", "regressor_label", "overlay_label", "evidence_face", "evidence_place"}
+        assert set(result.columns) >= {"window_index", "regressor_label", "overlay_label", "evidence_face", "evidence_place", "evidence_face_se"}
         maintain_row = result[result["overlay_label"] == "maintain"].iloc[0]
         assert maintain_row["evidence_face"] == pytest.approx(0.7)
         suppress_row = result[result["overlay_label"] == "suppress"].iloc[0]
@@ -162,7 +192,7 @@ class TestSummarizeRawWithOverlay:
             "evidence_face": [0.8, 0.5],
         })
         overlay_conditions = {"maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"}}
-        result = summarize_raw_with_overlay(raw, overlay_conditions)
+        result = summarize_raw_for_timecourse(raw, overlay_conditions)
 
         assert len(result) == 1
         assert "1 row(s) matched no overlay condition" in capsys.readouterr().out
