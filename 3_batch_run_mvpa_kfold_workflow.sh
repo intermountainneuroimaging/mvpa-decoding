@@ -50,5 +50,5 @@ subject=`ls -d $DATAROOT/sub-* | rev | cut -d"/" -f1 | rev | cut -d"-" -f2 | sed
 # --------------------------------------------
 # gm operation (maintain/suppress/switch/clear) k-fold classifier
 # --------------------------------------------
-python mvpa_kfold_workflow.py --subject $subject --config $CONFIG_DIR/config-kfold.clearvale-operation.json \
+python workflows/mvpa_kfold_workflow.py --subject $subject --config $CONFIG_DIR/config-kfold.clearvale-operation.json \
     --master-spreadsheet $MASTER_SPREADSHEET --analysis-output-dir $OUTPUT_DIR

@@ -5,7 +5,7 @@ part of the automated suite)."""
 
 import pytest
 
-from hcp_resample import (
+from utils.hcp_resample import (
     resolve_xfm_path,
     build_applywarp_command,
     check_fsl_available,

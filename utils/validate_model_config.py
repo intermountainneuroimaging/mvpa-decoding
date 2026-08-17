@@ -42,11 +42,13 @@ problems, not just structural JSON errors.
 
 import argparse
 import json
+import os
 import sys
 
 import pandas as pd
 
-from mvpa_common import validate_query_node, evaluate_query_node, validate_window
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
+from utils.mvpa_common import validate_query_node, evaluate_query_node, validate_window
 
 SECTIONS = ("training", "testing", "timecourse_decoding")
 

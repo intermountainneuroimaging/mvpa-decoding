@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 import nibabel as nib
 
-from mvpa_common import parse_bids_entities, compute_volume_range, resolve_config_root
+from utils.mvpa_common import parse_bids_entities, compute_volume_range, resolve_config_root
 
 # "ses" has a dedicated output column (session) whenever present, but -- per the
 # BIDS spec -- is optional in filenames for single-session datasets, so it's not

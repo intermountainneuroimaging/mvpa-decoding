@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mvpa_generalization_workflow import (
+from workflows.mvpa_generalization_workflow import (
     training_runs_have_matching_conditions,
     stratified_trial_kfold_split,
     resolve_internal_cv_folds,

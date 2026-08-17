@@ -47,7 +47,7 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 
-from mvpa_common import label_rows, get_bold_header_info, resolve_window_times, quick_safe
+from utils.mvpa_common import label_rows, get_bold_header_info, resolve_window_times, quick_safe
 
 
 # =====================================================

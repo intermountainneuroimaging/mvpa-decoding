@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mvpa_common import (
+from utils.mvpa_common import (
     parse_bids_entities,
     resolve_config_root,
     compute_volume_range,

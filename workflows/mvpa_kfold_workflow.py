@@ -41,13 +41,15 @@ Usage:
 """
 
 import os
+import sys
 import argparse
 import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
 
-from mvpa_common import (
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
+from utils.mvpa_common import (
     build_trial_pivot_table, resolve_config_root, quick_safe, label_rows,
     track_runtime, load_config, apply_regressor_codes,
     load_images_and_mask, build_timecourse_instructions,

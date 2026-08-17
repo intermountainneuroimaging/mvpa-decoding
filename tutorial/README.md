@@ -150,7 +150,7 @@ a block is its own row with the same `trial_type`, not one row per block.
 ## Step 5: Validate the model config
 
 ```
-python validate_model_config.py --config tutorial/config-haxby.example.json \
+python utils/validate_model_config.py --config tutorial/config-haxby.example.json \
     --master-spreadsheet master_spreadsheet_haxby.csv
 ```
 
@@ -177,7 +177,7 @@ correctly resolved to the preprocessed derivatives.
 ## Step 6: Train and evaluate
 
 ```
-python mvpa_generalization_workflow.py --subject 1 --config tutorial/config-haxby.example.json \
+python workflows/mvpa_generalization_workflow.py --subject 1 --config tutorial/config-haxby.example.json \
     --master-spreadsheet master_spreadsheet_haxby.csv --analysis-output-dir ./haxby_out
 ```
 

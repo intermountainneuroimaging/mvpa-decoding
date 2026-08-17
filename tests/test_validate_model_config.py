@@ -3,7 +3,7 @@ model_conditions section."""
 
 import pandas as pd
 
-from validate_model_config import validate_config
+from utils.validate_model_config import validate_config
 
 
 def _minimal_config():

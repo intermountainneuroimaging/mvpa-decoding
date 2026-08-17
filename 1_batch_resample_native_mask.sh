@@ -68,7 +68,7 @@ for session_dir in "$HCPPIPE_ROOT"/sub-"$subject"/ses-*; do
 
     echo "  ses-$session: reference=$reference"
     echo "  ses-$session: output=$output"
-    python hcp_resample.py \
+    python utils/hcp_resample.py \
         --input "$GROUP_MASK" \
         --output "$output" \
         --direction mni2native \

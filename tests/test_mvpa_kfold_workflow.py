@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mvpa_kfold_workflow import (
+from workflows.mvpa_kfold_workflow import (
     validate_kfold_cv_config,
     resolve_kfold_folds,
     run_kfold,

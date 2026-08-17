@@ -37,8 +37,8 @@ import sys
 
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for mvpa_common
-from mvpa_common import parse_bids_entities, get_bold_header_info
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
+from utils.mvpa_common import parse_bids_entities, get_bold_header_info
 
 
 def parse_args():

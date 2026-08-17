@@ -14,17 +14,18 @@ One JSON config, three top-level sections, three scripts:
 | Stage | Script | Reads section |
 |---|---|---|
 | 1. Build the volume table | `generate_master_spreadsheet.py` | `event_extraction` (+ optional `expected_events.json`) |
-| 2. Define & validate MVPA conditions | `validate_model_config.py` | `model_conditions` |
-| 3. Train/decode | `mvpa_generalization_workflow.py` | `model` (+ `model_conditions` to select/label rows) |
+| 2. Define & validate MVPA conditions | `utils/validate_model_config.py` | `model_conditions` |
+| 3. Train/decode | `workflows/mvpa_generalization_workflow.py` | `model` (+ `model_conditions` to select/label rows) |
 
-Step 3 has two interchangeable scripts, same config format: `mvpa_generalization_workflow.py`
-for independent train/test data (possibly different tasks entirely -- the
-default, described first) or `mvpa_kfold_workflow.py` for same-task data
-split into folds by `run` (section 6) -- pick whichever matches your design,
-not both. All scripts take the **same** config file via `--config`. Shared
-logic -- BIDS filename parsing, the query DSL, window math, and (for the two
-train/decode scripts) the actual classification/decoding primitives -- lives
-in `mvpa_common.py`, imported by all of them. Everything below is grounded in
+Step 3 has two interchangeable scripts, same config format:
+`workflows/mvpa_generalization_workflow.py` for independent train/test data
+(possibly different tasks entirely -- the default, described first) or
+`workflows/mvpa_kfold_workflow.py` for same-task data split into folds by
+`run` (section 6) -- pick whichever matches your design, not both. All
+scripts take the **same** config file via `--config`. Shared logic -- BIDS
+filename parsing, the query DSL, window math, and (for the two train/decode
+scripts) the actual classification/decoding primitives -- lives in
+`utils/mvpa_common.py`, imported by all of them. Everything below is grounded in
 `examples/config-generalization.example.json`, a complete config that runs end-to-end
 against `examples/sample-data/`. `examples/config-generalization-template.example.json` is the same
 shape but written as a fill-in-your-own-paths template, including the
@@ -375,7 +376,7 @@ data the workflow scripts already wrote.
 ### Running it
 
 ```
-python validate_model_config.py --config examples/config-generalization.example.json \
+python utils/validate_model_config.py --config examples/config-generalization.example.json \
     --master-spreadsheet master_spreadsheet.csv
 ```
 
@@ -537,10 +538,10 @@ training/testing by `run` per fold, see `mvpa_kfold_workflow.py` and
 `model.kfold_cv` below instead -- a separate script, not a mode switch on
 this one.
 
-## Running `mvpa_generalization_workflow.py`
+## Running `workflows/mvpa_generalization_workflow.py`
 
 ```
-python mvpa_generalization_workflow.py --subject 4057 --config examples/config-generalization.example.json \
+python workflows/mvpa_generalization_workflow.py --subject 4057 --config examples/config-generalization.example.json \
     --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out
 ```
 
@@ -598,7 +599,7 @@ columns (`N` = the widest trial; shorter trials are NaN-padded). Useful for
 eyeballing whether the volume counts per trial look right -- not used by the
 modeling steps themselves.
 
-## 6. K-fold workflow (`mvpa_kfold_workflow.py`)
+## 6. K-fold workflow (`workflows/mvpa_kfold_workflow.py`)
 
 For same-task data: `model_conditions.training`/`testing` may still be
 different conditions, but both are expected to be drawn from the same task's
@@ -613,7 +614,7 @@ complete example (3-run leave-one-run-out over `examples/sample-data`'s
 `loc` task).
 
 ```
-python mvpa_kfold_workflow.py --subject 4057 --config examples/config-kfold.example.json \
+python workflows/mvpa_kfold_workflow.py --subject 4057 --config examples/config-kfold.example.json \
     --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out
 ```
 
@@ -817,7 +818,7 @@ when it's configured -- each overlay category gets its own color, its own
 two bands, plus a legend explaining both the categories and what the
 lighter band means.
 
-## 8. Resampling MNI <-> native space (`hcp_resample.py`)
+## 8. Resampling MNI <-> native space (`utils/hcp_resample.py`)
 
 This pipeline's masks/classification are entirely native-space (see the
 `native_*_mask.nii.gz` examples throughout), but data processed through HCP
@@ -840,7 +841,7 @@ already documents). This is the same external dependency the tutorial's
 preprocessing script already requires; no new Python package is added.
 
 ```
-python hcp_resample.py --input bold_mni.nii.gz --output bold_native.nii.gz \
+python utils/hcp_resample.py --input bold_mni.nii.gz --output bold_native.nii.gz \
     --direction mni2native --subject 001 --session D1 \
     --derivatives-root /pl/active/banich/studies/Clearvale/analysis/bids-hcp \
     --reference sub-001_ses-D1_task-WMneg_run-03_bold.nii.gz --interp trilinear
