@@ -13,7 +13,7 @@ One JSON config, three top-level sections, three scripts:
 
 | Stage | Script | Reads section |
 |---|---|---|
-| 1. Build the volume table | `generate_master_spreadsheet.py` | `event_extraction` (+ optional `expected_events.json`) |
+| 1. Build the volume table | `workflows/generate_master_spreadsheet.py` | `event_extraction` (+ optional `expected_events.json`) |
 | 2. Define & validate MVPA conditions | `utils/validate_model_config.py` | `model_conditions` |
 | 3. Train/decode | `workflows/mvpa_generalization_workflow.py` | `model` (+ `model_conditions` to select/label rows) |
 
@@ -167,7 +167,7 @@ conditions). This is how a stray-space typo like `"positive _face_image"` in
 ### Running it
 
 ```
-python generate_master_spreadsheet.py --config examples/config-generalization.example.json
+python workflows/generate_master_spreadsheet.py --config examples/config-generalization.example.json
 ```
 
 Output (`master_spreadsheet.csv`) -- one row per BOLD volume that overlapped
@@ -727,7 +727,7 @@ presence on disk (see section 7) -- fold-variability panels (accuracy/AUC
 overlays, timecourse bands, an importance-map consistency mosaic) render
 automatically against this script's output with no changes needed.
 
-## 7. Generating a report (`generate_report.py`)
+## 7. Generating a report (`workflows/generate_report.py`)
 
 Produces a multi-page PDF from `mvpa_generalization_workflow.py`'s output -- accuracy/AUC,
 confusion-style accuracy/evidence matrices, annotated timecourse decoding,
@@ -737,15 +737,15 @@ and importance maps. One script, two scales, switched with `--subject`:
 # group report -- aggregates every subject found under <dir>/<desc>/*/ --
 # desc is read from --config's model.desc (same sanitization the workflow
 # scripts use), so it always matches where they actually wrote output
-python generate_report.py --analysis-output-dir ./out \
+python workflows/generate_report.py --analysis-output-dir ./out \
     --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
 
 # single-subject report -- scoped to just <dir>/<desc>/4057/
-python generate_report.py --analysis-output-dir ./out --subject 4057 \
+python workflows/generate_report.py --analysis-output-dir ./out --subject 4057 \
     --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
 
 # --desc still works directly, if you'd rather not point at a config
-python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier
+python workflows/generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier
 ```
 
 | Flag | Meaning |

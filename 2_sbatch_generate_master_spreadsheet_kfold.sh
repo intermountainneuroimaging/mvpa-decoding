@@ -33,5 +33,5 @@ conda activate incenv
 CONFIG_DIR=configs
 MASTER_SPREADSHEET=master_spreadsheet.csv
 
-python generate_master_spreadsheet.py --config $CONFIG_DIR/config-kfold.clearvale-operation.json \
+python workflows/generate_master_spreadsheet.py --config $CONFIG_DIR/config-kfold.clearvale-operation.json \
     --output $MASTER_SPREADSHEET

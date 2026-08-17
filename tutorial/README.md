@@ -131,7 +131,7 @@ matching the session-less data.
 ## Step 4: Build the volume table
 
 ```
-python generate_master_spreadsheet.py --config tutorial/config-haxby.example.json
+python workflows/generate_master_spreadsheet.py --config tutorial/config-haxby.example.json
 ```
 
 Output:
@@ -224,7 +224,7 @@ confusable with `chair`/other elongated-object categories (see the
 confusion matrix's `bottle`<->`scissors`/`chair`<->`shoe` cross-talk) in a
 whole-brain mask this crude. `permutation_test` (README.md section 5,
 1000 permutations) confirms both accuracy and AUC are significant at
-p < 0.001 -- see [`generate_report.py`](../README.md#6-generating-a-report-generate_reportpy)
+p < 0.001 -- see [`generate_report.py`](../README.md#7-generating-a-report-workflowsgenerate_reportpy)
 or `model/1_permutation_test.csv` for the full numbers if you run it
 yourself.
 

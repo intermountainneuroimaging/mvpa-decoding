@@ -34,5 +34,5 @@ MASTER_SPREADSHEET=master_spreadsheet.csv
 OUTPUT_DIR=out
 CONFIG_DIR=configs
 
-python generate_report.py --analysis-output-dir $OUTPUT_DIR \
+python workflows/generate_report.py --analysis-output-dir $OUTPUT_DIR \
     --config $CONFIG_DIR/config-kfold.clearvale-operation.json --master-spreadsheet $MASTER_SPREADSHEET

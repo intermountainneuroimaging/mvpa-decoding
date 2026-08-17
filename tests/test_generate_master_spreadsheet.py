@@ -7,7 +7,7 @@ import nibabel as nib
 import pandas as pd
 import pytest
 
-from generate_master_spreadsheet import (
+from workflows.generate_master_spreadsheet import (
     is_excluded_trial_type,
     find_bold_file,
     process_events_file,

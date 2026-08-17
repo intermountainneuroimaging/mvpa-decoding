@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from generate_report import (
+from workflows.generate_report import (
     list_subject_dirs,
     subject_paths,
     has_fold_files,

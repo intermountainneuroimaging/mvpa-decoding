@@ -21,11 +21,13 @@ import argparse
 import glob
 import json
 import os
+import sys
 
 import numpy as np
 import pandas as pd
 import nibabel as nib
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
 from utils.mvpa_common import parse_bids_entities, compute_volume_range, resolve_config_root
 
 # "ses" has a dedicated output column (session) whenever present, but -- per the

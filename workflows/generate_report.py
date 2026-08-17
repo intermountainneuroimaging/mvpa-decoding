@@ -34,6 +34,7 @@ import argparse
 import glob
 import json
 import os
+import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,7 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
 from utils.mvpa_common import label_rows, get_bold_header_info, resolve_window_times, quick_safe
 
 
