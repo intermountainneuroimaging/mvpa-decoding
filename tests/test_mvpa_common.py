@@ -275,6 +275,17 @@ class TestLabelRows:
         labeled = label_rows(df, conditions)
         assert labeled["regressor_label"].iloc[0] == "first"
 
+    def test_custom_label_column(self):
+        df = pd.DataFrame({"trial_type": ["maintain_face", "suppress_place"]})
+        conditions = {
+            "maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"},
+            "suppress": {"column": "trial_type", "match": "regex", "value": ".*suppress.*"},
+        }
+        labeled = label_rows(df, conditions, label_column="overlay_label")
+        assert "overlay_label" in labeled.columns
+        assert "regressor_label" not in labeled.columns
+        assert sorted(labeled["overlay_label"].tolist()) == ["maintain", "suppress"]
+
 
 # =====================================================
 # build_trial_pivot_table

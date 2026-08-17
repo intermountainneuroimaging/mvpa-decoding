@@ -90,11 +90,15 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str) -> dict:
         "model_accuracy": os.path.join(base, "model", f"{subject}_model_results_accuracy.csv"),
         "model_evidence": os.path.join(base, "model", f"{subject}_model_results_evidence.csv"),
         "model_impa": os.path.join(base, "model", f"{subject}_impa_native.nii.gz"),
-        # the report always uses the pre-aggregated summary (one row per
-        # window_index/regressor_label), never the raw per-TR decoding_results.csv --
-        # group-level stats (mean +/- SE across subjects or folds) need one value per
-        # group per subject/fold, not individual trials.
+        # the timecourse page normally uses this pre-aggregated summary (one row
+        # per window_index/regressor_label) rather than the raw per-TR file --
+        # group-level stats (mean +/- SE across subjects or folds) need one value
+        # per group per subject/fold, not individual trials. "decoding_raw" is only
+        # read when model_conditions.timecourse_decoding.overlay is configured,
+        # since the overlay category (e.g. trial_type-derived) doesn't survive into
+        # the summary -- see summarize_raw_with_overlay.
         "decoding": os.path.join(base, "decoding", f"{subject}_summary_decoding_results.csv"),
+        "decoding_raw": os.path.join(base, "decoding", f"{subject}_decoding_results.csv"),
     }
 
 
@@ -115,6 +119,7 @@ def fold_paths(analysis_output_dir: str, desc: str, subject: str) -> dict:
             "model_auc": os.path.join(base, "model", f"{subject}_fold{fid}_model_results_auc.csv"),
             "model_impa": os.path.join(base, "model", f"{subject}_fold{fid}_impa_native.nii.gz"),
             "decoding": os.path.join(base, "decoding", f"{subject}_fold{fid}_summary_decoding_results.csv"),
+            "decoding_raw": os.path.join(base, "decoding", f"{subject}_fold{fid}_decoding_results.csv"),
         }
         for fid in fold_ids
     }
@@ -143,27 +148,30 @@ def infer_categories(analysis_output_dir: str, desc: str, subjects: list) -> lis
 # =====================================================
 
 def load_annotation_info(config_path, master_spreadsheet_path):
-    """Returns (window, tr, median_duration_by_condition), any of which may be
-    None/empty if the optional inputs are missing or insufficient -- annotation is
-    strictly best-effort and never blocks the rest of the report."""
+    """Returns (window, tr, median_duration_by_condition, overlay_conditions), any
+    of which may be None/empty if the optional inputs are missing or insufficient --
+    annotation is strictly best-effort and never blocks the rest of the report.
+    overlay_conditions is model_conditions.timecourse_decoding.overlay verbatim
+    (empty dict if absent) -- see summarize_raw_with_overlay for how it's used."""
     if not config_path or not master_spreadsheet_path:
-        return None, None, {}
+        return None, None, {}, {}
     if not os.path.isfile(config_path):
         print(f"(!) --config {config_path} not found -- skipping timecourse annotation")
-        return None, None, {}
+        return None, None, {}, {}
     if not os.path.isfile(master_spreadsheet_path):
         print(f"(!) --master-spreadsheet {master_spreadsheet_path} not found -- skipping timecourse annotation")
-        return None, None, {}
+        return None, None, {}, {}
 
     with open(config_path) as f:
         cfg = json.load(f)
     tc_cfg = cfg.get("model_conditions", {}).get("timecourse_decoding")
     if not tc_cfg:
         print("(!) config has no model_conditions.timecourse_decoding -- skipping timecourse annotation")
-        return None, None, {}
+        return None, None, {}, {}
 
     window = tc_cfg.get("window")
     conditions = tc_cfg.get("conditions", {})
+    overlay_conditions = tc_cfg.get("overlay", {})
 
     master = pd.read_csv(
         master_spreadsheet_path, dtype={"subject": str, "session": str, "task": str, "trial_type": str}
@@ -187,14 +195,14 @@ def load_annotation_info(config_path, master_spreadsheet_path):
 
     if not trs:
         print("(!) could not read TR from any boldfile -- timecourse x-axis will stay in window_index units")
-        return window, None, median_duration
+        return window, None, median_duration, overlay_conditions
 
     tr_counts = Counter(trs)
     tr = tr_counts.most_common(1)[0][0]
     if len(tr_counts) > 1:
         print(f"(!) multiple distinct TRs found across boldfiles ({dict(tr_counts)}) -- using the majority TR={tr}")
 
-    return window, tr, median_duration
+    return window, tr, median_duration, overlay_conditions
 
 
 # =====================================================
@@ -318,28 +326,58 @@ def render_confusion_matrices_page(pdf, analysis_output_dir, desc, subjects):
     plt.close(fig)
 
 
-def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags, window, tr, median_duration):
+def summarize_raw_with_overlay(raw_df: pd.DataFrame, overlay_conditions: dict) -> pd.DataFrame:
+    """One row per (window_index, regressor_label, overlay_label), averaging
+    evidence_* columns within this subject's/fold's own rows -- the same
+    within-subject/fold collapse mvpa_common.summarize_decoding() already does
+    to produce the summary CSVs the timecourse page reads by default, just with
+    overlay_label (tagged via label_rows against overlay_conditions, e.g. a
+    trial_type-derived category unrelated to the classifier's own conditions)
+    as an extra grouping key. Rows matching no overlay condition are dropped,
+    same as label_rows's own unmatched-row behavior."""
+    labeled = label_rows(raw_df, overlay_conditions, label_column="overlay_label")
+    dropped = len(raw_df) - len(labeled)
+    if dropped:
+        print(f"  (!) {dropped} row(s) matched no overlay condition -- dropped from the overlay timecourse plot")
+
+    evidence_cols = [c for c in labeled.columns if c.startswith("evidence_")]
+    return (
+        labeled.groupby(["window_index", "regressor_label", "overlay_label"])[evidence_cols]
+        .mean()
+        .reset_index()
+    )
+
+
+def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags, window, tr, median_duration,
+                             overlay_conditions=None):
+    overlay_conditions = overlay_conditions or {}
     frames = []
     use_fold_variability = len(subjects) == 1 and fold_flags.get(subjects[0])
 
     for s in subjects:
         if use_fold_variability:
-            for f in fold_paths(analysis_output_dir, desc, s).values():
-                if os.path.exists(f["decoding"]):
-                    frames.append(pd.read_csv(f["decoding"]))
+            per_group_paths = fold_paths(analysis_output_dir, desc, s).values()
         else:
-            p = subject_paths(analysis_output_dir, desc, s)
-            if os.path.exists(p["decoding"]):
-                frames.append(pd.read_csv(p["decoding"]))
+            per_group_paths = [subject_paths(analysis_output_dir, desc, s)]
+
+        for p in per_group_paths:
+            if overlay_conditions:
+                if os.path.exists(p["decoding_raw"]):
+                    frames.append(summarize_raw_with_overlay(pd.read_csv(p["decoding_raw"]), overlay_conditions))
+            else:
+                if os.path.exists(p["decoding"]):
+                    frames.append(pd.read_csv(p["decoding"]))
 
     if not frames:
-        print("(!) no summary_decoding_results.csv found for the subjects in scope -- skipping timecourse page")
+        missing = "decoding_results.csv" if overlay_conditions else "summary_decoding_results.csv"
+        print(f"(!) no {missing} found for the subjects in scope -- skipping timecourse page")
         return
 
     combined = pd.concat(frames, ignore_index=True)
     evidence_cols = [c for c in combined.columns if c.startswith("evidence_")]
     categories = [c.replace("evidence_", "") for c in evidence_cols]
     true_conditions = sorted(combined["regressor_label"].unique())
+    overlay_categories = sorted(combined["overlay_label"].unique()) if overlay_conditions else [None]
 
     n_rows, n_cols = len(true_conditions), len(categories)
     if n_rows == 0 or n_cols == 0:
@@ -350,20 +388,25 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
     variability_label = "+/- SE across folds" if use_fold_variability else "+/- SE across subjects"
     x_is_seconds = tr is not None
     x_label = "Time from window start (s)" if x_is_seconds else "window_index"
+    overlay_colors = plt.get_cmap("tab10").colors
 
     for i, true_cond in enumerate(true_conditions):
         subset = combined[combined["regressor_label"] == true_cond]
         for j, cat in enumerate(categories):
             ax = axes[i][j]
-            agg = (
-                subset.groupby("window_index")[f"evidence_{cat}"]
-                .agg(mean="mean", se=lambda v: v.std(ddof=1) / np.sqrt(len(v)) if len(v) > 1 else 0.0)
-                .reset_index()
-                .sort_values("window_index")
-            )
-            x = agg["window_index"] * tr if x_is_seconds else agg["window_index"]
-            ax.plot(x, agg["mean"], color="black", linewidth=1.5)
-            ax.fill_between(x, agg["mean"] - agg["se"], agg["mean"] + agg["se"], alpha=0.25, color="black")
+            for k, overlay_cat in enumerate(overlay_categories):
+                line = subset if overlay_cat is None else subset[subset["overlay_label"] == overlay_cat]
+                color = "black" if overlay_cat is None else overlay_colors[k % len(overlay_colors)]
+                agg = (
+                    line.groupby("window_index")[f"evidence_{cat}"]
+                    .agg(mean="mean", se=lambda v: v.std(ddof=1) / np.sqrt(len(v)) if len(v) > 1 else 0.0)
+                    .reset_index()
+                    .sort_values("window_index")
+                )
+                x = agg["window_index"] * tr if x_is_seconds else agg["window_index"]
+                plot_kwargs = {"label": overlay_cat} if overlay_cat is not None else {}
+                ax.plot(x, agg["mean"], color=color, linewidth=1.5, **plot_kwargs)
+                ax.fill_between(x, agg["mean"] - agg["se"], agg["mean"] + agg["se"], alpha=0.25, color=color)
 
             if window is not None and x_is_seconds:
                 dur = median_duration.get(true_cond)
@@ -384,6 +427,10 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
                 ax.set_ylabel(f"true: {true_cond}", fontsize=10)
             if i == n_rows - 1:
                 ax.set_xlabel(x_label, fontsize=9)
+
+    if overlay_conditions:
+        handles, labels = axes[0][0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc="outside upper right", fontsize=8, title="overlay")
 
     fig.suptitle(f"{desc}: timecourse decoding ({variability_label})", fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.94])
@@ -491,7 +538,7 @@ def main():
     subjects = list_subject_dirs(args.analysis_output_dir, args.desc, args.subject)
     fold_flags = {s: has_fold_files(args.analysis_output_dir, args.desc, s) for s in subjects}
     regressor_categories = infer_categories(args.analysis_output_dir, args.desc, subjects)
-    window, tr, median_duration = load_annotation_info(args.config, args.master_spreadsheet)
+    window, tr, median_duration, overlay_conditions = load_annotation_info(args.config, args.master_spreadsheet)
 
     if args.output:
         output_path = args.output
@@ -506,7 +553,8 @@ def main():
         render_title_page(pdf, args.desc, subjects, args.config, output_path)
         render_accuracy_auc_page(pdf, args.analysis_output_dir, args.desc, subjects, fold_flags)
         render_confusion_matrices_page(pdf, args.analysis_output_dir, args.desc, subjects)
-        render_timecourse_pages(pdf, args.analysis_output_dir, args.desc, subjects, fold_flags, window, tr, median_duration)
+        render_timecourse_pages(pdf, args.analysis_output_dir, args.desc, subjects, fold_flags, window, tr, median_duration,
+                                 overlay_conditions)
         render_importance_pages(pdf, args.analysis_output_dir, args.desc, subjects, fold_flags, regressor_categories)
 
     print(f"Report written to: {output_path}")

@@ -66,6 +66,12 @@
       "window": {
         "start": {"reference": "onset", "offset_seconds": 0},
         "end": {"reference": "offset_end", "offset_seconds": 10}
+      },
+      "overlay": {
+        "maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"},
+        "suppress": {"column": "trial_type", "match": "regex", "value": ".*suppress.*"},
+        "track": {"column": "trial_type", "match": "regex", "value": ".*track.*"},
+        "breath": {"column": "trial_type", "match": "regex", "value": ".*breath.*"}
       }
     }
   },

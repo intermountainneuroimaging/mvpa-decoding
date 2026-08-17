@@ -2,6 +2,8 @@
 loaders. Fake directory trees built under tmp_path -- no dependency on real
 mvpa_generalization_workflow.py output."""
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -14,6 +16,8 @@ from generate_report import (
     load_scalar_csv,
     load_labeled_csv,
     infer_categories,
+    summarize_raw_with_overlay,
+    load_annotation_info,
 )
 
 
@@ -62,6 +66,7 @@ class TestSubjectPaths:
         assert paths["model_auc"] == "/out/desc1/01/model/01_model_results_auc.csv"
         assert paths["cv_total"] == "/out/desc1/01/cv/01_cv_results_total_scores.csv"
         assert paths["decoding"] == "/out/desc1/01/decoding/01_summary_decoding_results.csv"
+        assert paths["decoding_raw"] == "/out/desc1/01/decoding/01_decoding_results.csv"
 
 
 # =====================================================
@@ -84,6 +89,7 @@ class TestFoldFiles:
         assert sorted(folds.keys()) == [1, 2]
         assert folds[1]["model_total"] == str(base / "model" / "01_fold1_model_results_total_scores.csv")
         assert folds[2]["decoding"] == str(base / "decoding" / "01_fold2_summary_decoding_results.csv")
+        assert folds[2]["decoding_raw"] == str(base / "decoding" / "01_fold2_decoding_results.csv")
 
 
 # =====================================================
@@ -120,3 +126,99 @@ class TestInferCategories:
         _make_subject(tmp_path, "desc1", "01")
         categories = infer_categories(str(tmp_path), "desc1", ["01"])
         assert categories == []
+
+
+# =====================================================
+# summarize_raw_with_overlay
+# =====================================================
+
+class TestSummarizeRawWithOverlay:
+    def test_groups_by_window_index_regressor_label_overlay_label(self):
+        raw = pd.DataFrame({
+            "window_index": [0, 0, 0, 0],
+            "regressor_label": ["face", "face", "face", "face"],
+            "trial_type": ["maintain_face", "maintain_face", "suppress_face", "suppress_face"],
+            "evidence_face": [0.8, 0.6, 0.4, 0.2],
+            "evidence_place": [0.2, 0.4, 0.6, 0.8],
+        })
+        overlay_conditions = {
+            "maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"},
+            "suppress": {"column": "trial_type", "match": "regex", "value": ".*suppress.*"},
+        }
+        result = summarize_raw_with_overlay(raw, overlay_conditions)
+
+        assert set(result.columns) >= {"window_index", "regressor_label", "overlay_label", "evidence_face", "evidence_place"}
+        maintain_row = result[result["overlay_label"] == "maintain"].iloc[0]
+        assert maintain_row["evidence_face"] == pytest.approx(0.7)
+        suppress_row = result[result["overlay_label"] == "suppress"].iloc[0]
+        assert suppress_row["evidence_face"] == pytest.approx(0.3)
+
+    def test_unmatched_rows_dropped_with_warning(self, capsys):
+        raw = pd.DataFrame({
+            "window_index": [0, 0],
+            "regressor_label": ["face", "face"],
+            "trial_type": ["maintain_face", "unrelated_trial"],
+            "evidence_face": [0.8, 0.5],
+        })
+        overlay_conditions = {"maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"}}
+        result = summarize_raw_with_overlay(raw, overlay_conditions)
+
+        assert len(result) == 1
+        assert "1 row(s) matched no overlay condition" in capsys.readouterr().out
+
+
+# =====================================================
+# load_annotation_info: overlay_conditions
+# =====================================================
+
+def _write_config(tmp_path, timecourse_decoding_extra):
+    config = {
+        "model_conditions": {
+            "timecourse_decoding": {
+                "conditions": {"face": {"column": "trial_type", "match": "regex", "value": ".*face.*"}},
+                "window": {
+                    "start": {"reference": "onset", "offset_seconds": 0},
+                    "end": {"reference": "offset_end", "offset_seconds": 10},
+                },
+                **timecourse_decoding_extra,
+            }
+        }
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config))
+    return str(path), config
+
+
+def _write_master_spreadsheet(tmp_path, boldfile):
+    master = pd.DataFrame([{
+        "subject": "01", "session": "", "task": "test", "run": 1,
+        "trial_type": "maintain_face", "trial_index": 1, "onset": 0.0, "duration": 2.0,
+        "volume_of_interest": 0, "boldfile": boldfile, "eventfile": "x",
+    }])
+    path = tmp_path / "master_spreadsheet.csv"
+    master.to_csv(path, index=False)
+    return str(path)
+
+
+class TestLoadAnnotationInfoOverlay:
+    def test_returns_overlay_conditions_when_present(self, tmp_path, synthetic_bold_file):
+        overlay = {"maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"}}
+        config_path, config = _write_config(tmp_path, {"overlay": overlay})
+        master_path = _write_master_spreadsheet(tmp_path, synthetic_bold_file)
+
+        window, tr, median_duration, overlay_conditions = load_annotation_info(config_path, master_path)
+
+        assert overlay_conditions == overlay
+        assert tr == pytest.approx(2.0)  # synthetic_bold_file's TR
+
+    def test_empty_overlay_conditions_when_absent(self, tmp_path, synthetic_bold_file):
+        config_path, _ = _write_config(tmp_path, {})
+        master_path = _write_master_spreadsheet(tmp_path, synthetic_bold_file)
+
+        _, _, _, overlay_conditions = load_annotation_info(config_path, master_path)
+
+        assert overlay_conditions == {}
+
+    def test_empty_overlay_conditions_when_config_missing(self):
+        _, _, _, overlay_conditions = load_annotation_info(None, None)
+        assert overlay_conditions == {}

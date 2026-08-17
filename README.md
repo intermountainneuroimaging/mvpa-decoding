@@ -348,6 +348,30 @@ of `hemodynamic_lag`** used when the table was built -- `reference` is
 above reads as "decode from stimulus onset, with no lag, through 10 seconds
 past the event's end."
 
+**`overlay`** -- *(optional)* only read by `generate_report.py`, not by
+either workflow script. Same name-to-query shape as `conditions`, but for a
+category that's independent of the classifier's own conditions -- e.g. the
+sample-data WM task's operation (`maintain`/`suppress`/`track`/`breath`),
+which is embedded in `trial_type` alongside face/place, not its own column:
+
+```json
+"overlay": {
+  "maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"},
+  "suppress": {"column": "trial_type", "match": "regex", "value": ".*suppress.*"},
+  "track":    {"column": "trial_type", "match": "regex", "value": ".*track.*"},
+  "breath":   {"column": "trial_type", "match": "regex", "value": ".*breath.*"}
+}
+```
+
+When present, the timecourse page (section 7) overlays one colored line per
+overlay category within each existing subplot, instead of a single line --
+see that section for how it changes the plot. Rows matching none of the
+overlay queries are dropped from that plot only (a count is printed);
+everything else about the pipeline -- the classifier, its evidence values,
+`decoding_results.csv`/`summary_decoding_results.csv` -- is unaffected,
+since `overlay` is evaluated entirely inside `generate_report.py` against
+data the workflow scripts already wrote.
+
 ### Running it
 
 ```
@@ -722,7 +746,7 @@ python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifi
 |---|---|
 | `--analysis-output-dir`/`--desc` | Same values used for `mvpa_generalization_workflow.py --analysis-output-dir`/the config's `model.desc`. |
 | `--subject` | *(optional)* Restrict the report to one subject. Omit to aggregate over every subject folder found under `<dir>/<desc>/`. |
-| `--config` | *(optional)* Supplies `model_conditions.timecourse_decoding` (conditions + window) for timecourse annotation. Without it, the timecourse page still renders, just unannotated. |
+| `--config` | *(optional)* Supplies `model_conditions.timecourse_decoding` (conditions + window, and optionally `overlay` -- see section 4) for timecourse annotation. Without it, the timecourse page still renders, just unannotated (and never split by overlay). |
 | `--master-spreadsheet` | *(optional)* Needed alongside `--config` to compute each condition's median trial duration and each subject's TR (both derived from real data, not hardcoded) -- used to convert `window_index` to seconds and mark trial onset/end on the timecourse plot. Without it, the x-axis stays in raw `window_index` units and annotation is skipped. |
 | `--output` | *(optional)* Defaults to `<dir>/<desc>/report_<desc>.pdf` (group) or `<dir>/<desc>/<subject>/report_<subject>.pdf` (single-subject). |
 
@@ -740,10 +764,17 @@ onto, unlike a normalized-space group analysis. The group report shows one
 page per subject instead; only within-subject fold-to-fold averaging (same
 subject, same grid) happens.
 
-The timecourse page always reads `summary_decoding_results.csv`, never the
-raw per-TR `decoding_results.csv` -- group-level statistics need one
+The timecourse page reads `summary_decoding_results.csv` by default -- never
+the raw per-TR `decoding_results.csv`, since group-level statistics need one
 already-averaged value per group per subject (or per fold), not individual
-trials.
+trials. The one exception is when `model_conditions.timecourse_decoding.overlay`
+is set in `--config` (see section 4): then it reads the raw file instead
+(needed since the overlay category doesn't survive into the summary),
+averages within each subject/fold itself first to preserve that same
+group-level-not-per-trial statistic, then overlays one colored line per
+overlay category within each subplot instead of a single line, with a
+shared legend. Without `overlay` configured, the timecourse page is
+unaffected -- same file, same single line per subplot, as always.
 
 ## Tutorial: a real external dataset (Haxby et al. 2001 / OpenNeuro ds000105)
 

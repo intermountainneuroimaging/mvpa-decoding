@@ -253,15 +253,19 @@ def quick_safe(name) -> str:
     return re.sub(r'[^A-Za-z0-9._-]', '_', str(name))
 
 
-def label_rows(df: pd.DataFrame, conditions: dict) -> pd.DataFrame:
-    """Tag rows matching any condition's query with a 'regressor_label' column
+def label_rows(df: pd.DataFrame, conditions: dict, label_column: str = "regressor_label") -> pd.DataFrame:
+    """Tag rows matching any condition's query with a label_column column
     (first matching condition wins, in dict-insertion order), dropping rows
-    that match none."""
+    that match none. label_column defaults to "regressor_label" (the
+    classifier's own condition labels); pass a different name to tag rows
+    with an independent category instead -- e.g. generate_report.py's
+    timecourse overlay, which needs its own column since the input already
+    has a real "regressor_label"."""
     labeled = []
     for name, query in conditions.items():
         mask = evaluate_query_node(query, df)
         subset = df[mask].copy()
-        subset["regressor_label"] = name
+        subset[label_column] = name
         labeled.append(subset)
     combined = pd.concat(labeled)
     return combined[~combined.index.duplicated(keep="first")]
