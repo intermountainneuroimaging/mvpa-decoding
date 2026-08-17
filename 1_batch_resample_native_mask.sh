@@ -23,6 +23,9 @@
 # `logs/` must already exist (sbatch does not create --output's parent dir).
 # --array count must match the number of subjects under HCPPIPE_ROOT --
 # check with: ls -d $HCPPIPE_ROOT/sub-* | wc -l
+#
+# Stage 1 of 0_submit_mvpa_pipeline.sh (mask resample -> master spreadsheet ->
+# k-fold classifier -> group report). Can also be run standalone.
 
 umask g+w
 

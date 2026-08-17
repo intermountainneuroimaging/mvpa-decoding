@@ -11,8 +11,10 @@
 #SBATCH --mem=16G
 #
 # Single (non-array) job: builds master_spreadsheet.csv once for the whole
-# dataset. Submitted on its own via submit_mvpa_pipeline.sh, which then chains
-# batch_run_mvpa_workflow.sh (the per-subject array job) after this completes.
+# (mindmem) dataset. Standalone -- run this, then batch_run_mvpa_workflow.sh
+# (the per-subject array job), once this completes. Not part of
+# 0_submit_mvpa_pipeline.sh, which is the Clearvale k-fold pipeline's own
+# orchestrator and doesn't chain this study's scripts.
 
 umask g+w
 

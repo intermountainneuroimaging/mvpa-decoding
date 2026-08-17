@@ -13,10 +13,10 @@
 #
 # Per-subject k-fold classifier array job (mvpa_kfold_workflow.py, not
 # mvpa_generalization_workflow.py -- same-task data, split into folds by
-# run). Expects master_spreadsheet.csv to already exist -- generate it
-# first (sbatch_generate_master_spreadsheet.sh / submit_mvpa_pipeline.sh),
-# this script isn't wired into that dependency chain itself. `logs/` must
-# also already exist (sbatch does not create --output's parent dir).
+# run). Expects master_spreadsheet.csv to already exist -- generate it first
+# (2_sbatch_generate_master_spreadsheet_kfold.sh / 0_submit_mvpa_pipeline.sh).
+# `logs/` must also already exist (sbatch does not create --output's parent
+# dir).
 #
 # --time is a rough starting estimate, not a measured one: a k-fold run
 # with model.kfold_cv.strategy="per_run" and model.permutation_test both
@@ -27,6 +27,9 @@
 #
 # --array count must match your subject count -- check with:
 #   ls -d $DATAROOT/sub-* | wc -l
+#
+# Stage 3 of 0_submit_mvpa_pipeline.sh (mask resample -> master spreadsheet ->
+# k-fold classifier -> group report). Can also be run standalone.
 
 umask g+w
 

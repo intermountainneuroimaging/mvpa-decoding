@@ -12,10 +12,13 @@
 #SBATCH --mem=16G
 #
 # Per-subject classifier array job. Expects master_spreadsheet.csv to already
-# exist -- submit via submit_mvpa_pipeline.sh, which runs
-# sbatch_generate_master_spreadsheet.sh first and chains this job after it with
-# --dependency=afterok. `logs/` must also already exist (sbatch does not create
+# exist -- run sbatch_generate_master_spreadsheet.sh first, then this job
+# once it completes. `logs/` must also already exist (sbatch does not create
 # --output's parent dir).
+#
+# Standalone -- not chained by 0_submit_mvpa_pipeline.sh, which is the
+# Clearvale k-fold pipeline's own orchestrator and doesn't chain this study's
+# scripts.
 
 umask g+w
 

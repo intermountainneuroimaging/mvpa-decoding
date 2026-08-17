@@ -871,7 +871,41 @@ Standard HCP Pipelines output layout, under each subject's
 `--xfm-pattern` overrides this if your derivatives tree organizes these
 differently.
 
-## Tutorial: a real external dataset (Haxby et al. 2001 / OpenNeuro ds000105)
+## 9. Running the full pipeline end-to-end (`0_submit_mvpa_pipeline.sh`)
+
+`0_submit_mvpa_pipeline.sh` chains every stage above into one SLURM
+submission, so there's a single command that goes from HCP Pipelines output
+to a group PDF report. The four stage scripts are numbered `1_`-`4_` to match
+the order they run in (`0_` for the orchestrator itself, so it sorts first
+in a directory listing too):
+
+```
+bash 0_submit_mvpa_pipeline.sh
+```
+
+It submits the four numbered jobs via `sbatch --parsable`, each depending on
+the previous one via `--dependency=afterok` (which, for an array job, only
+fires once *every* array task has succeeded):
+
+| Stage | Script | Type |
+|---|---|---|
+| 1. Mask resample | `1_batch_resample_native_mask.sh` | per-subject/session array job (section 8) |
+| 2. Master spreadsheet | `2_sbatch_generate_master_spreadsheet_kfold.sh` | single job (section 1) |
+| 3. K-fold classifier | `3_batch_run_mvpa_kfold_workflow.sh` | per-subject array job (section 6) |
+| 4. Group report | `4_sbatch_generate_kfold_report.sh` | single job (section 7) |
+
+Each stage script hardcodes this pipeline's own paths/config (Clearvale,
+`configs/config-kfold.clearvale-operation.json`) the same way every other
+SLURM script in this repo does -- copy and repoint them for a different
+study/config rather than parameterizing in place. Every stage script can
+also still be run standalone with plain `sbatch <script>.sh` (e.g. to rerun
+just one stage after fixing a subject-specific failure) -- the orchestrator
+only adds the dependency chaining on top, it doesn't own any logic itself.
+
+`logs/` is created automatically; each stage's own `logs/<job>_%A_%a.{out,err}`
+(or `_%j.{out,err}` for the two single jobs) is where to look first if a
+stage fails, since `--dependency=afterok` will simply never submit the next
+one -- no separate failure notification.
 
 See **[tutorial/README.md](tutorial/README.md)** for a full walkthrough
 against real public data (downloaded fresh, not checked into this repo) --
