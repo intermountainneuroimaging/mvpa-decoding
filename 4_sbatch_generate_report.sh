@@ -1,9 +1,9 @@
 #!/bin/bash
 #
 #SBATCH --job-name=mvpa_kfold_report
-#SBATCH --qos=normal
-#SBATCH --partition=amilan
-#SBATCH --account=ucb278_asc4
+#SBATCH --qos=cpu-normal
+#SBATCH --partition=acpu
+#SBATCH --account=ucb-general
 #SBATCH --time=00:30:00
 #SBATCH --output=logs/mvpa_kfold_report_%j.out
 #SBATCH --error=logs/mvpa_kfold_report_%j.err

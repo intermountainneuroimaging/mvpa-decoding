@@ -19,6 +19,9 @@
 #
 # Run this directly (not via sbatch): bash 0_submit_mvpa_pipeline.sh
 
+module use /curc/sw/modules/slurm
+module load slurm/alpine
+
 set -eo pipefail
 
 mkdir -p logs

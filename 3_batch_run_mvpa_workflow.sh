@@ -1,11 +1,11 @@
 #!/bin/bash
 #
 #SBATCH --job-name=mvpa_kfold_workflow
-#SBATCH --qos=normal
-#SBATCH --partition=amilan
-#SBATCH --account=ucb278_asc4
+#SBATCH --qos=cpu-normal
+#SBATCH --partition=acpu
+#SBATCH --account=ucb-general
 #SBATCH --time=04:00:00
-#SBATCH --array=1-69
+#SBATCH --array=1-90
 #SBATCH --output=logs/mvpa_kfold_workflow_%A_%a.out
 #SBATCH --error=logs/mvpa_kfold_workflow_%A_%a.err
 #SBATCH --cpus-per-task=4
@@ -52,3 +52,5 @@ subject=`ls -d $DATAROOT/sub-* | rev | cut -d"/" -f1 | rev | cut -d"-" -f2 | sed
 # --------------------------------------------
 python workflows/mvpa_kfold_workflow.py --subject $subject --config $CONFIG_DIR/config-kfold.clearvale-operation.json \
     --master-spreadsheet $MASTER_SPREADSHEET --analysis-output-dir $OUTPUT_DIR
+    
+python workflows/generate_report.py --analysis-output-dir $OUTPUT_DIR --config $CONFIG_DIR/config-kfold.clearvale-operation.json --subject $subject

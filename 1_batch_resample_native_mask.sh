@@ -1,9 +1,9 @@
 #!/bin/bash
 #
 #SBATCH --job-name=resample_native_mask
-#SBATCH --qos=normal
-#SBATCH --partition=amilan
-#SBATCH --account=ucb278_asc4
+#SBATCH --qos=cpu-normal
+#SBATCH --partition=acpu
+#SBATCH --account=ucb-general
 #SBATCH --time=00:30:00
 #SBATCH --array=1-69
 #SBATCH --output=logs/resample_native_mask_%A_%a.out
