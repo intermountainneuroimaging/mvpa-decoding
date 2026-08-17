@@ -733,20 +733,26 @@ confusion-style accuracy/evidence matrices, annotated timecourse decoding,
 and importance maps. One script, two scales, switched with `--subject`:
 
 ```
-# group report -- aggregates every subject found under <dir>/<desc>/*/
-python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier \
+# group report -- aggregates every subject found under <dir>/<desc>/*/ --
+# desc is read from --config's model.desc (same sanitization the workflow
+# scripts use), so it always matches where they actually wrote output
+python generate_report.py --analysis-output-dir ./out \
     --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
 
 # single-subject report -- scoped to just <dir>/<desc>/4057/
-python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier \
-    --subject 4057 --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
+python generate_report.py --analysis-output-dir ./out --subject 4057 \
+    --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
+
+# --desc still works directly, if you'd rather not point at a config
+python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier
 ```
 
 | Flag | Meaning |
 |---|---|
-| `--analysis-output-dir`/`--desc` | Same values used for `mvpa_generalization_workflow.py --analysis-output-dir`/the config's `model.desc`. |
+| `--analysis-output-dir` | Same value used for `mvpa_generalization_workflow.py --analysis-output-dir`. |
+| `--desc`/`--config` | **Exactly one required.** `--desc` names the classifier folder directly; `--config` reads it from the config's own `model.desc` instead (`quick_safe`-sanitized, identical to what the workflow scripts used to name their output folder) -- since it's the same value, the two can't drift apart the way a hand-typed `--desc` can. `--config` also supplies annotation (see below) even when `--desc` is given directly. |
 | `--subject` | *(optional)* Restrict the report to one subject. Omit to aggregate over every subject folder found under `<dir>/<desc>/`. |
-| `--config` | *(optional)* Supplies `model_conditions.timecourse_decoding` (conditions + window, and optionally `overlay` -- see section 4) for timecourse annotation. Without it, the timecourse page still renders, just unannotated (and never split by overlay). |
+| `--config` | Supplies `model.desc` (see above, when `--desc` is omitted) and `model_conditions.timecourse_decoding` (conditions + window, and optionally `overlay` -- see section 4) for timecourse annotation either way. Without it (i.e. using `--desc` alone), the timecourse page still renders, just unannotated (and never split by overlay). |
 | `--master-spreadsheet` | *(optional)* Needed alongside `--config` to compute each condition's median trial duration and each subject's TR (both derived from real data, not hardcoded) -- used to convert `window_index` to seconds and mark trial onset/end on the timecourse plot. Without it, the x-axis stays in raw `window_index` units and annotation is skipped. |
 | `--output` | *(optional)* Defaults to `<dir>/<desc>/report_<desc>.pdf` (group) or `<dir>/<desc>/<subject>/report_<subject>.pdf` (single-subject). |
 

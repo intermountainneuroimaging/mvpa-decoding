@@ -9,18 +9,25 @@ panels render automatically when the input is mvpa_kfold_workflow.py's
 output (detected by the presence of `_fold{N}_*` files).
 
 Usage:
-    # group report -- aggregates every subject found under <dir>/<desc>/*/
-    python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier \\
+    # group report -- aggregates every subject found under <dir>/<desc>/*/ --
+    # desc is read from --config's model.desc, same sanitization the workflow
+    # scripts use, so it always matches where they actually wrote output
+    python generate_report.py --analysis-output-dir ./out \\
         --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
 
     # single-subject report -- scoped to just <dir>/<desc>/4057/
-    python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier \\
-        --subject 4057 --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
+    python generate_report.py --analysis-output-dir ./out --subject 4057 \\
+        --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
 
---config/--master-spreadsheet are both optional and only needed for
-timecourse-decoding annotation (median event duration + TR, both derived
-from real data, not hardcoded) -- without them the report still renders,
-just without those annotations.
+    # --desc still works directly, if you'd rather not point at a config
+    python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier
+
+Exactly one of --desc/--config is required, to know which classifier's
+output to read. --master-spreadsheet is always optional, and --config's
+timecourse_decoding conditions/window/overlay are used for annotation
+best-effort even when --desc is also given -- without --master-spreadsheet
+(or without --config at all) the report still renders, just without those
+annotations.
 """
 
 import argparse
@@ -39,7 +46,7 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 
-from mvpa_common import label_rows, get_bold_header_info, resolve_window_times
+from mvpa_common import label_rows, get_bold_header_info, resolve_window_times, quick_safe
 
 
 # =====================================================
@@ -53,12 +60,44 @@ def parse_args():
         help="Same --analysis-output-dir passed to mvpa_generalization_workflow.py -- results are read from "
              "<this>/<desc>/*/{cv,model,decoding}/"
     )
-    parser.add_argument("--desc", required=True, help="Classifier folder name (model.desc, sanitized) under analysis-output-dir")
+    parser.add_argument(
+        "--desc", default=None,
+        help="Classifier folder name (model.desc, sanitized) under analysis-output-dir. Optional if "
+             "--config is given -- read from the config's model.desc instead (same sanitization the "
+             "workflow scripts use, so it always matches where they wrote output). One of --desc/--config "
+             "is required."
+    )
     parser.add_argument("--subject", default=None, help="Restrict the report to one subject (single-subject report). Omit for a group report across all subjects found.")
-    parser.add_argument("--config", default=None, help="mvpa config JSON -- supplies timecourse_decoding conditions/window for annotation. Optional.")
+    parser.add_argument(
+        "--config", default=None,
+        help="mvpa config JSON. Supplies model.desc (see --desc) when --desc is omitted, and "
+             "timecourse_decoding conditions/window/overlay for annotation either way. Optional only if "
+             "--desc is given explicitly."
+    )
     parser.add_argument("--master-spreadsheet", default=None, help="master_spreadsheet.csv -- needed for TR + median trial duration (timecourse annotation). Optional.")
     parser.add_argument("--output", default=None, help="Output PDF path. Defaults to <dir>/<desc>/report_<desc>.pdf (group) or <dir>/<desc>/<subject>/report_<subject>.pdf (single-subject).")
     return parser.parse_args()
+
+
+def resolve_desc(desc_arg: str, config_path: str) -> str:
+    """--desc if given directly; otherwise model.desc read from --config and
+    sanitized via quick_safe -- the exact same value the workflow scripts
+    themselves use to name their output folder, so the two can never
+    silently disagree. Raises SystemExit if neither is available, or if
+    --config is given but unreadable/missing model.desc."""
+    if desc_arg:
+        return desc_arg
+    if not config_path:
+        raise SystemExit("Either --desc or --config (with model.desc) is required.")
+    if not os.path.isfile(config_path):
+        raise SystemExit(f"--config {config_path} not found -- can't read model.desc from it.")
+
+    with open(config_path) as f:
+        cfg = json.load(f)
+    model_desc = cfg.get("model", {}).get("desc")
+    if not model_desc:
+        raise SystemExit(f"--config {config_path} has no model.desc -- pass --desc explicitly instead.")
+    return quick_safe(model_desc)
 
 
 # =====================================================
@@ -534,28 +573,29 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
 
 def main():
     args = parse_args()
+    desc = resolve_desc(args.desc, args.config)
 
-    subjects = list_subject_dirs(args.analysis_output_dir, args.desc, args.subject)
-    fold_flags = {s: has_fold_files(args.analysis_output_dir, args.desc, s) for s in subjects}
-    regressor_categories = infer_categories(args.analysis_output_dir, args.desc, subjects)
+    subjects = list_subject_dirs(args.analysis_output_dir, desc, args.subject)
+    fold_flags = {s: has_fold_files(args.analysis_output_dir, desc, s) for s in subjects}
+    regressor_categories = infer_categories(args.analysis_output_dir, desc, subjects)
     window, tr, median_duration, overlay_conditions = load_annotation_info(args.config, args.master_spreadsheet)
 
     if args.output:
         output_path = args.output
     elif len(subjects) == 1:
-        output_path = os.path.join(args.analysis_output_dir, args.desc, subjects[0], f"report_{subjects[0]}.pdf")
+        output_path = os.path.join(args.analysis_output_dir, desc, subjects[0], f"report_{subjects[0]}.pdf")
     else:
-        output_path = os.path.join(args.analysis_output_dir, args.desc, f"report_{args.desc}.pdf")
+        output_path = os.path.join(args.analysis_output_dir, desc, f"report_{desc}.pdf")
     Path(os.path.dirname(output_path)).mkdir(parents=True, exist_ok=True)
 
     print(f"Report scope: {len(subjects)} subject(s): {subjects}")
     with PdfPages(output_path) as pdf:
-        render_title_page(pdf, args.desc, subjects, args.config, output_path)
-        render_accuracy_auc_page(pdf, args.analysis_output_dir, args.desc, subjects, fold_flags)
-        render_confusion_matrices_page(pdf, args.analysis_output_dir, args.desc, subjects)
-        render_timecourse_pages(pdf, args.analysis_output_dir, args.desc, subjects, fold_flags, window, tr, median_duration,
+        render_title_page(pdf, desc, subjects, args.config, output_path)
+        render_accuracy_auc_page(pdf, args.analysis_output_dir, desc, subjects, fold_flags)
+        render_confusion_matrices_page(pdf, args.analysis_output_dir, desc, subjects)
+        render_timecourse_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, window, tr, median_duration,
                                  overlay_conditions)
-        render_importance_pages(pdf, args.analysis_output_dir, args.desc, subjects, fold_flags, regressor_categories)
+        render_importance_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, regressor_categories)
 
     print(f"Report written to: {output_path}")
 

@@ -18,6 +18,7 @@ from generate_report import (
     infer_categories,
     summarize_raw_with_overlay,
     load_annotation_info,
+    resolve_desc,
 )
 
 
@@ -222,3 +223,38 @@ class TestLoadAnnotationInfoOverlay:
     def test_empty_overlay_conditions_when_config_missing(self):
         _, _, _, overlay_conditions = load_annotation_info(None, None)
         assert overlay_conditions == {}
+
+
+# =====================================================
+# resolve_desc
+# =====================================================
+
+class TestResolveDesc:
+    def test_desc_arg_used_directly_when_given(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({"model": {"desc": "from_config"}}))
+        assert resolve_desc("from_cli", str(config_path)) == "from_cli"
+
+    def test_falls_back_to_config_model_desc(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({"model": {"desc": "gm_object_classifier"}}))
+        assert resolve_desc(None, str(config_path)) == "gm_object_classifier"
+
+    def test_config_desc_is_sanitized_same_as_workflow_scripts(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({"model": {"desc": "gm valence/classifier!"}}))
+        assert resolve_desc(None, str(config_path)) == "gm_valence_classifier_"
+
+    def test_raises_when_neither_given(self):
+        with pytest.raises(SystemExit):
+            resolve_desc(None, None)
+
+    def test_raises_when_config_missing_on_disk(self, tmp_path):
+        with pytest.raises(SystemExit):
+            resolve_desc(None, str(tmp_path / "nope.json"))
+
+    def test_raises_when_config_has_no_model_desc(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({"model": {}}))
+        with pytest.raises(SystemExit):
+            resolve_desc(None, str(config_path))
