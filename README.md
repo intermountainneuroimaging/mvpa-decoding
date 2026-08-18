@@ -26,9 +26,12 @@ scripts take the **same** config file via `--config`. Shared logic -- BIDS
 filename parsing, the query DSL, window math, and (for the two train/decode
 scripts) the actual classification/decoding primitives -- lives in
 `utils/mvpa_common.py`, imported by all of them. Everything below is grounded in
-`examples/config-generalization.example.json`, a complete config that runs end-to-end
-against `examples/sample-data/`. `examples/config-generalization-template.example.json` is the same
-shape but written as a fill-in-your-own-paths template, including the
+`tutorial/config-haxby.example.json`, a complete config that runs end-to-end
+against `tutorial/haxby-data/` (Haxby et al. 2001 / OpenNeuro ds000105 --
+downloaded fresh by `tutorial/preprocess_haxby.sh`, not checked into this
+repo -- see [tutorial/README.md](tutorial/README.md) for the full
+walkthrough). `examples/config-generalization-template.example.json` is the
+same shape but written as a fill-in-your-own-paths template, including the
 derivative-data fields (`derivatives_root`, `mask_root`) described below.
 
 ## Running tests
@@ -49,27 +52,30 @@ You need a directory tree containing, for every scan run you want in the table:
 
 - **An events file**: tab-separated `.tsv` with at least `onset`, `duration`,
   `trial_type` columns (standard BIDS events file). Its **filename** must
-  contain BIDS key-value entities `sub-`, `ses-`, `task-`, `run-` somewhere in
-  it (in any order, with any other entities mixed in between) --
-  e.g. `sub-4057_ses-A1_task-loc_dir-pa_run-01_events.tsv`.
+  contain BIDS key-value entities `sub-`, `task-`, `run-` somewhere in it (in
+  any order, with any other entities mixed in between) -- e.g.
+  `sub-1_task-objectviewing_run-01_events.tsv`. `ses-` is optional -- include
+  it for a multi-session dataset, omit it entirely for a single-session one
+  (like the tutorial data below); either way it's inferred, never configured.
 - **A matching BOLD file**: a `.nii.gz` whose filename contains the word
-  `bold` plus the *same* `sub-`/`ses-`/`task-`/`run-` values as the events
-  file, e.g. `sub-4057_ses-A1_task-loc_dir-pa_run-01_bold.nii.gz`. There must
-  be **exactly one** such match per events file -- zero or multiple matches
-  cause that events file to be skipped with a warning, not a crash.
+  `bold` plus the *same* `sub-`/`task-`/`run-` (and `ses-`, if present) values
+  as the events file, e.g. `sub-1_task-objectviewing_run-01_bold.nii.gz`.
+  There must be **exactly one** such match per events file -- zero or
+  multiple matches cause that events file to be skipped with a warning, not
+  a crash.
 
-Example tree (trimmed from `examples/sample-data/`, real files this repo's
-examples run against):
+Example tree (trimmed from `tutorial/haxby-data/`, real files this repo's
+tutorial runs against -- see [tutorial/README.md](tutorial/README.md) for
+how to download it):
 
 ```
-examples/sample-data/
-└── sub-4057/
-    └── ses-A1/
-        └── func/
-            ├── sub-4057_ses-A1_task-loc_dir-pa_run-01_events.tsv
-            ├── sub-4057_ses-A1_task-loc_dir-pa_run-01_bold.nii.gz
-            ├── sub-4057_ses-A1_task-WMpos_dir-pa_run-01_events.tsv
-            └── sub-4057_ses-A1_task-WMpos_dir-pa_run-01_bold.nii.gz
+tutorial/haxby-data/
+└── sub-1/
+    └── func/
+        ├── sub-1_task-objectviewing_run-01_events.tsv
+        ├── sub-1_task-objectviewing_run-01_bold.nii.gz
+        ├── sub-1_task-objectviewing_run-02_events.tsv
+        └── sub-1_task-objectviewing_run-02_bold.nii.gz
 ```
 
 This assumes events and BOLD files are co-located and share a naming
@@ -80,7 +86,8 @@ convention. If your preprocessed data lives elsewhere (a separate fMRIPrep
 entirely.
 
 **Inferred from the data, never configured:**
-- `subject`, `session`, `task`, `run` -- parsed out of the events filename.
+- `subject`, `session`, `task`, `run` -- parsed out of the events filename
+  (`session` is `""` when there's no `ses-` entity, as in the tree above).
 - Any *other* BIDS entity in the events filename (e.g. `dir-pa`) -- captured
   automatically as its own extra column, named after the entity key. Different
   designs can carry different entities; whatever shows up, shows up as a column.
@@ -91,7 +98,7 @@ entirely.
 
 ## 2. The config file
 
-One JSON file with three top-level sections. `examples/config-generalization.example.json`
+One JSON file with three top-level sections. `tutorial/config-haxby.example.json`
 is a complete, runnable example (`examples/config-generalization-template.example.json` is the same
 shape as a fill-in-your-own-paths template):
 
@@ -99,7 +106,7 @@ shape as a fill-in-your-own-paths template):
 {
   "config_version": "1.0",
   "created_by": "AKH",
-  "notes": "MVPA face/place; masking on grey matter",
+  "notes": "Haxby et al. 2001 (OpenNeuro ds000105) 8-way object category classifier",
 
   "event_extraction": { "...": "see section 3" },
   "model_conditions": { "...": "see section 4" },
@@ -113,11 +120,11 @@ Read by `generate_master_spreadsheet.py`.
 
 ```json
 "event_extraction": {
-  "bids_root": "examples/sample-data",
+  "bids_root": "tutorial/haxby-data",
   "events_glob": "**/*_events.tsv",
-  "hemodynamic_lag": 4.6,
-  "output_file": "master_spreadsheet.csv",
-  "expected_events_file": "examples/expected_events.example.json"
+  "hemodynamic_lag": 4.0,
+  "output_file": "master_spreadsheet_haxby.csv",
+  "expected_events_file": "tutorial/expected_events_haxby.example.json"
 }
 ```
 
@@ -138,39 +145,30 @@ across the whole dataset (no single run needs to contain all of them). After
 building the table, the script diffs this list against what was actually
 observed and prints warnings for both directions -- values you expected but
 never saw, and values you saw but didn't expect (typos, unlisted new
-conditions). This is how a stray-space typo like `"positive _face_image"` in
-`examples/sample-data` got caught during development.
+conditions) -- exactly the kind of stray-space or misspelled `trial_type`
+that's easy to miss by eye across a dozen events.tsv files but shows up
+immediately as an unexpected value here.
 
 ```json
 [
-  "start_block",
-  "end_block",
-  "rest_block",
-  "trial_fixation",
-  "view_face",
-  "view_place",
-  "suppress_face",
-  "suppress_place",
-  "maintain_face",
-  "maintain_place",
-  "breath_face",
-  "breath_place",
-  "track_face",
-  "track_place",
-  "positive_face_image",
-  "negative_face_image",
-  "positive_place_image",
-  "negative_place_image"
+  "bottle",
+  "cat",
+  "chair",
+  "face",
+  "house",
+  "scissors",
+  "scrambledpix",
+  "shoe"
 ]
 ```
 
 ### Running it
 
 ```
-python workflows/generate_master_spreadsheet.py --config examples/config-generalization.example.json
+python workflows/generate_master_spreadsheet.py --config tutorial/config-haxby.example.json
 ```
 
-Output (`master_spreadsheet.csv`) -- one row per BOLD volume that overlapped
+Output (`master_spreadsheet_haxby.csv`) -- one row per BOLD volume that overlapped
 an event's active window:
 
 | Column | Meaning |
@@ -181,13 +179,14 @@ an event's active window:
 | `trial_index` | *Computed*: 1-based sequential index (in onset order) among this run's *retained* events -- i.e. after the hardcoded exclusions below, so it's always contiguous. Identifies "which event produced this volume," used by `mvpa_generalization_workflow.py` for trial-balancing and for recomputing `timecourse_decoding`'s window. |
 | `onset`, `duration` | Verbatim from the events file, repeated across every volume belonging to that event. |
 | `boldfile`, `eventfile` | Resolved source file paths, for traceability/sorting. |
-| *(varies)* | Any other BIDS entity found in the filename, e.g. `dir` -- *inferred*, present only if that entity appears in your filenames. |
+| *(varies)* | Any other BIDS entity found in the filename, e.g. `dir` -- *inferred*, present only if that entity appears in your filenames (the tutorial data has none). |
 
-Example real output rows (from `examples/sample-data`):
+Example real output row (from `tutorial/haxby-data`; `session` is empty since
+this dataset has no `ses-` entity):
 
 ```
-subject  session  volume_of_interest  trial_type   trial_index  onset   duration  task   run  boldfile  eventfile  dir
-4057     A1       50                  view_place   2            18.507  2.764     WMneg  3    examples/sample-data/sub-4057/.../..._run-03_bold.nii.gz  examples/sample-data/sub-4057/.../..._run-03_events.tsv  pa
+subject  session  volume_of_interest  trial_type  trial_index  onset  duration  task           run  boldfile                                                                                eventfile
+1                 65                  house       51           160.0  0.5       objectviewing  1    tutorial/haxby-data/derivatives/sub-1/func/..._run-01_desc-preproc_bold.nii.gz  tutorial/haxby-data/sub-1/func/..._run-01_events.tsv
 ```
 
 ### Hardcoded exclusions
@@ -219,13 +218,17 @@ case: fMRIPrep (and most BIDS derivative pipelines) write outputs to a
 separate `derivatives/` tree with its own naming convention (`space-`,
 `desc-preproc`, etc.), sometimes on a different disk or mount entirely.
 
-Two config fields decouple BOLD-file discovery from the events-file layout:
+Two config fields decouple BOLD-file discovery from the events-file layout.
+`tutorial/config-haxby.example.json` actually needs this -- raw events.tsv
+files live under `tutorial/haxby-data/`, but the (minimally) preprocessed
+BOLD data `tutorial/preprocess_haxby.sh` writes lives in its own
+`derivatives/` subfolder with a `desc-preproc` suffix:
 
 ```json
 "event_extraction": {
-  "bids_root": "/data/raw_bids",
-  "derivatives_root": "/data/derivatives/fmriprep",
-  "bold_glob": "sub-{subject}/ses-{session}/func/sub-{subject}_ses-{session}_task-{task}_run-{run}_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz",
+  "bids_root": "tutorial/haxby-data",
+  "derivatives_root": "tutorial/haxby-data/derivatives",
+  "bold_glob": "sub-{subject}/func/sub-{subject}_task-{task}_run-{run}_desc-preproc_bold.nii.gz",
   "events_glob": "**/*_events.tsv"
 }
 ```
@@ -272,11 +275,11 @@ that selects which `master_spreadsheet.csv` rows belong to it.
 ### The query language
 
 A query is a small recursive boolean tree over *any* column of
-`master_spreadsheet.csv` (`trial_type`, `task`, `run`, `subject`, `dir`, ...):
+`master_spreadsheet.csv` (`trial_type`, `task`, `run`, `subject`, ...):
 
 ```json
-{"column": "trial_type", "match": "exact", "value": "view_face"}
-{"column": "trial_type", "match": "in", "values": ["view_face", "view_place"]}
+{"column": "trial_type", "match": "exact", "value": "face"}
+{"column": "run", "match": "in", "values": ["10", "11", "12"]}
 {"column": "trial_type", "match": "regex", "value": ".*face.*"}
 {"and": [<query>, <query>, ...]}
 {"or":  [<query>, <query>, ...]}
@@ -290,50 +293,52 @@ A query is a small recursive boolean tree over *any* column of
 
 ### Section by section
 
-**`training`** -- rows used to fit the classifier. In the example, localizer
-(`loc`) task trials, split into `face`/`place` by a substring match on
-`trial_type`:
+**`training`** -- rows used to fit the classifier. In the example, the first
+9 of Haxby's 12 runs, split into its 8 object categories by an exact match on
+`trial_type` (2 of 8 shown):
 
 ```json
 "model_conditions": {
   "training": {
     "conditions": {
-      "face":  {"and": [{"column": "task", "match": "exact", "value": "loc"},
-                         {"column": "trial_type", "match": "regex", "value": ".*face.*"}]},
-      "place": {"and": [{"column": "task", "match": "exact", "value": "loc"},
-                         {"column": "trial_type", "match": "regex", "value": ".*place.*"}]}
+      "face":  {"and": [{"column": "trial_type", "match": "exact", "value": "face"},
+                         {"column": "run", "match": "in", "values": ["1","2","3","4","5","6","7","8","9"]}]},
+      "house": {"and": [{"column": "trial_type", "match": "exact", "value": "house"},
+                         {"column": "run", "match": "in", "values": ["1","2","3","4","5","6","7","8","9"]}]}
     }
   }
 }
 ```
 
 **`testing`** -- held-out rows used to score the trained classifier. In the
-example, any working-memory task run (`task` starting with `WM`):
+example, the remaining 3 runs (10-12) -- same task, same categories, held out
+by run rather than by a different task. That's what this particular example
+happens to do; `training`/`testing` can just as easily reference genuinely
+different tasks (e.g. train on a localizer, test on a separate main-task
+run) -- the query language doesn't care which, `task` is just another
+column:
 
 ```json
 "testing": {
   "conditions": {
-    "face":  {"and": [{"column": "task", "match": "regex", "value": "^WM.*"},
-                       {"column": "trial_type", "match": "regex", "value": ".*face.*"}]},
-    "place": {"and": [{"column": "task", "match": "regex", "value": "^WM.*"},
-                       {"column": "trial_type", "match": "regex", "value": ".*place.*"}]}
+    "face":  {"and": [{"column": "trial_type", "match": "exact", "value": "face"},
+                       {"column": "run", "match": "in", "values": ["10","11","12"]}]},
+    "house": {"and": [{"column": "trial_type", "match": "exact", "value": "house"},
+                       {"column": "run", "match": "in", "values": ["10","11","12"]}]}
   }
 }
 ```
 
 **`timecourse_decoding`** -- same idea, but for the trial-by-trial decoding
-sweep. Here the example also excludes the `view_*` cue rows with `not`/`in`,
-and adds a required **`window`**:
+sweep. Here the example also adds a required **`window`**:
 
 ```json
 "timecourse_decoding": {
   "conditions": {
-    "face":  {"and": [{"column": "task", "match": "regex", "value": "^WM.*"},
-                       {"column": "trial_type", "match": "regex", "value": ".*face.*"},
-                       {"not": {"column": "trial_type", "match": "in", "values": ["view_face"]}}]},
-    "place": {"and": [{"column": "task", "match": "regex", "value": "^WM.*"},
-                       {"column": "trial_type", "match": "regex", "value": ".*place.*"},
-                       {"not": {"column": "trial_type", "match": "in", "values": ["view_place"]}}]}
+    "face":  {"and": [{"column": "trial_type", "match": "exact", "value": "face"},
+                       {"column": "run", "match": "in", "values": ["10","11","12"]}]},
+    "house": {"and": [{"column": "trial_type", "match": "exact", "value": "house"},
+                       {"column": "run", "match": "in", "values": ["10","11","12"]}]}
   },
   "window": {
     "start": {"reference": "onset", "offset_seconds": 0},
@@ -351,16 +356,17 @@ past the event's end."
 
 **`overlay`** -- *(optional)* only read by `generate_report.py`, not by
 either workflow script. Same name-to-query shape as `conditions`, but for a
-category that's independent of the classifier's own conditions -- e.g. the
-sample-data WM task's operation (`maintain`/`suppress`/`track`/`breath`),
-which is embedded in `trial_type` alongside face/place, not its own column:
+category that's independent of the classifier's own conditions. Haxby's raw
+events don't carry a secondary factor the way some designs do (e.g. a
+manipulation embedded in `trial_type` alongside the category itself) -- so
+as a syntax illustration, this example overlays each category's evidence
+curve by *which* testing run a trial came from, using `run` (any column
+works, not just ones that look condition-like):
 
 ```json
 "overlay": {
-  "maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"},
-  "suppress": {"column": "trial_type", "match": "regex", "value": ".*suppress.*"},
-  "track":    {"column": "trial_type", "match": "regex", "value": ".*track.*"},
-  "breath":   {"column": "trial_type", "match": "regex", "value": ".*breath.*"}
+  "runs_10_11": {"column": "run", "match": "in", "values": ["10", "11"]},
+  "run_12":     {"column": "run", "match": "exact", "value": "12"}
 }
 ```
 
@@ -376,8 +382,8 @@ data the workflow scripts already wrote.
 ### Running it
 
 ```
-python utils/validate_model_config.py --config examples/config-generalization.example.json \
-    --master-spreadsheet master_spreadsheet.csv
+python utils/validate_model_config.py --config tutorial/config-haxby.example.json \
+    --master-spreadsheet master_spreadsheet_haxby.csv
 ```
 
 Without `--master-spreadsheet`, only the JSON structure is checked (valid
@@ -392,16 +398,34 @@ additionally get:
 - **Warning** if the condition *names* differ between sections (training
   should generally define the same classes as testing/decoding).
 
-Example output against `examples/sample-data`:
+Example output against `tutorial/haxby-data` (all 8 categories shown):
 
 ```
-Validating examples/config-generalization.example.json against master_spreadsheet.csv
-  [training] 'face': 524 rows
-  [training] 'place': 536 rows
-  [testing] 'face': 2020 rows
-  [testing] 'place': 2022 rows
-  [timecourse_decoding] 'face': 1009 rows
-  [timecourse_decoding] 'place': 1012 rows
+Validating tutorial/config-haxby.example.json against master_spreadsheet_haxby.csv
+  [training] 'bottle': 108 rows
+  [training] 'cat': 108 rows
+  [training] 'chair': 108 rows
+  [training] 'face': 108 rows
+  [training] 'house': 108 rows
+  [training] 'scissors': 108 rows
+  [training] 'scrambledpix': 108 rows
+  [training] 'shoe': 108 rows
+  [testing] 'bottle': 36 rows
+  [testing] 'cat': 36 rows
+  [testing] 'chair': 36 rows
+  [testing] 'face': 36 rows
+  [testing] 'house': 36 rows
+  [testing] 'scissors': 36 rows
+  [testing] 'scrambledpix': 36 rows
+  [testing] 'shoe': 36 rows
+  [timecourse_decoding] 'bottle': 36 rows
+  [timecourse_decoding] 'cat': 36 rows
+  [timecourse_decoding] 'chair': 36 rows
+  [timecourse_decoding] 'face': 36 rows
+  [timecourse_decoding] 'house': 36 rows
+  [timecourse_decoding] 'scissors': 36 rows
+  [timecourse_decoding] 'scrambledpix': 36 rows
+  [timecourse_decoding] 'shoe': 36 rows
 
 0 error(s), 0 warning(s)
 ```
@@ -413,9 +437,9 @@ about *which rows* to use (that's `model_conditions`'s job):
 
 ```json
 "model": {
-  "desc": "gm_object_classifier",
+  "desc": "haxby_object_classifier",
   "mask": {
-    "mask_pattern": "sub-{subject}/ses-{session}/masks/native_gm_transformed_mask.nii.gz"
+    "mask_pattern": "sub-{subject}/masks/native_epi_mask.nii.gz"
   },
   "featureSelection": {
     "model": "ANOVA",
@@ -541,8 +565,8 @@ this one.
 ## Running `workflows/mvpa_generalization_workflow.py`
 
 ```
-python workflows/mvpa_generalization_workflow.py --subject 4057 --config examples/config-generalization.example.json \
-    --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out
+python workflows/mvpa_generalization_workflow.py --subject 1 --config tutorial/config-haxby.example.json \
+    --master-spreadsheet master_spreadsheet_haxby.csv --analysis-output-dir ./out
 ```
 
 There's no separate `inputs.json`/`--input-scaffold` anymore -- everything
@@ -581,12 +605,13 @@ comes from the one config plus `master_spreadsheet.csv`. For a given
    - `{subject}_summary_decoding_results.csv` -- the raw table grouped by
      `(window_index, regressor_label)` and averaged across every trial in
      that group (trial-count-weighted, not an average of averages) -- the
-     confusion-style timecourse view `generate_report.py` (section 6) reads.
+     confusion-style timecourse view `generate_report.py` (section 7) reads.
 
-`examples/sample-data` has no `masks/` directory, so running this against it
-requires pointing `model.mask.mask_pattern` (and `mask_root`, if the mask
-doesn't live under `derivatives_root`) at a real (or throwaway, for testing) mask
-file first.
+`tutorial/haxby-data/derivatives/sub-1/masks/native_epi_mask.nii.gz` is a
+real mask already, so this runs as shown above with no extra setup -- if
+your own dataset doesn't have one yet, point `model.mask.mask_pattern` (and
+`mask_root`, if the mask doesn't live under `derivatives_root`) at a real
+(or throwaway, for testing) mask file first.
 
 ### Trial pivot table (sanity check)
 
@@ -609,13 +634,16 @@ only on the held-out group, then aggregates every fold into one final
 answer -- the same `model_classification`/`model_performance`/
 `timecourse_decoding` steps `mvpa_generalization_workflow.py` uses (both scripts import
 them from `mvpa_common.py`, so they can never drift apart on how a model is
-actually fit or scored). See `examples/config-kfold.example.json` for a
-complete example (3-run leave-one-run-out over `examples/sample-data`'s
-`loc` task).
+actually fit or scored). See `tutorial/config-kfold-haxby.example.json` for
+a complete example (12-run leave-one-run-out over `tutorial/haxby-data`'s 8
+object categories -- the same categories `tutorial/config-haxby.example.json`
+uses for section 5's independent-train/test example, just with `training`/
+`testing`/`timecourse_decoding` referencing every run instead of a fixed
+9-run/3-run split, since fold membership is `model.kfold_cv`'s job here).
 
 ```
-python workflows/mvpa_kfold_workflow.py --subject 4057 --config examples/config-kfold.example.json \
-    --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out
+python workflows/mvpa_kfold_workflow.py --subject 1 --config tutorial/config-kfold-haxby.example.json \
+    --master-spreadsheet master_spreadsheet_haxby.csv --analysis-output-dir ./out
 ```
 
 ### `model.kfold_cv`
@@ -651,16 +679,18 @@ inner list is that fold's held-out run(s)**, not what to train on:
 ```json
 "kfold_cv": {
   "strategy": "explicit_groups",
-  "held_out_runs": [[1, 2], [3, 4], [5, 6]]
+  "held_out_runs": [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]]
 }
 ```
 
-This example produces 3 folds. For fold 1 (`[1, 2]`): training uses every
-training-condition row whose `run` is *not* 1 or 2; testing/timecourse_decoding
-use only rows whose `run` *is* 1 or 2. Folds 2 and 3 work the same way against
-`[3, 4]` and `[5, 6]`. Each fold trains and evaluates independently -- run IDs
-that never appear in `held_out_runs` are simply never held out, so they're
-always available for training but never scored on their own.
+This example produces 4 folds, grouping Haxby's 12 runs into 3-run blocks.
+For fold 1 (`[1, 2, 3]`): training uses every training-condition row whose
+`run` is *not* 1, 2, or 3; testing/timecourse_decoding use only rows whose
+`run` *is* 1, 2, or 3. Folds 2-4 work the same way against `[4, 5, 6]`,
+`[7, 8, 9]`, and `[10, 11, 12]`. Each fold trains and evaluates
+independently -- run IDs that never appear in `held_out_runs` are simply
+never held out, so they're always available for training but never scored
+on their own.
 
 A few things worth knowing before writing your own:
 
@@ -738,14 +768,14 @@ and importance maps. One script, two scales, switched with `--subject`:
 # desc is read from --config's model.desc (same sanitization the workflow
 # scripts use), so it always matches where they actually wrote output
 python workflows/generate_report.py --analysis-output-dir ./out \
-    --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
+    --config tutorial/config-haxby.example.json --master-spreadsheet master_spreadsheet_haxby.csv
 
-# single-subject report -- scoped to just <dir>/<desc>/4057/
-python workflows/generate_report.py --analysis-output-dir ./out --subject 4057 \
-    --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
+# single-subject report -- scoped to just <dir>/<desc>/1/
+python workflows/generate_report.py --analysis-output-dir ./out --subject 1 \
+    --config tutorial/config-haxby.example.json --master-spreadsheet master_spreadsheet_haxby.csv
 
 # --desc still works directly, if you'd rather not point at a config
-python workflows/generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier
+python workflows/generate_report.py --analysis-output-dir ./out --desc haxby_object_classifier
 ```
 
 | Flag | Meaning |
@@ -856,8 +886,8 @@ preprocessing script already requires; no new Python package is added.
 ```
 python utils/hcp_resample.py --input bold_mni.nii.gz --output bold_native.nii.gz \
     --direction mni2native --subject 001 --session D1 \
-    --derivatives-root /pl/active/banich/studies/Clearvale/analysis/bids-hcp \
-    --reference sub-001_ses-D1_task-WMneg_run-03_bold.nii.gz --interp trilinear
+    --derivatives-root /path/to/derivatives/bids-hcp \
+    --reference sub-001_ses-D1_task-func_run-03_bold.nii.gz --interp trilinear
 ```
 
 | Flag | Meaning |
@@ -946,19 +976,16 @@ stage fails, since `--dependency=afterok` will simply never submit the next
 one -- no separate failure notification.
 
 See **[tutorial/README.md](tutorial/README.md)** for a full walkthrough
-against real public data (downloaded fresh, not checked into this repo) --
-every command, the actual output and results, including a minimal
+against this same real public data, downloaded fresh (not checked into this
+repo) -- every command, the actual output and results, including a minimal
 preprocessing pass (`tutorial/preprocess_haxby.sh`, built on FSL's `mcflirt`/
 `flirt`/`applyxfm4D`/`fsl_glm`: motion correction, rigid coregistration to a
 common run, linear detrending) written into a `derivatives/` folder and
 picked up via `derivatives_root`/`bold_glob` -- and a detailed accounting of
 where the tutorial still oversimplifies (rigid-only alignment with default
 settings, no slice-timing correction, no normalization to a standard
-template, a crude `bet` brain mask rather than an anatomical one). It's also
-the only example here with **8**
-classification conditions (not 2) and no `ses-` entity in its filenames at
-all, which is what surfaced a real bug: `generate_master_spreadsheet.py`
-used to *require* `ses` and would have silently rejected every file in a
-session-less dataset like this one -- fixed, since BIDS session labels are
-optional for single-session studies. `tutorial/config-haxby.example.json` is
-the exact config used.
+template, a crude `bet` brain mask rather than an anatomical one). Its
+sessionless filenames (no `ses-` entity at all) are also what surfaced a
+real bug: `generate_master_spreadsheet.py` used to *require* `ses` and would
+have silently rejected every file in a session-less dataset like this one --
+fixed, since BIDS session labels are optional for single-session studies.

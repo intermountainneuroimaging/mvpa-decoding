@@ -1,0 +1,83 @@
+{
+  "config_version": "1.0",
+  "created_by": "AKH",
+  "notes": "Haxby et al. 2001 (OpenNeuro ds000105) 8-way object category classifier, k-fold (same-task, split by run) -- for mvpa_kfold_workflow.py. Same minimal preprocessing as config-haxby.example.json (see tutorial/preprocess_haxby.sh) -- not a scientifically rigorous preprocessing pipeline",
+  "event_extraction": {
+    "bids_root": "tutorial/haxby-data",
+    "derivatives_root": "tutorial/haxby-data/derivatives",
+    "bold_glob": "sub-{subject}/func/sub-{subject}_task-{task}_run-{run}_desc-preproc_bold.nii.gz",
+    "events_glob": "**/*_events.tsv",
+    "hemodynamic_lag": 4.0,
+    "output_file": "master_spreadsheet_haxby.csv",
+    "expected_events_file": "tutorial/expected_events_haxby.example.json"
+  },
+  "model_conditions": {
+    "training": {
+      "conditions": {
+        "bottle": {"column": "trial_type", "match": "exact", "value": "bottle"},
+        "cat": {"column": "trial_type", "match": "exact", "value": "cat"},
+        "chair": {"column": "trial_type", "match": "exact", "value": "chair"},
+        "face": {"column": "trial_type", "match": "exact", "value": "face"},
+        "house": {"column": "trial_type", "match": "exact", "value": "house"},
+        "scissors": {"column": "trial_type", "match": "exact", "value": "scissors"},
+        "scrambledpix": {"column": "trial_type", "match": "exact", "value": "scrambledpix"},
+        "shoe": {"column": "trial_type", "match": "exact", "value": "shoe"}
+      }
+    },
+    "testing": {
+      "conditions": {
+        "bottle": {"column": "trial_type", "match": "exact", "value": "bottle"},
+        "cat": {"column": "trial_type", "match": "exact", "value": "cat"},
+        "chair": {"column": "trial_type", "match": "exact", "value": "chair"},
+        "face": {"column": "trial_type", "match": "exact", "value": "face"},
+        "house": {"column": "trial_type", "match": "exact", "value": "house"},
+        "scissors": {"column": "trial_type", "match": "exact", "value": "scissors"},
+        "scrambledpix": {"column": "trial_type", "match": "exact", "value": "scrambledpix"},
+        "shoe": {"column": "trial_type", "match": "exact", "value": "shoe"}
+      }
+    },
+    "timecourse_decoding": {
+      "conditions": {
+        "bottle": {"column": "trial_type", "match": "exact", "value": "bottle"},
+        "cat": {"column": "trial_type", "match": "exact", "value": "cat"},
+        "chair": {"column": "trial_type", "match": "exact", "value": "chair"},
+        "face": {"column": "trial_type", "match": "exact", "value": "face"},
+        "house": {"column": "trial_type", "match": "exact", "value": "house"},
+        "scissors": {"column": "trial_type", "match": "exact", "value": "scissors"},
+        "scrambledpix": {"column": "trial_type", "match": "exact", "value": "scrambledpix"},
+        "shoe": {"column": "trial_type", "match": "exact", "value": "shoe"}
+      },
+      "window": {
+        "start": {"reference": "onset", "offset_seconds": 0},
+        "end": {"reference": "offset_end", "offset_seconds": 10}
+      }
+    }
+  },
+  "model": {
+    "desc": "haxby_object_kfold_classifier",
+    "mask": {
+      "mask_pattern": "sub-{subject}/masks/native_epi_mask.nii.gz"
+    },
+    "featureSelection": {
+      "model": "ANOVA",
+      "feat_p": 0.05
+    },
+    "classifier": {
+      "name": "sklearn.linear_model.LogisticRegression",
+      "params": {
+        "penalty": "l2",
+        "C": 0.5,
+        "solver": "lbfgs",
+        "max_iter": 10000,
+        "class_weight": "balanced"
+      }
+    },
+    "kfold_cv": {
+      "strategy": "per_run"
+    },
+    "permutation_test": {
+      "n_permutations": 1000,
+      "random_state": 0
+    }
+  }
+}
