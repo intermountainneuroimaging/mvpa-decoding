@@ -881,20 +881,42 @@ differently.
 submission, so there's a single command that goes from HCP Pipelines output
 to a group PDF report. The four stage scripts are numbered `1_`-`4_` to match
 the order they run in (`0_` for the orchestrator itself, so it sorts first
-in a directory listing too). All five live under `slurm/`, but every path
-inside them (each other, plus `workflows/`, `utils/`, `configs/`, `logs/`)
-is relative to the **repo root**, not to `slurm/` -- `sbatch` runs a job in
-whatever directory it was submitted from, not the submitted script's own
-directory, so both the orchestrator and every stage script (if run
-standalone) must be invoked from the repo root:
+in a directory listing too).
+
+**One file to edit for a new study/config: `slurm/pipeline_vars.sh`.** Every
+dataset path, the config filename, and the output/spreadsheet locations are
+centralized there and sourced by each of `1_`-`4_`, instead of being
+hardcoded separately in every stage script. Repoint a deployment at a
+different study by editing this one file.
+
+That file is built around `SCRIPTS_DIR`, an explicit variable holding the
+repo root, used to locate `workflows/`, `utils/`, `configs/`, etc. instead
+of assuming a job's own working directory happens to already be the repo
+root. `0_` resolves its own real location (reliable here because it's
+invoked directly via `bash`, never through `sbatch`, which would otherwise
+obscure the original file path) and `export`s `SCRIPTS_DIR` before
+submitting each job, so it's already set correctly by inheritance when a
+stage script sources `pipeline_vars.sh`. Run `0_` from anywhere:
 
 ```
-bash slurm/0_submit_mvpa_pipeline.sh
+bash /any/path/to/slurm/0_submit_mvpa_pipeline.sh
 ```
 
-It submits the four numbered jobs via `sbatch --parsable`, each depending on
-the previous one via `--dependency=afterok` (which, for an array job, only
-fires once *every* array task has succeeded):
+Standalone submission of an individual stage script doesn't inherit
+`SCRIPTS_DIR` this way -- `pipeline_vars.sh` falls back to the job's own
+working directory when `SCRIPTS_DIR` isn't already set, so submit from the
+repo root (`sbatch slurm/1_batch_resample_native_mask.sh`) or export it
+yourself first (`export SCRIPTS_DIR=/path/to/mvpa_banich`). Either way, a
+job's `--output`/`--error` log paths are plain `#SBATCH` directives (no
+variable substitution happens in them, since they're parsed before the
+script body ever runs), so they always resolve relative to wherever
+`sbatch` was actually invoked from, regardless of `SCRIPTS_DIR` -- `0_`
+`cd`s to the repo root before submitting so its own jobs' logs land in the
+right place.
+
+`0_` submits the four numbered jobs via `sbatch --parsable`, each depending
+on the previous one via `--dependency=afterok` (which, for an array job,
+only fires once *every* array task has succeeded):
 
 | Stage | Script | Type |
 |---|---|---|
@@ -903,14 +925,10 @@ fires once *every* array task has succeeded):
 | 3. K-fold classifier | `slurm/3_batch_run_mvpa_workflow.sh` | per-subject array job (section 6); also writes each subject's own single-subject report |
 | 4. Group report | `slurm/4_sbatch_generate_report.sh` | single job (section 7); resamples every subject's importance map to MNI (section 8) before building the group report |
 
-Each stage script hardcodes this pipeline's own paths/config (Clearvale,
-`configs/config-kfold.clearvale-operation.json`) the same way every other
-SLURM script in this repo does -- copy and repoint them for a different
-study/config rather than parameterizing in place. Every stage script can
-also still be run standalone from the repo root with plain
-`sbatch slurm/<script>.sh` (e.g. to rerun just one stage after fixing a
-subject-specific failure) -- the orchestrator only adds the dependency
-chaining on top, it doesn't own any logic itself.
+Every stage script can still be run standalone (e.g. to rerun just one stage
+after fixing a subject-specific failure) with plain `sbatch slurm/<script>.sh`
+-- the orchestrator only adds the dependency chaining on top, it doesn't own
+any logic itself.
 
 `logs/` is created automatically; each stage's own `logs/<job>_%A_%a.{out,err}`
 (or `_%j.{out,err}` for the two single jobs) is where to look first if a

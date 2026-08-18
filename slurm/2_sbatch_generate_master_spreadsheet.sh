@@ -16,10 +16,11 @@
 # irrelevant to spreadsheet generation).
 #
 # Stage 2 of 0_submit_mvpa_pipeline.sh (mask resample -> master spreadsheet ->
-# k-fold classifier -> group report). Can also be run standalone -- but,
-# like the orchestrator, must be submitted from the repo root (`sbatch
-# slurm/2_sbatch_generate_master_spreadsheet.sh`), not from within slurm/,
-# since its own paths (workflows/, configs/, logs/) are all repo-root-relative.
+# k-fold classifier -> group report). Can also be run standalone -- submit
+# from the repo root (`sbatch slurm/2_sbatch_generate_master_spreadsheet.sh`)
+# so slurm/pipeline_vars.sh's SCRIPTS_DIR fallback and the --output/--error
+# log paths above (plain SBATCH directives, not variable-substituted) both
+# resolve correctly -- or export SCRIPTS_DIR and pass --chdir yourself.
 
 umask g+w
 
@@ -29,8 +30,7 @@ module load fsl/6.0.7
 module load anaconda
 conda activate incenv
 
-CONFIG_DIR=configs
-MASTER_SPREADSHEET=master_spreadsheet.csv
+source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
 
-python workflows/generate_master_spreadsheet.py --config $CONFIG_DIR/config-kfold.clearvale-operation.json \
+python "$SCRIPTS_DIR/workflows/generate_master_spreadsheet.py" --config $CONFIG_FILE \
     --output $MASTER_SPREADSHEET

@@ -20,15 +20,15 @@
 # each session is used as the --reference grid; which run it happens to be
 # doesn't matter, since all of a session's runs share that same grid.
 #
-# `logs/` must already exist (sbatch does not create --output's parent dir).
 # --array count must match the number of subjects under HCPPIPE_ROOT --
 # check with: ls -d $HCPPIPE_ROOT/sub-* | wc -l
 #
 # Stage 1 of 0_submit_mvpa_pipeline.sh (mask resample -> master spreadsheet ->
-# k-fold classifier -> group report). Can also be run standalone -- but,
-# like the orchestrator, must be submitted from the repo root (`sbatch
-# slurm/1_batch_resample_native_mask.sh`), not from within slurm/, since its
-# own paths (workflows/, utils/, configs/, logs/) are all repo-root-relative.
+# k-fold classifier -> group report). Can also be run standalone -- submit
+# from the repo root (`sbatch slurm/1_batch_resample_native_mask.sh`) so
+# slurm/pipeline_vars.sh's SCRIPTS_DIR fallback and the --output/--error log
+# paths above (plain SBATCH directives, not variable-substituted) both
+# resolve correctly -- or export SCRIPTS_DIR and pass --chdir yourself.
 
 umask g+w
 
@@ -38,9 +38,7 @@ module load fsl/6.0.7
 module load anaconda
 conda activate incenv
 
-HCPPIPE_ROOT=/pl/active/banich/studies/Clearvale/analysis/HCPPipe
-BIDS_HCP_ROOT=/pl/active/banich/studies/Clearvale/analysis/bids-hcp
-GROUP_MASK=/pl/active/banich/studies/Clearvale/analysis/feat/group-analyses/bin_wager_gm_mask.nii.gz
+source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
 
 # get subject for this array task (same pattern as batch_run_mvpa_workflow.sh)
 subject=`ls -d $HCPPIPE_ROOT/sub-* | rev | cut -d"/" -f1 | rev | cut -d"-" -f2 | sed -n "$SLURM_ARRAY_TASK_ID p"`
@@ -71,8 +69,8 @@ for session_dir in "$HCPPIPE_ROOT"/sub-"$subject"/ses-*; do
 
     echo "  ses-$session: reference=$reference"
     echo "  ses-$session: output=$output"
-    python utils/hcp_resample.py \
-        --input "$GROUP_MASK" \
+    python "$SCRIPTS_DIR/utils/hcp_resample.py" \
+        --input "$GROUP_GM_MASK" \
         --output "$output" \
         --direction mni2native \
         --subject "$subject" --session "$session" \

@@ -22,10 +22,11 @@
 # --dependency=afterok on the whole array job is what guarantees this --
 # afterok on an array job id waits for every task in it, not just the first).
 #
-# Can also be run standalone -- but, like the orchestrator, must be submitted
-# from the repo root (`sbatch slurm/4_sbatch_generate_report.sh`), not from
-# within slurm/, since its own paths (workflows/, utils/, configs/, logs/)
-# are all repo-root-relative.
+# Can also be run standalone -- submit from the repo root (`sbatch
+# slurm/4_sbatch_generate_report.sh`) so slurm/pipeline_vars.sh's SCRIPTS_DIR
+# fallback and the --output/--error log paths above (plain SBATCH
+# directives, not variable-substituted) both resolve correctly -- or export
+# SCRIPTS_DIR and pass --chdir yourself.
 #
 # --time is a rough starting estimate (MNI resampling + PDF/plot rendering
 # across every subject's output, no measured runtime yet) -- check the first
@@ -39,12 +40,7 @@ module load fsl/6.0.7
 module load anaconda
 conda activate incenv
 
-MASTER_SPREADSHEET=master_spreadsheet.csv
-OUTPUT_DIR=out
-CONFIG_DIR=configs
-
-HCPPIPE_ROOT=/pl/active/banich/studies/Clearvale/analysis/HCPPipe
-GROUP_MASK=$FSLDIR/data/standard/MNI152_T1_2mm_brain.nii.gz
+source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
 
 # --------------------------------------------
 # resample each subject's aggregated importance map into MNI space
@@ -53,7 +49,7 @@ GROUP_MASK=$FSLDIR/data/standard/MNI152_T1_2mm_brain.nii.gz
 # one group-mean page instead of one native-space page per subject. Loops
 # over every subject directory found under $OUTPUT_DIR (any desc), rather
 # than hardcoding this pipeline's own desc, so it never drifts out of sync
-# with model.desc in the config. GROUP_MASK is used as the --reference grid
+# with model.desc in the config. MNI_TEMPLATE is used as the --reference grid
 # so every subject's warped map lands on the exact same grid the group
 # average needs (shape-mismatched subjects are otherwise excluded with a
 # warning, not a failure -- see README.md section 7).
@@ -80,15 +76,15 @@ for subject_dir in "$OUTPUT_DIR"/*/*/; do
     impa_mni="${subject_dir}model/${subject}_impa_mni.nii.gz"
 
     echo "  sub-$subject (ses-$session): $impa_native -> $impa_mni"
-    python utils/hcp_resample.py \
+    python "$SCRIPTS_DIR/utils/hcp_resample.py" \
         --input "$impa_native" \
         --output "$impa_mni" \
         --direction native2mni \
         --subject "$subject" --session "$session" \
         --derivatives-root "$HCPPIPE_ROOT" \
-        --reference "$GROUP_MASK" \
+        --reference "$MNI_TEMPLATE" \
         --interp trilinear
 done
 
-python workflows/generate_report.py --analysis-output-dir $OUTPUT_DIR \
-    --config $CONFIG_DIR/config-kfold.clearvale-operation.json --master-spreadsheet $MASTER_SPREADSHEET
+python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR \
+    --config $CONFIG_FILE --master-spreadsheet $MASTER_SPREADSHEET
