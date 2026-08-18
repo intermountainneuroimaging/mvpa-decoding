@@ -286,6 +286,14 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
         if os.path.exists(p["model_auc"]):
             auc_by_subject[s] = load_labeled_csv(p["model_auc"]).iloc[:, 0]
 
+    # mvpa_kfold_workflow.py never writes cv/<subject>_cv_results_total_scores.csv
+    # -- same-task k-fold data has no separate internal-CV-vs-held-out-test
+    # split the way mvpa_generalization_workflow.py's independent train/test
+    # does; the fold-aggregated model_total *is* the cross-validated estimate.
+    # Label that one bar accordingly instead of "held-out test", which implies
+    # a genuinely independent test set that k-fold output doesn't have.
+    is_kfold = any(fold_flags.get(s) for s in subjects)
+
     fig, axes = plt.subplots(1, 2, figsize=(11, 6))
 
     # --- left: internal-CV vs held-out test accuracy ---
@@ -294,13 +302,19 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
         # group report -- one bar per metric (mean across subjects), with each
         # subject's own value scattered on top (beeswarm-style, deterministic
         # spread rather than random jitter so the figure is reproducible)
-        labels_acc = ["internal CV\n(training)", "held-out test"]
-        per_metric_vals = [
-            [cv_totals[s] for s in subjects if s in cv_totals],
-            [model_totals[s] for s in subjects if s in model_totals],
-        ]
+        if is_kfold:
+            labels_acc = ["internal CV"]
+            per_metric_vals = [[model_totals[s] for s in subjects if s in model_totals]]
+            bar_colors = ["C0"]
+        else:
+            labels_acc = ["internal CV\n(training)", "held-out test"]
+            per_metric_vals = [
+                [cv_totals[s] for s in subjects if s in cv_totals],
+                [model_totals[s] for s in subjects if s in model_totals],
+            ]
+            bar_colors = ["C0", "C1"]
         means = [np.mean(vals) if vals else np.nan for vals in per_metric_vals]
-        ax.bar(labels_acc, means, color=["C0", "C1"], alpha=0.7, zorder=1)
+        ax.bar(labels_acc, means, color=bar_colors, alpha=0.7, zorder=1)
 
         for xi, vals in enumerate(per_metric_vals):
             if not vals:
@@ -308,23 +322,30 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
             jitter = np.linspace(-0.12, 0.12, len(vals)) if len(vals) > 1 else np.array([0.0])
             ax.scatter(xi + jitter, vals, color="black", zorder=3, s=20)
 
-        ax.set_title("Accuracy: internal CV vs. held-out test\n(bars = mean, dots = individual subjects)")
+        title = "Accuracy: internal CV" if is_kfold else "Accuracy: internal CV vs. held-out test"
+        ax.set_title(f"{title}\n(bars = mean, dots = individual subjects)")
     else:
         x = np.arange(len(subjects))
-        width = 0.35
-        ax.bar(x - width / 2, [cv_totals.get(s, np.nan) for s in subjects], width, label="internal CV (training)")
-        ax.bar(x + width / 2, [model_totals.get(s, np.nan) for s in subjects], width, label="held-out test")
+        if is_kfold:
+            width = 0.5
+            ax.bar(x, [model_totals.get(s, np.nan) for s in subjects], width, label="internal CV", color="C0")
+            fold_scatter_x = x[0]
+        else:
+            width = 0.35
+            ax.bar(x - width / 2, [cv_totals.get(s, np.nan) for s in subjects], width, label="internal CV (training)")
+            ax.bar(x + width / 2, [model_totals.get(s, np.nan) for s in subjects], width, label="held-out test")
+            fold_scatter_x = x[0] + width / 2
 
         if fold_flags.get(subjects[0]):
             folds = fold_paths(analysis_output_dir, desc, subjects[0])
             fold_vals = [load_scalar_csv(f["model_total"]) for f in folds.values() if os.path.exists(f["model_total"])]
             if fold_vals:
-                ax.scatter([x[0] + width / 2] * len(fold_vals), fold_vals, color="black", zorder=3, s=20, label="per-fold test")
+                ax.scatter([fold_scatter_x] * len(fold_vals), fold_vals, color="black", zorder=3, s=20, label="per-fold test")
 
         ax.set_xticks(x)
         ax.set_xticklabels(subjects, rotation=45, ha="right")
         ax.legend(fontsize=8)
-        ax.set_title("Accuracy: internal CV vs. held-out test")
+        ax.set_title("Accuracy: internal CV" if is_kfold else "Accuracy: internal CV vs. held-out test")
 
     ax.set_ylabel("Accuracy")
 
@@ -519,14 +540,38 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
     plt.close(fig)
 
 
-def _plot_categories_page(pdf, impa, title, regressor_categories):
+def _plot_categories_page(pdf, impa, title, regressor_categories, mosaic=False):
     """impa is either a path to a NIfTI file, or an already-loaded/in-memory
-    nibabel image (e.g. a group-average built without ever touching disk)."""
+    nibabel image (e.g. a group-average built without ever touching disk).
+
+    mosaic=True switches from a single ortho (3-slice) cut to nilearn's
+    "mosaic" display -- many tiled slices, much more of the map's spatial
+    extent visible at once -- and lets nilearn draw its own bundled MNI152
+    template underneath (omitting bg_img, rather than the bg_img=None used
+    for native-space maps below, which have no shared anatomical template to
+    plot against and would misalign badly if plotted against the MNI one).
+    Only meaningful for maps already confirmed to be in MNI space -- see
+    render_importance_pages' group-mean branch, the only caller that passes
+    it. A mosaic is much taller than one ortho row, so (unlike the ortho
+    case, which stacks every category into one figure) each category gets
+    its own page -- otherwise categories would overlap into an illegible
+    mess trying to share one page's worth of vertical space."""
     from nilearn import plotting
 
     img = nib.load(impa) if isinstance(impa, (str, os.PathLike)) else impa
     data = img.get_fdata()
     n_cat = data.shape[3] if data.ndim == 4 else 1
+
+    if mosaic:
+        for c in range(n_cat):
+            vol = data[..., c] if data.ndim == 4 else data
+            cat_img = nib.Nifti1Image(vol, img.affine)
+            label = regressor_categories[c] if c < len(regressor_categories) else f"class {c}"
+            fig = plt.figure(figsize=(11, 6))
+            plotting.plot_stat_map(cat_img, display_mode="mosaic", figure=fig, title=f"{title}: {label}")
+            pdf.savefig(fig)
+            plt.close(fig)
+        return
 
     fig, axes = plt.subplots(n_cat, 1, figsize=(8.5, 3 * n_cat), squeeze=False)
     for c in range(n_cat):
@@ -592,7 +637,7 @@ def resolve_group_impa_mni(analysis_output_dir: str, desc: str, subjects: list) 
     return available, missing
 
 
-def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags, regressor_categories):
+def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags, regressor_categories, output_dir):
     # Native-space maps have no common voxel grid across subjects, so they're
     # never averaged across subjects (only across folds, within one subject,
     # where the grid is guaranteed shared) -- see resolve_group_impa_mni for the
@@ -625,7 +670,16 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
             included = [s for s in imgs if s not in mismatched]
             mean_data = np.mean([imgs[s].get_fdata() for s in included], axis=0)
             mean_img = nib.Nifti1Image(mean_data, ref_img.affine)
-            _plot_categories_page(pdf, mean_img, f"group mean, MNI space (n={len(included)} subjects)", regressor_categories)
+
+            # save alongside the PDF -- the plotted page is a quick look, this
+            # is the actual data for anyone who wants to load it elsewhere
+            # (e.g. a group-level stats tool, or a different viewer/threshold)
+            saved_path = os.path.join(output_dir, f"{desc}_group_mean_impa_mni.nii.gz")
+            nib.save(mean_img, saved_path)
+            print(f"  Saved group mean importance map: {saved_path}")
+
+            _plot_categories_page(pdf, mean_img, f"group mean, MNI space (n={len(included)} subjects)",
+                                   regressor_categories, mosaic=True)
             return
 
         print("  (!) no subject has an MNI-registered importance map (model/{subject}_impa_mni.nii.gz) -- "
@@ -680,7 +734,8 @@ def main():
         render_confusion_matrices_page(pdf, args.analysis_output_dir, desc, subjects)
         render_timecourse_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, window, tr, median_duration,
                                  overlay_conditions)
-        render_importance_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, regressor_categories)
+        render_importance_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, regressor_categories,
+                                 os.path.dirname(output_path))
 
     print(f"Report written to: {output_path}")
 

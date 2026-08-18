@@ -788,9 +788,19 @@ page in MNI space instead of per-subject native pages. Subjects missing
 `_impa_mni.nii.gz`, or whose map doesn't match the other subjects' grid
 shape, are excluded from the average with a printed warning rather than
 failing the whole report; the group page's title records how many subjects
-went into the average. `slurm/4_sbatch_generate_report.sh` (section 9) runs
-this resampling automatically for every subject before generating the report --
-manual `hcp_resample.py` calls are only needed if you're generating a
+went into the average. The averaged map is also saved as its own NIfTI file
+(`{desc}_group_mean_impa_mni.nii.gz`) right alongside the PDF -- the plotted
+page is a quick look, the file is the actual data for loading elsewhere
+(a group-level stats tool, a different viewer, a different threshold).
+It's plotted with nilearn's "mosaic" display (many tiled slices across all
+three planes, with nilearn's own bundled MNI152 template as an anatomical
+background) rather than the compact 3-slice "ortho" view used for
+native-space maps -- ortho has no shared template to plot against, so it
+stays background-free there. One page per category, since a mosaic needs
+much more room than ortho's single row. `slurm/4_sbatch_generate_report.sh`
+(section 9) runs this resampling automatically for every subject before
+generating the report -- manual `hcp_resample.py` calls are only needed if
+you're generating a
 report outside that pipeline.
 
 The timecourse page always reads the raw per-TR `decoding_results.csv`, not
