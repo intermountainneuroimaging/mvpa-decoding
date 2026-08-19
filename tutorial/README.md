@@ -57,11 +57,7 @@ this tutorial doesn't check the data itself into the repo.
 
 **Note on filenames**: ds000105's events files have no `ses-` entity at all
 (e.g. `sub-1_task-objectviewing_run-01_events.tsv`) -- valid BIDS, since
-session labels are optional for single-session studies. Getting this dataset
-working is what surfaced a real bug: `generate_master_spreadsheet.py` used to
-*require* `ses` and would have silently skipped every file here. That's now
-fixed -- a missing `ses` just means `session` is absent from that row instead
-of the file being rejected.
+session labels are optional for single-session studies. 
 
 ## Step 2: Basic preprocessing
 
@@ -105,8 +101,7 @@ Runtime: ~9 minutes for all 12 runs (mostly `mcflirt` and `applyxfm4D`, each
 
 ## Step 3: The config
 
-`config-haxby.example.json` differs from this repo's other examples in a few
-ways, driven by the dataset itself rather than by choice:
+`config-haxby.example.json` provides a examplar for the running MVPA on a preprocessed dataset. We will use a k-fold design since the Haxby dataset does not have a seperate localizer and main task design. Instead k-fold designs portion out a subset of the data as a hold out test-sample while training on the remaining runs. This is done in sucessive folds to ensure that small differences between runs to not catastrofically affect the generalizablity of the data. A few configuration settings to pay attention to:
 
 - **`derivatives_root`/`bold_glob` point at the preprocessed data**, not
   `bids_root` -- `bids_root` still finds the events.tsv files (co-located
@@ -119,14 +114,12 @@ ways, driven by the dataset itself rather than by choice:
   `model_conditions.training` selects runs 1-9 and `model_conditions.testing`
   /`timecourse_decoding` select runs 10-12, both via `{"column": "run",
   "match": "in", "values": [...]}` rather than a `task` filter.
-- **8 conditions, not 2.** One per object category. This is also a real test
-  of the classifier code path for >2 classes.
+- **8 conditions, detailed in the task and train blocks** One per object category. This is also a real test of the classifier code path for >2 classes.
 
 `event_extraction.hemodynamic_lag` is set to 4.0s (a generic HRF-peak
 estimate, not tuned for this subject/dataset). `mask.mask_pattern` is
 `sub-{subject}/masks/native_epi_mask.nii.gz`, resolved relative to
-`derivatives_root` (masks default there) -- no `{session}` in the pattern,
-matching the session-less data.
+`derivatives_root` (masks default there).
 
 ## Step 4: Build the volume table
 
@@ -228,62 +221,6 @@ p < 0.001 -- see [`generate_report.py`](../README.md#7-generating-a-report-workf
 or `model/1_permutation_test.csv` for the full numbers if you run it
 yourself.
 
-## External validation (PyMVPA methodology)
-
-[`pymvpa_style_validation.py`](pymvpa_style_validation.py) cross-checks the
-result above against a genuinely independent implementation of **PyMVPA's
-own documented methodology** for this exact dataset. PyMVPA itself
-(`pymvpa2`, last released ~2020) isn't installable in a modern Python 3.12
-environment -- its legacy `setup.py` requires `numpy.distutils`, which
-depends on Python's stdlib `distutils`, removed in 3.12 (PEP 632); pinning
-an older numpy/scipy doesn't help, since the blocker is the Python version,
-not numpy's. So this reimplements PyMVPA's own canonical approach
-(confirmed from their tutorial docs) using only `nibabel`/`numpy`/`pandas`/
-`sklearn` -- deliberately **not** importing anything from this repo's own
-`mvpa_common.py`/`generate_master_spreadsheet.py`/`mvpa_generalization_workflow.py`, so
-feature extraction and classification are a genuinely separate code path:
-
-- **Nearest-centroid correlation** -- PyMVPA's own tutorial describes this
-  (kNN with correlation distance, k=1 against per-category training
-  averages) as replicating "the original Haxby et al. (2001) study" --
-  the same template-matching logic that paper itself used.
-- **Linear SVM** -- PyMVPA's alternative canonical classifier
-  (`LinearCSVMC`-equivalent).
-- Both run under **two CV protocols**: the same matched train(1-9)/test(10-12)
-  split this tutorial uses, and PyMVPA's own default **leave-one-run-out**
-  (`NFoldPartitioner`).
-
-It reuses the same preprocessed BOLD data and mask `mvpa_generalization_workflow.py` used
-(so any numeric difference reflects classifier/CV methodology, not
-different inputs), loaded directly via `nibabel`+`numpy` boolean indexing
-rather than nilearn's `NiftiMasker`, and deliberately skips ANOVA feature
-selection (unlike `mvpa_generalization_workflow.py`) to stay a simple, canonical baseline.
-
-```bash
-python tutorial/pymvpa_style_validation.py \
-    --our-results-dir out/haxby_object_classifier/1/model  # optional, prints this repo's own numbers alongside
-```
-
-Real output against this tutorial's data:
-
-| method | protocol | accuracy | AUC |
-|---|---|---|---|
-| `mvpa_generalization_workflow.py` (this repo, ANOVA + LogisticRegression) | matched split | 0.524 | 0.817 |
-| nearest-centroid correlation | matched split | 0.236 | 0.634 |
-| linear SVM | matched split | 0.410 | 0.773 |
-| nearest-centroid correlation | leave-one-run-out | 0.266 | 0.602 |
-| linear SVM | leave-one-run-out | 0.414 | 0.761 |
-
-All four independently-computed numbers are well above chance (0.125
-accuracy / 0.5 AUC), externally corroborating that this dataset genuinely
-carries decodable category information after this tutorial's preprocessing
--- not an artifact of `mvpa_generalization_workflow.py`'s own code. The lower absolute
-numbers here (vs. 0.524/0.817) are expected, not a discrepancy: this
-validation classifies over the full ~31K-voxel mask with no feature
-selection at all, while `mvpa_generalization_workflow.py` first narrows to an
-ANOVA-selected subset -- the gap is a reasonable estimate of how much that
-feature selection step alone is worth on this dataset.
-
 ## Where this tutorial oversimplifies
 
 This demonstrates that the pipeline runs correctly end-to-end on real,
@@ -334,7 +271,7 @@ Concretely, relative to how this data would normally be analyzed:
 
 ### If you wanted this to be a real analysis
 
-Preprocess with fMRIPrep (motion correction, slice-timing correction,
+Preprocess with fMRIPrep or similar comprehsnive preprocessing workflow (motion correction, slice-timing correction,
 registration to a common per-subject reference *and* a standard template,
 confound outputs), use an anatomically informed mask (e.g. a grey-matter or
 ventral-temporal ROI transformed into each run's native space), and validate
