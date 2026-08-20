@@ -518,7 +518,7 @@
   "model": {
     "desc": "haxby_object_classifier",
     "mask": {
-      "mask_pattern": "sub-{subject}/masks/native_epi_mask.nii.gz"
+      "mask_pattern": "tutorial/haxby-data/derivatives/sub-{subject}/masks/native_epi_mask.nii.gz"
     },
     "featureSelection": {
       "model": "ANOVA",

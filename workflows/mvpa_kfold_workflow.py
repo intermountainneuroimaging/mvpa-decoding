@@ -22,12 +22,16 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     model/<subject>_fold{N}_model_results_{metric}.csv    -- per-fold held-out test metrics
     model/<subject>_fold{N}_impa_native.nii.gz            -- per-fold importance map
     model/<subject>_fold{N}_permutation_test.csv          -- per-fold significance (optional)
-    decoding/<subject>_fold{N}_decoding_results.csv       -- per-fold raw decoding
-    decoding/<subject>_fold{N}_summary_decoding_results.csv
+    decoding/<subject>_fold{N}_decoding_results.csv       -- per-fold raw decoding (*)
+    decoding/<subject>_fold{N}_summary_decoding_results.csv (*)
     model/<subject>_model_results_{metric}.csv        -- aggregated (averaged across folds)
     model/<subject>_impa_native.nii.gz                -- aggregated importance map
-    decoding/<subject>_decoding_results.csv               -- aggregated raw (pooled across folds)
-    decoding/<subject>_summary_decoding_results.csv       -- aggregated summary
+    decoding/<subject>_decoding_results.csv               -- aggregated raw (pooled across folds) (*)
+    decoding/<subject>_summary_decoding_results.csv       -- aggregated summary (*)
+
+(*) only written when model_conditions.timecourse_decoding is configured --
+omit that whole section to skip timecourse decoding entirely (no decoding/
+output at all, no extra runtime for that step).
 
 The aggregated files use the exact same names mvpa_generalization_workflow.py writes, so
 generate_report.py (and any other downstream consumer) doesn't need to know
@@ -50,7 +54,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
 from utils.mvpa_common import (
-    build_trial_pivot_table, resolve_config_root, quick_safe, label_rows,
+    build_trial_pivot_table, quick_safe, label_rows,
     track_runtime, load_config, apply_regressor_codes,
     load_images_and_mask, build_timecourse_instructions,
     model_classification, model_performance, permutation_significance,
@@ -119,13 +123,16 @@ def validate_kfold_cv_config(kfold_cv_cfg) -> None:
         raise SystemExit("model.kfold_cv.strategy='explicit_groups' requires a 'held_out_runs' list")
 
 
-def resolve_kfold_folds(kfold_cv_cfg: dict, testing_df: pd.DataFrame, timecourse_instr: pd.DataFrame) -> list:
+def resolve_kfold_folds(kfold_cv_cfg: dict, testing_df: pd.DataFrame, timecourse_instr) -> list:
     """Return a list of held-out run-id groups implementing kfold_cv_cfg's strategy.
     Folds are built only over runs that actually appear in this subject's
     testing/timecourse_decoding-eligible data -- not the whole master_spreadsheet --
-    so every fold corresponds to data that will actually be evaluated."""
+    so every fold corresponds to data that will actually be evaluated.
+    timecourse_instr is None when model_conditions.timecourse_decoding isn't
+    configured -- folds are then built from testing_df's runs alone."""
     strategy = kfold_cv_cfg.get("strategy")
-    universe_runs = sorted(set(testing_df["run"]) | set(timecourse_instr["run"]))
+    tc_runs = set(timecourse_instr["run"]) if timecourse_instr is not None else set()
+    universe_runs = sorted(set(testing_df["run"]) | tc_runs)
 
     if not universe_runs:
         raise SystemExit(
@@ -178,14 +185,17 @@ def resolve_kfold_folds(kfold_cv_cfg: dict, testing_df: pd.DataFrame, timecourse
 
 def run_kfold(kfold_cv_cfg, permutation_test_cfg, masker,
               analysis_output_dir, model_descr, subject_id, regressor_categories,
-              feat_p, classifier_name, classifier_params,
+              feature_selection_cfg, classifier_name, classifier_params,
               training_df, training_data, training_labels,
               testing_df, testing_data, testing_labels,
               timecourse_instr, timecourse_data, timecourse_labels):
     """Repeatedly hold out a group of runs: train on the rest, test+decode only on the
     held-out group, then aggregate. Per-fold outputs are also saved -- for transparency,
     and so generate_report.py can detect and render fold-variability panels. Returns
-    (aggregated_impa, aggregated_model_xout, aggregated_raw, aggregated_summary)."""
+    (aggregated_impa, aggregated_model_xout, aggregated_raw, aggregated_summary) --
+    aggregated_raw/aggregated_summary are empty DataFrames when
+    model_conditions.timecourse_decoding isn't configured (timecourse_instr is
+    None), since there's then nothing to decode in any fold."""
 
     fold_groups = resolve_kfold_folds(kfold_cv_cfg, testing_df, timecourse_instr)
     print(f"model.kfold_cv: {len(fold_groups)} fold(s), strategy={kfold_cv_cfg.get('strategy')!r}")
@@ -198,9 +208,10 @@ def run_kfold(kfold_cv_cfg, permutation_test_cfg, masker,
 
         train_mask = (~training_df["run"].isin(held_out_runs)).to_numpy()
         test_mask = testing_df["run"].isin(held_out_runs).to_numpy()
-        tc_mask = timecourse_instr["run"].isin(held_out_runs).to_numpy()
+        tc_mask = timecourse_instr["run"].isin(held_out_runs).to_numpy() if timecourse_instr is not None else None
+        has_tc_rows = tc_mask is not None and tc_mask.any()
 
-        if not test_mask.any() and not tc_mask.any():
+        if not test_mask.any() and not has_tc_rows:
             print(f"  (!) fold {fold_id} (held-out runs {held_out_runs}): no testing or "
                   f"timecourse_decoding rows -- skipping")
             continue
@@ -209,13 +220,14 @@ def run_kfold(kfold_cv_cfg, permutation_test_cfg, masker,
                   f"once these runs are excluded -- skipping")
             continue
 
+        tc_summary = f" / {int(tc_mask.sum())} timecourse" if tc_mask is not None else ""
         print(f"  Fold {fold_id}: held-out runs {held_out_runs} "
-              f"({int(train_mask.sum())} train / {int(test_mask.sum())} test / {int(tc_mask.sum())} timecourse rows)")
+              f"({int(train_mask.sum())} train / {int(test_mask.sum())} test{tc_summary} rows)")
 
         fold_train_data = training_data[train_mask]
         fold_train_labels = training_labels[train_mask]
 
-        xclf = model_classification(fold_train_data, fold_train_labels, feat_p, classifier_name, classifier_params)
+        xclf = model_classification(fold_train_data, fold_train_labels, feature_selection_cfg, classifier_name, classifier_params)
 
         if test_mask.any():
             fold_test_data = testing_data[test_mask]
@@ -242,7 +254,7 @@ def run_kfold(kfold_cv_cfg, permutation_test_cfg, masker,
                 print(f"    permutation testing ({n_permutations} permutations)...")
                 fold_permutation_results = permutation_significance(
                     fold_train_data, fold_train_labels, fold_test_data, fold_test_labels,
-                    n_permutations, random_state, feat_p, classifier_name, classifier_params,
+                    n_permutations, random_state, feature_selection_cfg, classifier_name, classifier_params,
                 )
                 fold_permutation_file = os.path.join(
                     analysis_output_dir, model_descr, subject_id, "model",
@@ -252,11 +264,11 @@ def run_kfold(kfold_cv_cfg, permutation_test_cfg, masker,
         else:
             print(f"  (!) fold {fold_id}: no held-out testing rows -- skipping model_performance for this fold")
 
-        if tc_mask.any():
+        if has_tc_rows:
             fold_raw, fold_summary = timecourse_decoding(
                 xclf, timecourse_data[tc_mask], timecourse_labels[tc_mask],
                 timecourse_instr.loc[tc_mask], regressor_categories,
-                feat_p, subject_id, model_descr,
+                feature_selection_cfg, subject_id, model_descr,
             )
             fold_raw.insert(2, "fold", fold_id)
             fold_summary.insert(2, "fold", fold_id)
@@ -273,7 +285,7 @@ def run_kfold(kfold_cv_cfg, permutation_test_cfg, masker,
             fold_raw.to_csv(fold_decoding_file, index=False)
             fold_summary.to_csv(fold_summary_file, index=False)
             decoding_raws.append(fold_raw)
-        else:
+        elif tc_mask is not None:
             print(f"  (!) fold {fold_id}: no held-out timecourse_decoding rows -- skipping decoding for this fold")
 
     if not model_results:
@@ -321,26 +333,25 @@ def main(args):
     kfold_cv_cfg = full_cfg["model"].get("kfold_cv")
     validate_kfold_cv_config(kfold_cv_cfg)
 
-    event_cfg = full_cfg["event_extraction"]
-    derivatives_root = resolve_config_root(
-        event_cfg, "derivatives_root", event_cfg["bids_root"], "event_extraction.derivatives_root"
-    )
-    mask_root = resolve_config_root(
-        full_cfg["model"].get("mask", {}), "mask_root", derivatives_root, "model.mask.mask_root"
-    )
     model_conditions = full_cfg["model_conditions"]
 
     training_conditions = model_conditions["training"]["conditions"]
     testing_conditions = model_conditions["testing"]["conditions"]
-    timecourse_conditions = model_conditions["timecourse_decoding"]["conditions"]
-    timecourse_window = model_conditions["timecourse_decoding"]["window"]
+    # optional -- model_conditions.timecourse_decoding entirely absent means
+    # skip timecourse decoding: no decoding/ output files (per fold or
+    # aggregated), no report timecourse page (generate_report.py already
+    # skips that page when it finds no decoding_results.csv, so no
+    # report-side change is needed for this).
+    timecourse_cfg = model_conditions.get("timecourse_decoding")
+    timecourse_conditions = timecourse_cfg["conditions"] if timecourse_cfg else None
+    timecourse_window = timecourse_cfg["window"] if timecourse_cfg else None
 
     regressor_categories = list(training_conditions.keys())
 
     model_cfg = full_cfg["model"]
     model_descr = quick_safe(model_cfg["desc"])
     mask_pattern_template = model_cfg["mask"]["mask_pattern"]
-    feat_p = model_cfg["featureSelection"]["feat_p"]
+    feature_selection_cfg = model_cfg["featureSelection"]
     classifier_name = model_cfg["classifier"]["name"]
     classifier_params = model_cfg["classifier"]["params"]
     permutation_test_cfg = model_cfg.get("permutation_test")
@@ -381,21 +392,28 @@ def main(args):
 
     training_df = apply_regressor_codes(label_rows(subject_df, training_conditions), regressor_categories)
     testing_df = apply_regressor_codes(label_rows(subject_df, testing_conditions), regressor_categories)
-    timecourse_labeled = apply_regressor_codes(label_rows(subject_df, timecourse_conditions), regressor_categories)
-    timecourse_instr = build_timecourse_instructions(timecourse_labeled, timecourse_window)
+    if timecourse_cfg is not None:
+        timecourse_labeled = apply_regressor_codes(label_rows(subject_df, timecourse_conditions), regressor_categories)
+        timecourse_instr = build_timecourse_instructions(timecourse_labeled, timecourse_window)
+    else:
+        timecourse_instr = None
 
-    training_data, training_labels, training_ids, masker = load_images_and_mask(training_df, mask_pattern_template, mask_root)
-    testing_data, testing_labels, testing_ids, masker = load_images_and_mask(testing_df, mask_pattern_template, mask_root)
-    timecourse_data, timecourse_labels, timecourse_ids, masker = load_images_and_mask(timecourse_instr, mask_pattern_template, mask_root)
+    training_data, training_labels, training_ids, masker = load_images_and_mask(training_df, mask_pattern_template)
+    testing_data, testing_labels, testing_ids, masker = load_images_and_mask(testing_df, mask_pattern_template)
 
     training_df = training_df.loc[training_ids, :]
     testing_df = testing_df.loc[testing_ids, :]
-    timecourse_instr = timecourse_instr.loc[timecourse_ids, :]
     print("...Done")
 
     training_labels = training_labels.ravel()
     testing_labels = testing_labels.ravel()
-    timecourse_labels = timecourse_labels.ravel()
+
+    if timecourse_instr is not None:
+        timecourse_data, timecourse_labels, timecourse_ids, masker = load_images_and_mask(timecourse_instr, mask_pattern_template)
+        timecourse_instr = timecourse_instr.loc[timecourse_ids, :]
+        timecourse_labels = timecourse_labels.ravel()
+    else:
+        timecourse_data = timecourse_labels = None
 
     # -------------------------------------------------
     # K-Fold Train / Test / Decode
@@ -405,7 +423,7 @@ def main(args):
     aggregated_impa, xout, raw_decoding, summary_decoding = run_kfold(
         kfold_cv_cfg, permutation_test_cfg, masker,
         analysis_output_dir, model_descr, subject_id, regressor_categories,
-        feat_p, classifier_name, classifier_params,
+        feature_selection_cfg, classifier_name, classifier_params,
         training_df, training_data, training_labels,
         testing_df, testing_data, testing_labels,
         timecourse_instr, timecourse_data, timecourse_labels,
@@ -424,14 +442,17 @@ def main(args):
     output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}" + "_impa_native.nii.gz")
     img.to_filename(output_file)
 
-    output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_decoding_results.csv")
-    Path(os.path.dirname(output_file)).mkdir(parents=True, exist_ok=True)
-    raw_decoding.to_csv(output_file, index=False)
+    if not raw_decoding.empty:
+        output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_decoding_results.csv")
+        Path(os.path.dirname(output_file)).mkdir(parents=True, exist_ok=True)
+        raw_decoding.to_csv(output_file, index=False)
 
-    summary_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_summary_decoding_results.csv")
-    summary_decoding.to_csv(summary_file, index=False)
+        summary_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_summary_decoding_results.csv")
+        summary_decoding.to_csv(summary_file, index=False)
 
-    print(f"Aggregated results saved to: {output_file} (raw) and {summary_file} (summary)")
+        print(f"Aggregated results saved to: {output_file} (raw) and {summary_file} (summary)")
+    else:
+        print("No model_conditions.timecourse_decoding in config -- skipped, no decoding/ output written.")
 
 
 if __name__ == "__main__":

@@ -54,6 +54,14 @@ class TestStructuralValidation:
         errors, _ = validate_config(cfg)
         assert any("window" in e for e in errors)
 
+    def test_timecourse_decoding_entirely_absent_is_valid(self):
+        # optional -- unlike training/testing, omitting the whole section
+        # (not just leaving it empty) is not an error
+        cfg = _minimal_config()
+        del cfg["model_conditions"]["timecourse_decoding"]
+        errors, warnings = validate_config(cfg)
+        assert errors == []
+
     def test_empty_conditions_object_is_error(self):
         cfg = _minimal_config()
         cfg["model_conditions"]["training"]["conditions"] = {}

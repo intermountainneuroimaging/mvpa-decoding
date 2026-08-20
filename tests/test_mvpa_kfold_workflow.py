@@ -105,6 +105,13 @@ class TestResolveKfoldFolds:
         with pytest.raises(SystemExit):
             resolve_kfold_folds({"strategy": "per_run"}, testing_df, timecourse_instr)
 
+    def test_none_timecourse_instr_builds_folds_from_testing_df_alone(self):
+        # model_conditions.timecourse_decoding not configured -- timecourse_instr
+        # is None, not an empty DataFrame; folds still resolve from testing_df's runs
+        testing_df = _df_with_runs([1, 1, 2, 3])
+        folds = resolve_kfold_folds({"strategy": "per_run"}, testing_df, None)
+        assert folds == [[1], [2], [3]]
+
 
 # =====================================================
 # run_kfold (synthetic end-to-end smoke test)
@@ -183,7 +190,7 @@ class TestRunKfold:
             masker=FakeMasker(),
             analysis_output_dir=str(tmp_path), model_descr="test_model", subject_id="01",
             regressor_categories=["face", "place"],
-            feat_p=0.05, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,
+            feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,
             training_df=training_df, training_data=training_data, training_labels=training_labels,
             testing_df=testing_df, testing_data=testing_data, testing_labels=testing_labels,
             timecourse_instr=timecourse_instr, timecourse_data=timecourse_data, timecourse_labels=timecourse_labels,
@@ -209,6 +216,40 @@ class TestRunKfold:
         assert len(raw_decoding) == len(timecourse_labels)  # every timecourse row covered exactly once
         assert "fold" in raw_decoding.columns
 
+    def test_none_timecourse_skips_decoding_entirely(self, tmp_path):
+        # model_conditions.timecourse_decoding not configured -- timecourse_instr/
+        # timecourse_data/timecourse_labels are None, not empty structures
+        (training_df, training_data, training_labels,
+         testing_df, testing_data, testing_labels,
+         _, _, _) = _build_fold_data()
+
+        aggregated_impa, xout, raw_decoding, summary_decoding = run_kfold(
+            kfold_cv_cfg={"strategy": "per_run"},
+            permutation_test_cfg=None,
+            masker=FakeMasker(),
+            analysis_output_dir=str(tmp_path), model_descr="test_model", subject_id="01",
+            regressor_categories=["face", "place"],
+            feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,
+            training_df=training_df, training_data=training_data, training_labels=training_labels,
+            testing_df=testing_df, testing_data=testing_data, testing_labels=testing_labels,
+            timecourse_instr=None, timecourse_data=None, timecourse_labels=None,
+        )
+
+        base = tmp_path / "test_model" / "01"
+
+        # model output still produced normally for every fold
+        for fold_id in (1, 2, 3):
+            assert (base / "model" / f"01_fold{fold_id}_model_results_total_scores.csv").exists()
+            assert (base / "model" / f"01_fold{fold_id}_impa_native.nii.gz").exists()
+
+        # no decoding/ directory at all -- nothing was ever written to it
+        assert not (base / "decoding").exists()
+
+        assert xout["total_scores"] > 0.7
+        assert aggregated_impa.shape == (2, training_data.shape[1])
+        assert raw_decoding.empty
+        assert summary_decoding.empty
+
     def test_with_permutation_test_writes_per_fold_file(self, tmp_path):
         (training_df, training_data, training_labels,
          testing_df, testing_data, testing_labels,
@@ -222,7 +263,7 @@ class TestRunKfold:
             masker=FakeMasker(),
             analysis_output_dir=str(tmp_path), model_descr="test_model", subject_id="01",
             regressor_categories=["face", "place"],
-            feat_p=0.5, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,
+            feature_selection_cfg={"feat_p": 0.5}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,
             training_df=training_df, training_data=training_data, training_labels=training_labels,
             testing_df=testing_df, testing_data=testing_data, testing_labels=testing_labels,
             timecourse_instr=timecourse_instr, timecourse_data=timecourse_data, timecourse_labels=timecourse_labels,

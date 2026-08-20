@@ -25,7 +25,7 @@ from utils.mvpa_common import (
     decision_evidence,
     save_model_results,
     average_fold_results,
-    resolve_feature_threshold,
+    resolve_feature_selection_params,
     build_classifier_pipeline,
     model_classification,
     model_performance,
@@ -430,27 +430,42 @@ class TestAverageFoldResults:
 
 
 # =====================================================
-# resolve_feature_threshold / build_classifier_pipeline
+# resolve_feature_selection_params / build_classifier_pipeline
 # =====================================================
 
-class TestResolveFeatureThreshold:
+class TestResolveFeatureSelectionParams:
     def test_widens_threshold_until_min_voxels_selected(self):
         X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2)
-        thr = resolve_feature_threshold(X, y, feat_p=1e-6)
+        mode, param = resolve_feature_selection_params(X, y, {"feat_p": 1e-6})
         # starting threshold is far too strict for any real data -- must have widened
-        assert thr > 1e-6
+        assert mode == "fpr"
+        assert param > 1e-6
 
     def test_keeps_feat_p_when_already_enough_voxels(self):
         X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2)
-        thr = resolve_feature_threshold(X, y, feat_p=0.9)
-        assert thr == pytest.approx(0.9)
+        mode, param = resolve_feature_selection_params(X, y, {"feat_p": 0.9})
+        assert mode == "fpr"
+        assert param == pytest.approx(0.9)
+
+    def test_n_voxels_returns_k_best_unchanged(self):
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2)
+        # feat_p also present (as merge_with_defaults always injects it) --
+        # n_voxels must win, no widening/threshold logic involved
+        mode, param = resolve_feature_selection_params(X, y, {"feat_p": 0.05, "n_voxels": 3})
+        assert (mode, param) == ("k_best", 3)
 
 
 class TestBuildClassifierPipeline:
-    def test_pipeline_has_feature_selection_then_classifier_steps(self):
-        pipe = build_classifier_pipeline(0.1, CLASSIFIER_NAME, CLASSIFIER_PARAMS)
+    def test_fpr_pipeline_has_feature_selection_then_classifier_steps(self):
+        pipe = build_classifier_pipeline("fpr", 0.1, CLASSIFIER_NAME, CLASSIFIER_PARAMS)
         assert list(pipe.named_steps.keys()) == ["feature_selection", "classifier"]
         assert type(pipe.named_steps["classifier"]).__name__ == "LogisticRegression"
+
+    def test_k_best_pipeline_selects_exact_voxel_count(self):
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2)
+        pipe = build_classifier_pipeline("k_best", 3, CLASSIFIER_NAME, CLASSIFIER_PARAMS)
+        pipe.fit(X, y)
+        assert int(pipe.named_steps["feature_selection"].get_support().sum()) == 3
 
 
 # =====================================================
@@ -460,7 +475,7 @@ class TestBuildClassifierPipeline:
 class TestModelClassificationAndPerformance:
     def test_binary_end_to_end(self):
         X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2, seed=1)
-        pipe = model_classification(X, y, feat_p=0.05, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
         xout, impa_full = model_performance(pipe, X, y)
 
         assert xout["total_scores"] > 0.8  # cleanly separable data
@@ -471,7 +486,7 @@ class TestModelClassificationAndPerformance:
 
     def test_multiclass_end_to_end(self):
         X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3, seed=2)
-        pipe = model_classification(X, y, feat_p=0.05, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
         xout, impa_full = model_performance(pipe, X, y)
 
         assert xout["total_scores"] > 0.7
@@ -479,6 +494,13 @@ class TestModelClassificationAndPerformance:
         assert xout["evidence"].shape == (3, 3)
         assert xout["auc"].shape == (3,)
         assert impa_full.shape == (3, X.shape[1])
+
+    def test_n_voxels_selects_exact_count_end_to_end(self):
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2, seed=1)
+        pipe = model_classification(X, y, feature_selection_cfg={"n_voxels": 4}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
+        assert int(pipe.named_steps["feature_selection"].get_support().sum()) == 4
+        xout, impa_full = model_performance(pipe, X, y)
+        assert xout["total_scores"] > 0.8  # cleanly separable data
 
 
 # =====================================================
@@ -488,7 +510,7 @@ class TestModelClassificationAndPerformance:
 class TestTimecourseDecoding:
     def _fitted_pipe_and_categories(self):
         X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2, seed=3)
-        pipe = model_classification(X, y, feat_p=0.05, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
         return pipe
 
     def test_raw_and_summary_shapes(self):
@@ -503,7 +525,7 @@ class TestTimecourseDecoding:
         })
 
         raw, summary = timecourse_decoding(
-            pipe, X, y, timecourse_df, categories, feat_p=0.05, subject_id="01", model_descr="test_model",
+            pipe, X, y, timecourse_df, categories, feature_selection_cfg={"feat_p": 0.05}, subject_id="01", model_descr="test_model",
         )
 
         assert len(raw) == len(y)
@@ -554,7 +576,7 @@ class TestPermutationSignificance:
         result = permutation_significance(
             X_train, y_train, X_test, y_test,
             n_permutations=5, random_state=0,
-            feat_p=0.5, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,
+            feature_selection_cfg={"feat_p": 0.5}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,
         )
 
         assert sorted(result["metric"].tolist()) == ["accuracy", "roc_auc_ovr"]

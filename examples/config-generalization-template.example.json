@@ -63,8 +63,7 @@
   "model": {
     "desc": "gm_valence_classifier",
     "mask": {
-      "mask_root": "<optional: path to mask files, if not co-located with derivatives_root/bids_root>",
-      "mask_pattern": "sub-{subject}/ses-{session}/masks/native_gm_transformed_mask.nii.gz"
+      "mask_pattern": "<full path to the mask -- {subject}/{session} placeholders for one mask per subject, or a fixed path with no placeholders for a single shared mask (e.g. one MNI-space group mask)>"
     },
     "featureSelection": {
       "model": "ANOVA",

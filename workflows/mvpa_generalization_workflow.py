@@ -30,8 +30,12 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     cv/<subject>_cv_impa_native.nii.gz          -- CV-fold-averaged importance map
     model/<subject>_model_results_{metric}.csv  -- held-out test metrics
     model/<subject>_impa_native.nii.gz          -- final importance map
-    decoding/<subject>_decoding_results.csv         -- raw, one row per decoded TR
-    decoding/<subject>_summary_decoding_results.csv -- averaged per (window_index, regressor_label)
+    decoding/<subject>_decoding_results.csv         -- raw, one row per decoded TR (*)
+    decoding/<subject>_summary_decoding_results.csv -- averaged per (window_index, regressor_label) (*)
+
+(*) only written when model_conditions.timecourse_decoding is configured --
+omit that whole section to skip timecourse decoding entirely (no decoding/
+output at all, no extra runtime for that step).
 
 Usage:
     python mvpa_generalization_workflow.py --subject 4057 \\
@@ -50,7 +54,7 @@ from sklearn.model_selection import PredefinedSplit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
 from utils.mvpa_common import (
-    build_trial_pivot_table, resolve_config_root, quick_safe, label_rows,
+    build_trial_pivot_table, quick_safe, label_rows,
     track_runtime, load_config, apply_regressor_codes, balance,
     load_images_and_mask, build_timecourse_instructions,
     model_classification, model_performance, permutation_significance,
@@ -193,21 +197,17 @@ def main(args):
 
     full_cfg = load_config(args.config)
 
-    event_cfg = full_cfg["event_extraction"]
-    derivatives_root = resolve_config_root(
-        event_cfg, "derivatives_root", event_cfg["bids_root"], "event_extraction.derivatives_root"
-    )
-    # masks are typically co-located with preprocessed/derivative BOLD data, but can
-    # be overridden independently (e.g. a separate hand-drawn ROI directory).
-    mask_root = resolve_config_root(
-        full_cfg["model"].get("mask", {}), "mask_root", derivatives_root, "model.mask.mask_root"
-    )
     model_conditions = full_cfg["model_conditions"]
 
     training_conditions = model_conditions["training"]["conditions"]
     testing_conditions = model_conditions["testing"]["conditions"]
-    timecourse_conditions = model_conditions["timecourse_decoding"]["conditions"]
-    timecourse_window = model_conditions["timecourse_decoding"]["window"]
+    # optional -- model_conditions.timecourse_decoding entirely absent means
+    # skip timecourse decoding: no decoding/ output files, no report timecourse
+    # page (generate_report.py already skips that page when it finds no
+    # decoding_results.csv, so no report-side change is needed for this).
+    timecourse_cfg = model_conditions.get("timecourse_decoding")
+    timecourse_conditions = timecourse_cfg["conditions"] if timecourse_cfg else None
+    timecourse_window = timecourse_cfg["window"] if timecourse_cfg else None
 
     # class label order shared across training/testing/timecourse regressor codes
     regressor_categories = list(training_conditions.keys())
@@ -216,7 +216,7 @@ def main(args):
     model_cfg = full_cfg["model"]
     model_descr = quick_safe(model_cfg["desc"])
     mask_pattern_template = model_cfg["mask"]["mask_pattern"]
-    feat_p = model_cfg["featureSelection"]["feat_p"]
+    feature_selection_cfg = model_cfg["featureSelection"]
     classifier_name = model_cfg["classifier"]["name"]
     classifier_params = model_cfg["classifier"]["params"]
 
@@ -257,22 +257,29 @@ def main(args):
 
     training_df = apply_regressor_codes(label_rows(subject_df, training_conditions), regressor_categories)
     testing_df = apply_regressor_codes(label_rows(subject_df, testing_conditions), regressor_categories)
-    timecourse_labeled = apply_regressor_codes(label_rows(subject_df, timecourse_conditions), regressor_categories)
-    timecourse_instr = build_timecourse_instructions(timecourse_labeled, timecourse_window)
+    if timecourse_cfg is not None:
+        timecourse_labeled = apply_regressor_codes(label_rows(subject_df, timecourse_conditions), regressor_categories)
+        timecourse_instr = build_timecourse_instructions(timecourse_labeled, timecourse_window)
+    else:
+        timecourse_instr = None
 
-    training_data, training_labels, training_ids, masker = load_images_and_mask(training_df, mask_pattern_template, mask_root)
-    testing_data, testing_labels, testing_ids, masker = load_images_and_mask(testing_df, mask_pattern_template, mask_root)
-    timecourse_data, timecourse_labels, timecourse_ids, masker = load_images_and_mask(timecourse_instr, mask_pattern_template, mask_root)
+    training_data, training_labels, training_ids, masker = load_images_and_mask(training_df, mask_pattern_template)
+    testing_data, testing_labels, testing_ids, masker = load_images_and_mask(testing_df, mask_pattern_template)
 
     training_df = training_df.loc[training_ids, :]
     testing_df = testing_df.loc[testing_ids, :]
-    timecourse_instr = timecourse_instr.loc[timecourse_ids, :]
-    print("...Done")
 
     # make sure labels are flat
     training_labels = training_labels.ravel()
     testing_labels = testing_labels.ravel()
-    timecourse_labels = timecourse_labels.ravel()
+
+    if timecourse_instr is not None:
+        timecourse_data, timecourse_labels, timecourse_ids, masker = load_images_and_mask(timecourse_instr, mask_pattern_template)
+        timecourse_instr = timecourse_instr.loc[timecourse_ids, :]
+        timecourse_labels = timecourse_labels.ravel()
+    else:
+        timecourse_data = timecourse_labels = None
+    print("...Done")
 
     # -------------------------------------------------
     # K-Fold Cross Validation
@@ -297,7 +304,7 @@ def main(args):
         xregs = training_labels[training_df_balanced.loc[train_idx, "index"].values]
         xpat  = training_data[training_df_balanced.loc[train_idx, "index"].values, :]
 
-        xclf = model_classification(xpat, xregs, feat_p, classifier_name, classifier_params)
+        xclf = model_classification(xpat, xregs, feature_selection_cfg, classifier_name, classifier_params)
 
         # test model performance on hold out data
         holdout_xregs = training_labels[training_df_balanced.loc[test_idx, "index"].values]
@@ -325,16 +332,19 @@ def main(args):
     print("Training classifier...")
 
     # train on full "training" set now
-    xclf = model_classification(training_data, training_labels, feat_p, classifier_name, classifier_params)
+    xclf = model_classification(training_data, training_labels, feature_selection_cfg, classifier_name, classifier_params)
 
     # record final model performance
     xout, importance_map = model_performance(xclf, testing_data, testing_labels)
 
-    print("Time Course Decoding...")
-    raw_decoding, summary_decoding = timecourse_decoding(
-        xclf, timecourse_data, timecourse_labels, timecourse_instr, regressor_categories,
-        feat_p, subject_id, model_descr,
-    )
+    if timecourse_instr is not None:
+        print("Time Course Decoding...")
+        raw_decoding, summary_decoding = timecourse_decoding(
+            xclf, timecourse_data, timecourse_labels, timecourse_instr, regressor_categories,
+            feature_selection_cfg, subject_id, model_descr,
+        )
+    else:
+        raw_decoding, summary_decoding = None, None
 
     output_pattern = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}" + "_model_results_{metric}.csv")
     save_model_results(output_pattern, xout, regressor_categories)
@@ -350,7 +360,7 @@ def main(args):
         print(f"Permutation testing ({n_permutations} permutations)...")
         permutation_results = permutation_significance(
             training_data, training_labels, testing_data, testing_labels, n_permutations, random_state,
-            feat_p, classifier_name, classifier_params,
+            feature_selection_cfg, classifier_name, classifier_params,
         )
         permutation_file = os.path.join(
             analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}_permutation_test.csv"
@@ -378,14 +388,17 @@ def main(args):
     # (raw grouped by window_index/regressor_label and averaged across trials)
     # -------------------------------------------------
 
-    output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_decoding_results.csv")
-    Path(os.path.dirname(output_file)).mkdir(parents=True, exist_ok=True)
-    raw_decoding.to_csv(output_file, index=False)
+    if raw_decoding is not None:
+        output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_decoding_results.csv")
+        Path(os.path.dirname(output_file)).mkdir(parents=True, exist_ok=True)
+        raw_decoding.to_csv(output_file, index=False)
 
-    summary_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_summary_decoding_results.csv")
-    summary_decoding.to_csv(summary_file, index=False)
+        summary_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_summary_decoding_results.csv")
+        summary_decoding.to_csv(summary_file, index=False)
 
-    print(f"Results saved to: {output_file} (raw) and {summary_file} (summary)")
+        print(f"Results saved to: {output_file} (raw) and {summary_file} (summary)")
+    else:
+        print("No model_conditions.timecourse_decoding in config -- skipped, no decoding/ output written.")
 
 
 if __name__ == "__main__":

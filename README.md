@@ -32,7 +32,7 @@ downloaded fresh by `tutorial/preprocess_haxby.sh`, not checked into this
 repo -- see [tutorial/README.md](tutorial/README.md) for the full
 walkthrough). `examples/config-generalization-template.example.json` is the
 same shape but written as a fill-in-your-own-paths template, including the
-derivative-data fields (`derivatives_root`, `mask_root`) described below.
+derivative-data field (`derivatives_root`) described below.
 
 ## Running tests
 
@@ -79,10 +79,10 @@ tutorial/haxby-data/
 ```
 
 This assumes events and BOLD files are co-located and share a naming
-convention. If your preprocessed data lives elsewhere (a separate fMRIPrep
+convention. If your preprocessed data lives elsewhere (a separate 
 `derivatives/` tree, a different naming scheme, etc.), see
 [Using preprocessed/derivative data](#using-preprocessedderivative-data-eg-fmriprep) below --
-`derivatives_root`/`bold_glob` decouple BOLD-file discovery from this assumption
+`derivatives_root`/`bold_glob` to decouple BOLD-file discovery from this assumption
 entirely.
 
 **Inferred from the data, never configured:**
@@ -192,8 +192,7 @@ subject  session  volume_of_interest  trial_type  trial_index  onset  duration  
 ### Hardcoded exclusions
 
 `generate_master_spreadsheet.py` drops a fixed set of administrative/non-trial
-`trial_type` values before windowing -- they're never useful to any analysis,
-so this isn't exposed as a config option. Edit the `EXCLUDED_TRIAL_TYPE_EXACT`
+`trial_type` values before windowing -- typically not used in the MVPA analyses therefore it  isn't exposed as a config option. Edit the `EXCLUDED_TRIAL_TYPE_EXACT`
 / `EXCLUDED_TRIAL_TYPE_SUBSTRINGS` constants near the top of the script to
 change the list:
 
@@ -242,12 +241,10 @@ BOLD data `tutorial/preprocess_haxby.sh` writes lives in its own
   the same run) -- both cause that run to be skipped with a warning, not a
   crash.
 
-`model.mask.mask_root` (see [section 5](#5-model)) works the same way for
-mask files, and defaults to `derivatives_root` -- masks are usually derivative
-products co-located with preprocessed BOLD data, but can be pointed elsewhere
-independently (e.g. a separate hand-drawn ROI directory) if needed.
-`examples/config-generalization-template.example.json` is a template showing all of these fields
-filled in.
+`model.mask.mask_pattern` (see [section 5](#5-model)) is unrelated to either
+of these -- it's always a full path in its own right, not resolved against
+`bids_root`/`derivatives_root`. `examples/config-generalization-template.example.json`
+is a template showing the `event_extraction` fields above filled in.
 
 #### Diagnosing a "no matching BOLD file found" error
 
@@ -267,10 +264,11 @@ to confirm resolution is doing what you expect even when it "works".
 
 ## 4. `model_conditions`
 
-Read by `validate_model_config.py`. This defines, for each of three required
-sections (`training`, `testing`, `timecourse_decoding`), a set of named
-**conditions** -- the classifier's class labels -- each backed by a **query**
-that selects which `master_spreadsheet.csv` rows belong to it.
+Read by `validate_model_config.py`. This defines, for each of three
+sections (`training`, `testing` -- both required -- and `timecourse_decoding`,
+optional), a set of named **conditions** -- the classifier's class labels --
+each backed by a **query** that selects which `master_spreadsheet.csv` rows
+belong to it.
 
 ### The query language
 
@@ -329,8 +327,14 @@ column:
 }
 ```
 
-**`timecourse_decoding`** -- same idea, but for the trial-by-trial decoding
-sweep. Here the example also adds a required **`window`**:
+**`timecourse_decoding`** -- *(optional)* same idea, but for the trial-by-trial
+decoding sweep. Here the example also adds a required **`window`**. Omit the
+whole section (not just leave it empty) to skip timecourse decoding
+entirely -- no `decoding/` output files (per-subject or per-fold), no extra
+runtime for that step, and `generate_report.py`'s timecourse page is
+automatically skipped too (it already skips whenever it finds no
+`decoding_results.csv` for any subject in scope, so there's nothing extra to
+configure on the report side):
 
 ```json
 "timecourse_decoding": {
@@ -439,7 +443,7 @@ about *which rows* to use (that's `model_conditions`'s job):
 "model": {
   "desc": "haxby_object_classifier",
   "mask": {
-    "mask_pattern": "sub-{subject}/masks/native_epi_mask.nii.gz"
+    "mask_pattern": "tutorial/haxby-data/derivatives/sub-{subject}/masks/native_epi_mask.nii.gz"
   },
   "featureSelection": {
     "model": "ANOVA",
@@ -461,9 +465,9 @@ about *which rows* to use (that's `model_conditions`'s job):
 | Field | Meaning |
 |---|---|
 | `desc` | Short name for this classifier variant; sanitized into the output folder name. |
-| `mask.mask_root` | *(optional)* Directory to search under for mask files. Omit the key (or set it to `null`) to inherit `event_extraction.derivatives_root` (which itself defaults to `bids_root`) -- override independently if masks live somewhere else, e.g. a separate ROI directory. As with `derivatives_root`, an explicit `""` is honored literally (current working directory) with a warning, rather than silently inheriting the default. |
-| `mask.mask_pattern` | Path to the per-subject mask NIfTI, resolved relative to `mask_root` with `{subject}`/`{session}` filled in from whichever row is being loaded (can still contain glob wildcards -- resolved the same way as bold-file lookups). |
-| `featureSelection` | ANOVA voxel-selection threshold used before fitting the classifier. |
+| `mask.mask_pattern` | The full path to the mask NIfTI -- absolute, or relative to wherever the workflow script is run from (same convention `bids_root`/`derivatives_root` use); never resolved against either of those or any other root. Include `{subject}`/`{session}` placeholders (filled in from whichever row is being loaded) for one native-space mask per subject, as in the example above -- or omit them entirely for a single shared mask used for every subject, e.g. one MNI-space group mask (a template with no placeholders just formats to itself, so every subject resolves to the same literal path). Can still contain glob wildcards either way -- resolved the same way as bold-file lookups. |
+| `featureSelection.feat_p` | ANOVA p-value threshold -- voxels with `p < feat_p` are kept, widened automatically until at least 5 voxels are selected. Ignored when `n_voxels` is set. |
+| `featureSelection.n_voxels` | *(optional)* Select exactly this many voxels by ANOVA F-score instead, regardless of significance (sklearn's `SelectKBest` equivalent) -- takes priority over `feat_p` when both are present. Useful for keeping feature count fixed across subjects/folds whose signal strength (and thus a p-value threshold's actual voxel count) varies. `model_results_auc.csv`-adjacent output files still record whichever mode was actually used: `threshold_p` is `NaN` in this mode, since there's no threshold, but `selected_voxels` (identical to `n_voxels` here) is populated either way. |
 | `classifier` | Any importable scikit-learn-style estimator: `name` is a dotted import path, `params` are passed straight through as kwargs. |
 
 Omit either of `featureSelection`/`classifier` and it falls back to a
@@ -609,9 +613,8 @@ comes from the one config plus `master_spreadsheet.csv`. For a given
 
 `tutorial/haxby-data/derivatives/sub-1/masks/native_epi_mask.nii.gz` is a
 real mask already, so this runs as shown above with no extra setup -- if
-your own dataset doesn't have one yet, point `model.mask.mask_pattern` (and
-`mask_root`, if the mask doesn't live under `derivatives_root`) at a real
-(or throwaway, for testing) mask file first.
+your own dataset doesn't have one yet, point `model.mask.mask_pattern` at a
+real (or throwaway, for testing) mask file first.
 
 ### Trial pivot table (sanity check)
 
@@ -743,8 +746,8 @@ to know which workflow produced a given subject's results):
 | `model/{subject}_fold{N}_model_results_{metric}.csv` | `model/{subject}_model_results_{metric}.csv` |
 | `model/{subject}_fold{N}_impa_native.nii.gz` | `model/{subject}_impa_native.nii.gz` |
 | `model/{subject}_fold{N}_permutation_test.csv` *(optional)* | -- (not combined across folds) |
-| `decoding/{subject}_fold{N}_decoding_results.csv` | `decoding/{subject}_decoding_results.csv` |
-| `decoding/{subject}_fold{N}_summary_decoding_results.csv` | `decoding/{subject}_summary_decoding_results.csv` |
+| `decoding/{subject}_fold{N}_decoding_results.csv` *(only if `timecourse_decoding` configured)* | `decoding/{subject}_decoding_results.csv` *(same)* |
+| `decoding/{subject}_fold{N}_summary_decoding_results.csv` *(same)* | `decoding/{subject}_summary_decoding_results.csv` *(same)* |
 
 Aggregation: scalar/matrix metrics and importance maps are averaged across
 folds; decoding rows from different folds are genuinely disjoint trials

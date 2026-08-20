@@ -79,7 +79,7 @@
   "model": {
     "desc": "gm_object_classifier",
     "mask": {
-      "mask_pattern": "sub-{subject}/ses-{session}/masks/native_gm_transformed_mask.nii.gz"
+      "mask_pattern": "examples/sample-data/sub-{subject}/ses-{session}/masks/native_gm_transformed_mask.nii.gz"
     },
     "featureSelection": {
       "model": "ANOVA",

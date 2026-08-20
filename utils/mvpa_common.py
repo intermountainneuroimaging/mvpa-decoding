@@ -46,7 +46,7 @@ def parse_bids_entities(filename: str) -> dict:
 
 
 def resolve_config_root(section: dict, key: str, default: str, label: str) -> str:
-    """Read an optional root-path override (e.g. derivatives_root, mask_root) from a config
+    """Read an optional root-path override (e.g. derivatives_root) from a config
     section. A missing key or explicit JSON null means "inherit `default`". An explicit empty
     string is honored literally -- it resolves to the current working directory once joined
     with a relative pattern -- since that's almost never what's intended, it's flagged with a
@@ -446,9 +446,18 @@ class ShapeError(Exception):
 _masker_cache = {}
 
 
-def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str, mask_root: str):
+def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str):
     """Load BOLD patterns for every (subject, session, boldfile) group in
-    labeled_df, z-score, and slice to each row's volume_of_interest."""
+    labeled_df, z-score, and slice to each row's volume_of_interest.
+
+    mask_pattern_template is the full path to the mask -- absolute, or
+    relative to wherever the workflow script is run from (same convention
+    bids_root/derivatives_root already use) -- with optional {subject}/
+    {session} placeholders. Include them for one mask per subject (the
+    common native-space case); omit them entirely for a single shared mask
+    used for every subject (e.g. one MNI-space group mask), since a template
+    with no placeholders just formats to itself and every subject resolves
+    to the same literal path."""
 
     matrices = []
     labels = []
@@ -465,7 +474,7 @@ def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str, m
 
         if mask_key not in _masker_cache:
             mask_pattern = mask_pattern_template.format(subject=subject, session=session)
-            mask_file = get_single_match(os.path.join(mask_root, mask_pattern))
+            mask_file = get_single_match(mask_pattern)
             print(f"Using Mask File: {mask_file}")
             bold_tr, _ = get_bold_header_info(boldfile)
             _masker_cache[mask_key] = NiftiMasker(mask_img=mask_file, standardize=False, detrend=False, t_r=bold_tr)
@@ -635,35 +644,45 @@ def average_fold_results(fold_results: list) -> dict:
 # Classification: feature selection, fitting, evaluation, significance
 # =====================================================
 
-def resolve_feature_threshold(training_data, training_labels, feat_p: float) -> float:
-    """The ANOVA p-value cutoff for feature selection, widened from feat_p
-    until it selects at least 5 voxels. Shared by model_classification() and
-    permutation_significance() so the permutation test's null-distribution
-    pipelines use the exact same selection rule the real model did, not a
-    different unwidened threshold."""
+def resolve_feature_selection_params(training_data, training_labels, feature_selection_cfg: dict) -> tuple:
+    """(mode, param) for sklearn's GenericUnivariateSelect, from
+    model.featureSelection:
+      - "n_voxels" set: ("k_best", n_voxels) -- select exactly that many
+        voxels by ANOVA F-score, regardless of significance.
+      - otherwise: ("fpr", thr) -- the ANOVA p-value cutoff from feat_p,
+        widened until it selects at least 5 voxels.
+    Shared by model_classification() and permutation_significance() so the
+    permutation test's null-distribution pipelines use the exact same
+    selection rule the real model did, not a different unwidened threshold."""
+    n_voxels = feature_selection_cfg.get("n_voxels")
+    if n_voxels is not None:
+        return "k_best", n_voxels
+
     _, xP = f_classif(training_data, training_labels)
     xP = np.nan_to_num(xP, nan=1.0)
-    thr = feat_p
+    thr = feature_selection_cfg["feat_p"]
     while np.sum(xP < thr) < 5 and thr <= 1.0:
         thr *= 1.1
-    return thr
+    return "fpr", thr
 
 
-def build_classifier_pipeline(thr: float, classifier_name: str, classifier_params: dict) -> Pipeline:
-    """An unfit Pipeline(ANOVA feature selection, classifier) using the given
-    p-value threshold. GenericUnivariateSelect(mode="fpr", param=thr) selects
-    features with p < thr -- the built-in sklearn equivalent of the manual
-    xP < thr mask this replaced (verified to select identical voxels,
-    including NaN p-value handling for zero-variance voxels)."""
+def build_classifier_pipeline(mode: str, param, classifier_name: str, classifier_params: dict) -> Pipeline:
+    """An unfit Pipeline(ANOVA feature selection, classifier). mode/param are
+    passed straight through to GenericUnivariateSelect -- "fpr" (param=a
+    p-value threshold, features with p < param) or "k_best" (param=an exact
+    voxel count, the top-scoring param features by ANOVA F-score) -- the
+    built-in sklearn equivalent of the manual xP < thr mask the "fpr" path
+    originally used (verified to select identical voxels, including NaN
+    p-value handling for zero-variance voxels)."""
     Cls = import_from_path(classifier_name)
     return Pipeline([
-        ("feature_selection", GenericUnivariateSelect(score_func=f_classif, mode="fpr", param=thr)),
+        ("feature_selection", GenericUnivariateSelect(score_func=f_classif, mode=mode, param=param)),
         ("classifier", Cls(**classifier_params)),
     ])
 
 
 # cross_validation
-def model_classification(training_data, training_labels, feat_p: float, classifier_name: str, classifier_params: dict):
+def model_classification(training_data, training_labels, feature_selection_cfg: dict, classifier_name: str, classifier_params: dict):
     """Fit an ANOVA-feature-selection + classifier Pipeline. Bundling both
     steps into one estimator -- rather than externally tracking a voxel
     boolean mask, as before -- means the whole thing can be refit as a
@@ -672,8 +691,8 @@ def model_classification(training_data, training_labels, feat_p: float, classifi
 
     print("Training classifier...")
 
-    thr = resolve_feature_threshold(training_data, training_labels, feat_p)
-    pipe = build_classifier_pipeline(thr, classifier_name, classifier_params)
+    mode, param = resolve_feature_selection_params(training_data, training_labels, feature_selection_cfg)
+    pipe = build_classifier_pipeline(mode, param, classifier_name, classifier_params)
     pipe.fit(training_data, training_labels)
 
     return pipe
@@ -769,7 +788,7 @@ def model_performance(pipe, testing_data, testing_labels):
 
 
 def permutation_significance(training_data, training_labels, testing_data, testing_labels, n_permutations, random_state,
-                              feat_p: float, classifier_name: str, classifier_params: dict):
+                              feature_selection_cfg: dict, classifier_name: str, classifier_params: dict):
     """Real-vs-null significance for the held-out test evaluation, via
     sklearn.model_selection.permutation_test_score (the tool nilearn's own
     decoding docs recommend for exactly this fMRI-classification case).
@@ -795,14 +814,15 @@ def permutation_significance(training_data, training_labels, testing_data, testi
     ])
     cv = PredefinedSplit(test_fold)
 
-    # same widened threshold the real model fit used (see resolve_feature_threshold),
-    # resolved once from the real (unpermuted) training data and held fixed as a
-    # pipeline hyperparameter across every permutation round
-    thr = resolve_feature_threshold(training_data, training_labels, feat_p)
+    # same selection params the real model fit used (see
+    # resolve_feature_selection_params), resolved once from the real
+    # (unpermuted) training data and held fixed as a pipeline hyperparameter
+    # across every permutation round
+    mode, param = resolve_feature_selection_params(training_data, training_labels, feature_selection_cfg)
 
     rows = []
     for metric in ("accuracy", "roc_auc_ovr"):
-        pipe = build_classifier_pipeline(thr, classifier_name, classifier_params)
+        pipe = build_classifier_pipeline(mode, param, classifier_name, classifier_params)
         score, _, p_value = permutation_test_score(
             pipe, X, y, cv=cv, scoring=metric,
             n_permutations=n_permutations, random_state=random_state, n_jobs=-1,
@@ -823,7 +843,7 @@ TIMECOURSE_GROUPING = ["window_index", "regressor_label"]
 
 
 def timecourse_decoding(pipe, timecourse_data, timecourse_labels, timecourse_df, regressor_categories,
-                         feat_p: float, subject_id: str, model_descr: str):
+                         feature_selection_cfg: dict, subject_id: str, model_descr: str):
     """Predict the trained classifier on every already-recomputed timecourse-decoding
     volume. Returns (raw, summary):
       - raw: one row per volume actually decoded, with its own prediction and
@@ -847,7 +867,9 @@ def timecourse_decoding(pipe, timecourse_data, timecourse_labels, timecourse_df,
         raw[f"evidence_{cat}"] = evidence[:, i]
 
     n_selected = int(pipe.named_steps["feature_selection"].get_support().sum())
-    raw["threshold_p"] = feat_p
+    # only meaningful in "fpr" (p-threshold) mode -- NaN in "k_best" (n_voxels)
+    # mode, where selected_voxels already says everything there is to say
+    raw["threshold_p"] = feature_selection_cfg.get("feat_p") if feature_selection_cfg.get("n_voxels") is None else np.nan
     raw["selected_voxels"] = n_selected
     raw["whole_voxels"] = timecourse_data.shape[1]
     raw["feature_percent"] = 100 * n_selected / timecourse_data.shape[1]
