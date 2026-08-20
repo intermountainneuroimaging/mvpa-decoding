@@ -4,6 +4,7 @@ consolidation pass, and are used by every other script in the repo."""
 
 import math
 
+import nibabel as nib
 import numpy as np
 import pandas as pd
 import pytest
@@ -32,6 +33,7 @@ from utils.mvpa_common import (
     timecourse_decoding,
     summarize_decoding,
     permutation_significance,
+    load_images_and_mask,
 )
 
 CLASSIFIER_NAME = "sklearn.linear_model.LogisticRegression"
@@ -427,6 +429,56 @@ class TestAverageFoldResults:
         avg = average_fold_results(fold_results)
         assert avg["total_scores"] == pytest.approx(0.7)
         np.testing.assert_allclose(avg["accuracy"], [[0.5, 0.5], [0.5, 0.5]])
+
+
+# =====================================================
+# load_images_and_mask
+# =====================================================
+
+def _labeled_df(boldfile, subject, session="", n_vols=3):
+    """Distinct subject id per test -- load_images_and_mask's masker cache is
+    module-level, keyed by (subject, session), so reusing one across tests
+    would silently reuse a previous test's masker instead of building a
+    fresh one for the config under test."""
+    return pd.DataFrame({
+        "boldfile": [boldfile] * n_vols,
+        "subject": [subject] * n_vols,
+        "session": [session] * n_vols,
+        "volume_of_interest": list(range(n_vols)),
+        "regressor": ([1, 2, 1] * n_vols)[:n_vols],
+    })
+
+
+class TestLoadImagesAndMask:
+    def test_no_mask_pattern_uses_every_voxel_and_warns(self, synthetic_bold_file, capsys):
+        df = _labeled_df(synthetic_bold_file, subject="load_test_no_mask")
+        X, Y, idx, masker = load_images_and_mask(df, mask_pattern_template=None)
+        assert X.shape == (3, 5 * 5 * 5)  # every voxel of the 5x5x5 synthetic volume
+        assert "No model.mask.mask_pattern configured" in capsys.readouterr().out
+
+    def test_empty_string_mask_pattern_also_means_no_mask(self, synthetic_bold_file):
+        # falsy, same as omitting the key entirely (merge_with_defaults never
+        # injects a default for it, so "" only happens if a config sets it
+        # explicitly -- treated the same as unset, not as a literal empty path)
+        df = _labeled_df(synthetic_bold_file, subject="load_test_empty_mask")
+        X, Y, idx, masker = load_images_and_mask(df, mask_pattern_template="")
+        assert X.shape == (3, 5 * 5 * 5)
+
+    def test_configured_mask_pattern_missing_file_raises(self, synthetic_bold_file, tmp_path):
+        df = _labeled_df(synthetic_bold_file, subject="load_test_missing_mask")
+        missing_pattern = str(tmp_path / "does_not_exist.nii.gz")
+        with pytest.raises(FileNotFoundError):
+            load_images_and_mask(df, mask_pattern_template=missing_pattern)
+
+    def test_configured_mask_pattern_restricts_voxels(self, synthetic_bold_file, tmp_path):
+        mask_data = np.zeros((5, 5, 5), dtype=np.uint8)
+        mask_data[:3, :, :] = 1  # 3*5*5 = 75 of the 125 voxels
+        mask_path = tmp_path / "mask.nii.gz"
+        nib.Nifti1Image(mask_data, np.eye(4)).to_filename(str(mask_path))
+
+        df = _labeled_df(synthetic_bold_file, subject="load_test_real_mask")
+        X, Y, idx, masker = load_images_and_mask(df, mask_pattern_template=str(mask_path))
+        assert X.shape == (3, 75)
 
 
 # =====================================================

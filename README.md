@@ -465,14 +465,14 @@ about *which rows* to use (that's `model_conditions`'s job):
 | Field | Meaning |
 |---|---|
 | `desc` | Short name for this classifier variant; sanitized into the output folder name. |
-| `mask.mask_pattern` | The full path to the mask NIfTI -- absolute, or relative to wherever the workflow script is run from (same convention `bids_root`/`derivatives_root` use); never resolved against either of those or any other root. Include `{subject}`/`{session}` placeholders (filled in from whichever row is being loaded) for one native-space mask per subject, as in the example above -- or omit them entirely for a single shared mask used for every subject, e.g. one MNI-space group mask (a template with no placeholders just formats to itself, so every subject resolves to the same literal path). Can still contain glob wildcards either way -- resolved the same way as bold-file lookups. |
+| `mask.mask_pattern` | *(optional)* The full path to the mask NIfTI -- absolute, or relative to wherever the workflow script is run from (same convention `bids_root`/`derivatives_root` use); never resolved against either of those or any other root. Include `{subject}`/`{session}` placeholders (filled in from whichever row is being loaded) for one native-space mask per subject, as in the example above -- or omit them entirely for a single shared mask used for every subject, e.g. one MNI-space group mask (a template with no placeholders just formats to itself, so every subject resolves to the same literal path). Can still contain glob wildcards either way -- resolved the same way as bold-file lookups. Omit `mask` (or `mask_pattern`) entirely and every voxel is used instead -- a warning is printed, since a real analysis almost always wants a real mask (huge feature count otherwise, including background/non-brain voxels). A *configured* `mask_pattern` that matches no file is still a hard error, not a fallback -- only leaving it unset falls back. |
 | `featureSelection.feat_p` | ANOVA p-value threshold -- voxels with `p < feat_p` are kept, widened automatically until at least 5 voxels are selected. Ignored when `n_voxels` is set. |
 | `featureSelection.n_voxels` | *(optional)* Select exactly this many voxels by ANOVA F-score instead, regardless of significance (sklearn's `SelectKBest` equivalent) -- takes priority over `feat_p` when both are present. Useful for keeping feature count fixed across subjects/folds whose signal strength (and thus a p-value threshold's actual voxel count) varies. `model_results_auc.csv`-adjacent output files still record whichever mode was actually used: `threshold_p` is `NaN` in this mode, since there's no threshold, but `selected_voxels` (identical to `n_voxels` here) is populated either way. |
 | `classifier` | Any importable scikit-learn-style estimator: `name` is a dotted import path, `params` are passed straight through as kwargs. |
 
 Omit either of `featureSelection`/`classifier` and it falls back to a
-default (ANOVA @ p<0.05, `LogisticRegression`) -- only `desc` and `mask` are
-meaningfully required.
+default (ANOVA @ p<0.05, `LogisticRegression`); omit `mask` and every voxel
+is used (with a warning) -- only `desc` is truly required.
 
 There's no `model.cv` field -- it's not a configurable knob, it's determined
 automatically from the training data itself (`resolve_internal_cv_folds` in

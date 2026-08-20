@@ -215,7 +215,7 @@ def main(args):
     # model settings (mask/featureSelection/classifier/cv/desc)
     model_cfg = full_cfg["model"]
     model_descr = quick_safe(model_cfg["desc"])
-    mask_pattern_template = model_cfg["mask"]["mask_pattern"]
+    mask_pattern_template = model_cfg.get("mask", {}).get("mask_pattern")
     feature_selection_cfg = model_cfg["featureSelection"]
     classifier_name = model_cfg["classifier"]["name"]
     classifier_params = model_cfg["classifier"]["params"]

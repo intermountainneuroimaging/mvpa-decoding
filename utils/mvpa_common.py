@@ -446,7 +446,7 @@ class ShapeError(Exception):
 _masker_cache = {}
 
 
-def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str):
+def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str = None):
     """Load BOLD patterns for every (subject, session, boldfile) group in
     labeled_df, z-score, and slice to each row's volume_of_interest.
 
@@ -457,7 +457,17 @@ def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str):
     common native-space case); omit them entirely for a single shared mask
     used for every subject (e.g. one MNI-space group mask), since a template
     with no placeholders just formats to itself and every subject resolves
-    to the same literal path."""
+    to the same literal path.
+
+    mask_pattern_template itself is also optional (None or ""): every voxel
+    in the BOLD volume is then used (an explicit all-ones mask built from
+    that boldfile's own grid, not nilearn's own auto-mask heuristic, so
+    behavior is deterministic) -- a warning is printed, since a real
+    analysis almost always wants a real mask (huge feature count otherwise,
+    including background/non-brain voxels). A *configured* mask_pattern
+    that matches no file is still a hard error (get_single_match raises) --
+    optional-and-unset and configured-but-missing are different failure
+    modes, only the former is a fallback."""
 
     matrices = []
     labels = []
@@ -473,11 +483,20 @@ def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str):
         mask_key = (subject, session)
 
         if mask_key not in _masker_cache:
-            mask_pattern = mask_pattern_template.format(subject=subject, session=session)
-            mask_file = get_single_match(mask_pattern)
-            print(f"Using Mask File: {mask_file}")
             bold_tr, _ = get_bold_header_info(boldfile)
-            _masker_cache[mask_key] = NiftiMasker(mask_img=mask_file, standardize=False, detrend=False, t_r=bold_tr)
+            if mask_pattern_template:
+                mask_pattern = mask_pattern_template.format(subject=subject, session=session)
+                mask_file = get_single_match(mask_pattern)
+                print(f"Using Mask File: {mask_file}")
+                mask_img = mask_file
+            else:
+                print(f"  (!) No model.mask.mask_pattern configured -- using every voxel (no masking) "
+                      f"for subject={subject!r}, session={session!r}. This is rarely what you want for a "
+                      f"real analysis (huge feature count, includes background/non-brain voxels) -- set "
+                      f"model.mask.mask_pattern to restrict to real brain tissue.")
+                ref_img = nib.load(boldfile)
+                mask_img = nib.Nifti1Image(np.ones(ref_img.shape[:3], dtype=np.uint8), ref_img.affine)
+            _masker_cache[mask_key] = NiftiMasker(mask_img=mask_img, standardize=False, detrend=False, t_r=bold_tr)
         masker = _masker_cache[mask_key]
 
         # apply mask
