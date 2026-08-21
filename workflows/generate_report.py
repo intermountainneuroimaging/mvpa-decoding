@@ -635,6 +635,13 @@ def _render_fold_mosaic(pdf, fold_files: dict, mean_file: str, regressor_categor
 
     fig, axes = plt.subplots(n_cat, n_cols, figsize=(2.2 * n_cols, 2.2 * n_cat), squeeze=False)
     for c in range(n_cat):
+        # captured before plot_stat_map touches axes[c][0] below -- nilearn draws
+        # its own child axes over/instead of the one we hand it, which silently
+        # drops any set_ylabel() applied afterward (set_title survives, ylabel
+        # doesn't -- see the fig.text() placement at the end of this loop, which
+        # sidesteps the problem entirely by not depending on that axes object)
+        row_position = axes[c][0].get_position()
+
         mean_vol = mean_data[..., c] if mean_data.ndim == 4 else mean_data
         vmax = float(np.nanmax(np.abs(mean_vol))) or 1.0
         mid_z_index = mean_vol.shape[2] // 2
@@ -659,7 +666,8 @@ def _render_fold_mosaic(pdf, fold_files: dict, mean_file: str, regressor_categor
             ax.set_title("mean", fontsize=9)
 
         label = regressor_categories[c] if c < len(regressor_categories) else f"class {c}"
-        axes[c][0].set_ylabel(label, fontsize=9)
+        fig.text(0.02, (row_position.y0 + row_position.y1) / 2, label, fontsize=9,
+                  rotation=90, va="center", ha="center")
 
     fig.suptitle("Fold-to-fold importance map consistency (mid-axial slice)", fontsize=12)
     pdf.savefig(fig)
