@@ -49,7 +49,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
-from utils.mvpa_common import label_rows, get_bold_header_info, resolve_window_times, quick_safe
+from utils.mvpa_common import label_rows, get_bold_header_info, resolve_window_times, quick_safe, impa_tag
 
 
 # =====================================================
@@ -103,6 +103,22 @@ def resolve_desc(desc_arg: str, config_path: str) -> str:
     return quick_safe(model_desc)
 
 
+def resolve_mnispace(config_path: str) -> bool:
+    """model.mnispace from --config -- False (space unknown/unasserted) when
+    no config is given, the file can't be read, or the key is absent, same
+    default the workflow scripts themselves use (see mvpa_common.impa_tag).
+    Best-effort, like load_annotation_info -- never raises, since a bad
+    config here should still let the rest of the report render."""
+    if not config_path or not os.path.isfile(config_path):
+        return False
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+        return bool(cfg.get("model", {}).get("mnispace", False))
+    except (json.JSONDecodeError, OSError):
+        return False
+
+
 # =====================================================
 # Subject-scope discovery + file layout
 # =====================================================
@@ -123,7 +139,7 @@ def list_subject_dirs(analysis_output_dir: str, desc: str, subject: str = None) 
     return subjects
 
 
-def subject_paths(analysis_output_dir: str, desc: str, subject: str) -> dict:
+def subject_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: bool = False) -> dict:
     base = os.path.join(analysis_output_dir, desc, subject)
     return {
         "cv_total": os.path.join(base, "cv", f"{subject}_cv_results_total_scores.csv"),
@@ -131,13 +147,18 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str) -> dict:
         "model_auc": os.path.join(base, "model", f"{subject}_model_results_auc.csv"),
         "model_accuracy": os.path.join(base, "model", f"{subject}_model_results_accuracy.csv"),
         "model_evidence": os.path.join(base, "model", f"{subject}_model_results_evidence.csv"),
-        "model_impa": os.path.join(base, "model", f"{subject}_impa_native.nii.gz"),
-        # never written by the workflow scripts (they only ever write native-space
-        # maps) -- this is the expected filename if the user has separately
-        # resampled model_impa into MNI space via `hcp_resample.py --direction
-        # native2mni --output .../model/{subject}_impa_mni.nii.gz`. Its presence is
-        # how render_importance_pages decides a cross-subject group average is
-        # spatially valid -- see resolve_group_impa_mni.
+        # filename tag depends on model.mnispace (see impa_tag): "impa_mni" when
+        # the input BOLD/mask were confirmed-by-config to already be in MNI
+        # space, plain "impa" otherwise (space left unasserted, since it isn't
+        # reliably knowable from the file itself -- see render_importance_pages).
+        "model_impa": os.path.join(base, "model", f"{subject}_{impa_tag(mnispace)}.nii.gz"),
+        # always "impa_mni" regardless of the mnispace argument above -- either
+        # because mnispace=true made the workflow write that filename directly
+        # (in which case this coincides with "model_impa"), or because the user
+        # separately resampled a plain "impa" file via `hcp_resample.py
+        # --direction native2mni --output .../model/{subject}_impa_mni.nii.gz`.
+        # Its presence is how render_importance_pages decides a cross-subject
+        # group average is spatially valid -- see resolve_group_impa_mni.
         "model_impa_mni": os.path.join(base, "model", f"{subject}_impa_mni.nii.gz"),
         # "decoding" (the pre-aggregated summary) isn't read by the timecourse page
         # itself -- it reads "decoding_raw" instead, so trial-to-trial variability
@@ -154,17 +175,18 @@ def has_fold_files(analysis_output_dir: str, desc: str, subject: str) -> bool:
     return len(glob.glob(os.path.join(base, "model", f"{subject}_fold*_model_results_total_scores.csv"))) > 0
 
 
-def fold_paths(analysis_output_dir: str, desc: str, subject: str) -> dict:
+def fold_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: bool = False) -> dict:
     """{fold_id: {..same keys as subject_paths' model/decoding entries..}} for every
     fold found for this subject (empty dict if no fold-workflow output exists)."""
     base = os.path.join(analysis_output_dir, desc, subject)
     totals = sorted(glob.glob(os.path.join(base, "model", f"{subject}_fold*_model_results_total_scores.csv")))
     fold_ids = [int(os.path.basename(p).split("_fold")[1].split("_")[0]) for p in totals]
+    tag = impa_tag(mnispace)
     return {
         fid: {
             "model_total": os.path.join(base, "model", f"{subject}_fold{fid}_model_results_total_scores.csv"),
             "model_auc": os.path.join(base, "model", f"{subject}_fold{fid}_model_results_auc.csv"),
-            "model_impa": os.path.join(base, "model", f"{subject}_fold{fid}_impa_native.nii.gz"),
+            "model_impa": os.path.join(base, "model", f"{subject}_fold{fid}_{tag}.nii.gz"),
             "decoding": os.path.join(base, "decoding", f"{subject}_fold{fid}_summary_decoding_results.csv"),
             "decoding_raw": os.path.join(base, "decoding", f"{subject}_fold{fid}_decoding_results.csv"),
         }
@@ -540,22 +562,27 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
     plt.close(fig)
 
 
-def _plot_categories_page(pdf, impa, title, regressor_categories, mosaic=False):
+def _plot_categories_page(pdf, impa, title, regressor_categories, mosaic=False, mnispace=False):
     """impa is either a path to a NIfTI file, or an already-loaded/in-memory
     nibabel image (e.g. a group-average built without ever touching disk).
 
+    mnispace controls whether nilearn draws its own bundled MNI152 template
+    underneath as anatomical context (bg_img left at its default) or omits
+    it entirely (bg_img=None): true only when the map is actually known to
+    be in MNI space, so the overlay is never shown misleadingly registered
+    against a template it doesn't really share a grid with. mosaic=True
+    (only ever called with confirmed-MNI data -- see render_importance_pages'
+    group-mean branch) always shows the template regardless of this flag,
+    since that caller has already established the map is in MNI space by
+    construction (it's built from model_impa_mni files).
+
     mosaic=True switches from a single ortho (3-slice) cut to nilearn's
     "mosaic" display -- many tiled slices, much more of the map's spatial
-    extent visible at once -- and lets nilearn draw its own bundled MNI152
-    template underneath (omitting bg_img, rather than the bg_img=None used
-    for native-space maps below, which have no shared anatomical template to
-    plot against and would misalign badly if plotted against the MNI one).
-    Only meaningful for maps already confirmed to be in MNI space -- see
-    render_importance_pages' group-mean branch, the only caller that passes
-    it. A mosaic is much taller than one ortho row, so (unlike the ortho
-    case, which stacks every category into one figure) each category gets
-    its own page -- otherwise categories would overlap into an illegible
-    mess trying to share one page's worth of vertical space."""
+    extent visible at once. A mosaic is much taller than one ortho row, so
+    (unlike the ortho case, which stacks every category into one figure)
+    each category gets its own page -- otherwise categories would overlap
+    into an illegible mess trying to share one page's worth of vertical
+    space."""
     from nilearn import plotting
 
     img = nib.load(impa) if isinstance(impa, (str, os.PathLike)) else impa
@@ -568,17 +595,21 @@ def _plot_categories_page(pdf, impa, title, regressor_categories, mosaic=False):
             cat_img = nib.Nifti1Image(vol, img.affine)
             label = regressor_categories[c] if c < len(regressor_categories) else f"class {c}"
             fig = plt.figure(figsize=(11, 6))
-            plotting.plot_stat_map(cat_img, display_mode="mosaic", figure=fig, title=f"{title}: {label}")
+            plotting.plot_stat_map(cat_img, display_mode="mosaic", figure=fig, title=f"{title}: {label}", draw_cross=False)
             pdf.savefig(fig)
             plt.close(fig)
         return
 
+    # omit bg_img entirely (nilearn's own MNI152 default) when mnispace, pass
+    # None (no background at all) otherwise -- see docstring above
+    bg_kwargs = {} if mnispace else {"bg_img": None}
     fig, axes = plt.subplots(n_cat, 1, figsize=(8.5, 3 * n_cat), squeeze=False)
     for c in range(n_cat):
         vol = data[..., c] if data.ndim == 4 else data
         cat_img = nib.Nifti1Image(vol, img.affine)
         label = regressor_categories[c] if c < len(regressor_categories) else f"class {c}"
-        plotting.plot_stat_map(cat_img, bg_img=None, display_mode="ortho", axes=axes[c][0], title=f"{title}: {label}")
+        plotting.plot_stat_map(cat_img, display_mode="ortho", axes=axes[c][0], title=f"{title}: {label}",
+                                draw_cross=False, **bg_kwargs)
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -637,12 +668,15 @@ def resolve_group_impa_mni(analysis_output_dir: str, desc: str, subjects: list) 
     return available, missing
 
 
-def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags, regressor_categories, output_dir):
-    # Native-space maps have no common voxel grid across subjects, so they're
-    # never averaged across subjects (only across folds, within one subject,
-    # where the grid is guaranteed shared) -- see resolve_group_impa_mni for the
-    # one exception: if the user has separately resampled model_impa into MNI
-    # space (shared grid), a real group average becomes possible.
+def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags, regressor_categories, output_dir,
+                             mnispace=False):
+    # model_impa's space isn't asserted/known (whatever the input BOLD/mask
+    # happened to be in), so subjects aren't guaranteed to share a common
+    # voxel grid -- per-subject maps are therefore never averaged across
+    # subjects (only across folds, within one subject, where the grid is
+    # guaranteed shared) -- see resolve_group_impa_mni for the one exception:
+    # if the user has separately resampled model_impa into MNI space (shared
+    # grid), a real group average becomes possible.
     #
     # model_impa means something different depending on which workflow produced it
     # (fold_flags[s] is exactly that signal, via has_fold_files -- see subject_paths):
@@ -683,24 +717,25 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
             return
 
         print("  (!) no subject has an MNI-registered importance map (model/{subject}_impa_mni.nii.gz) -- "
-              "falling back to per-subject native-space maps, which aren't spatially comparable across subjects. "
-              "Resample each subject's model_impa via `hcp_resample.py --direction native2mni` to enable a group map.")
+              "falling back to per-subject maps (space not asserted), which aren't guaranteed spatially "
+              "comparable across subjects. Resample each subject's model_impa via "
+              "`hcp_resample.py --direction native2mni` to enable a group map.")
         for s in subjects:
-            p = subject_paths(analysis_output_dir, desc, s)
+            p = subject_paths(analysis_output_dir, desc, s, mnispace=mnispace)
             if os.path.exists(p["model_impa"]):
                 label = "aggregated across folds" if fold_flags.get(s) else "full training set"
-                _plot_categories_page(pdf, p["model_impa"], f"{s} ({label})", regressor_categories)
+                _plot_categories_page(pdf, p["model_impa"], f"{s} ({label})", regressor_categories, mnispace=mnispace)
         return
 
     s = subjects[0]
-    p = subject_paths(analysis_output_dir, desc, s)
+    p = subject_paths(analysis_output_dir, desc, s, mnispace=mnispace)
     is_kfold = fold_flags.get(s)
     if os.path.exists(p["model_impa"]):
         label = "aggregated across folds" if is_kfold else "full training set"
-        _plot_categories_page(pdf, p["model_impa"], f"{s} ({label})", regressor_categories)
+        _plot_categories_page(pdf, p["model_impa"], f"{s} ({label})", regressor_categories, mnispace=mnispace)
 
     if is_kfold:
-        folds = fold_paths(analysis_output_dir, desc, s)
+        folds = fold_paths(analysis_output_dir, desc, s, mnispace=mnispace)
         fold_files = {fid: f["model_impa"] for fid, f in folds.items() if os.path.exists(f["model_impa"])}
         if fold_files and os.path.exists(p["model_impa"]):
             _render_fold_mosaic(pdf, fold_files, p["model_impa"], regressor_categories)
@@ -718,6 +753,7 @@ def main():
     fold_flags = {s: has_fold_files(args.analysis_output_dir, desc, s) for s in subjects}
     regressor_categories = infer_categories(args.analysis_output_dir, desc, subjects)
     window, tr, median_duration, overlay_conditions = load_annotation_info(args.config, args.master_spreadsheet)
+    mnispace = resolve_mnispace(args.config)
 
     if args.output:
         output_path = args.output
@@ -735,7 +771,7 @@ def main():
         render_timecourse_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, window, tr, median_duration,
                                  overlay_conditions)
         render_importance_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, regressor_categories,
-                                 os.path.dirname(output_path))
+                                 os.path.dirname(output_path), mnispace=mnispace)
 
     print(f"Report written to: {output_path}")
 

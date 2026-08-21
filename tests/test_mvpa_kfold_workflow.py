@@ -188,6 +188,7 @@ class TestRunKfold:
             kfold_cv_cfg={"strategy": "per_run"},
             permutation_test_cfg=None,
             masker=FakeMasker(),
+            impa_filename_tag="impa",
             analysis_output_dir=str(tmp_path), model_descr="test_model", subject_id="01",
             regressor_categories=["face", "place"],
             feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,
@@ -206,7 +207,7 @@ class TestRunKfold:
         # per-fold outputs exist for every fold
         for fold_id in (1, 2, 3):
             assert (base / "model" / f"01_fold{fold_id}_model_results_total_scores.csv").exists()
-            assert (base / "model" / f"01_fold{fold_id}_impa_native.nii.gz").exists()
+            assert (base / "model" / f"01_fold{fold_id}_impa.nii.gz").exists()
             assert (base / "decoding" / f"01_fold{fold_id}_decoding_results.csv").exists()
             assert (base / "decoding" / f"01_fold{fold_id}_summary_decoding_results.csv").exists()
 
@@ -227,6 +228,7 @@ class TestRunKfold:
             kfold_cv_cfg={"strategy": "per_run"},
             permutation_test_cfg=None,
             masker=FakeMasker(),
+            impa_filename_tag="impa",
             analysis_output_dir=str(tmp_path), model_descr="test_model", subject_id="01",
             regressor_categories=["face", "place"],
             feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,
@@ -240,7 +242,7 @@ class TestRunKfold:
         # model output still produced normally for every fold
         for fold_id in (1, 2, 3):
             assert (base / "model" / f"01_fold{fold_id}_model_results_total_scores.csv").exists()
-            assert (base / "model" / f"01_fold{fold_id}_impa_native.nii.gz").exists()
+            assert (base / "model" / f"01_fold{fold_id}_impa.nii.gz").exists()
 
         # no decoding/ directory at all -- nothing was ever written to it
         assert not (base / "decoding").exists()
@@ -261,6 +263,7 @@ class TestRunKfold:
             kfold_cv_cfg={"strategy": "per_run"},
             permutation_test_cfg={"n_permutations": 3, "random_state": 0},
             masker=FakeMasker(),
+            impa_filename_tag="impa",
             analysis_output_dir=str(tmp_path), model_descr="test_model", subject_id="01",
             regressor_categories=["face", "place"],
             feature_selection_cfg={"feat_p": 0.5}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,

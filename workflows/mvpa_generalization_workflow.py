@@ -27,9 +27,14 @@ this one via mvpa_common.py.
 Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     <subject>_trial_pivot.csv           -- sanity check, pre-model_conditions
     cv/<subject>_cv_results_{metric}.csv        -- internal training-CV metrics
-    cv/<subject>_cv_impa_native.nii.gz          -- CV-fold-averaged importance map
+    cv/<subject>_cv_impa[_mni].nii.gz    -- CV-fold-averaged importance map
     model/<subject>_model_results_{metric}.csv  -- held-out test metrics
-    model/<subject>_impa_native.nii.gz          -- final importance map
+    model/<subject>_impa[_mni].nii.gz    -- final importance map. Filename tag depends
+                                             on model.mnispace (default false): "_impa_mni"
+                                             when the input BOLD/mask are configured as
+                                             already being in MNI space, plain "_impa"
+                                             otherwise (space left unasserted, since it
+                                             isn't reliably knowable from the file itself).
     decoding/<subject>_decoding_results.csv         -- raw, one row per decoded TR (*)
     decoding/<subject>_summary_decoding_results.csv -- averaged per (window_index, regressor_label) (*)
 
@@ -58,7 +63,7 @@ from utils.mvpa_common import (
     track_runtime, load_config, apply_regressor_codes, balance,
     load_images_and_mask, build_timecourse_instructions,
     model_classification, model_performance, permutation_significance,
-    timecourse_decoding, save_model_results, average_fold_results,
+    timecourse_decoding, save_model_results, average_fold_results, impa_tag,
 )
 
 
@@ -216,6 +221,7 @@ def main(args):
     model_cfg = full_cfg["model"]
     model_descr = quick_safe(model_cfg["desc"])
     mask_pattern_template = model_cfg.get("mask", {}).get("mask_pattern")
+    impa_filename_tag = impa_tag(model_cfg.get("mnispace", False))
     feature_selection_cfg = model_cfg["featureSelection"]
     classifier_name = model_cfg["classifier"]["name"]
     classifier_params = model_cfg["classifier"]["params"]
@@ -375,12 +381,12 @@ def main(args):
     # importance map averaged across the internal training-CV folds above --
     # a within-training generalization diagnostic
     img1 = masker.inverse_transform(mean_kfold_importance_map)
-    output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "cv", f"{subject_id}" + "_cv_impa_native.nii.gz")
+    output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "cv", f"{subject_id}_cv_{impa_filename_tag}.nii.gz")
     img1.to_filename(output_file)
 
     # final model importance map
     img = masker.inverse_transform(importance_map)
-    output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}" + "_impa_native.nii.gz")
+    output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}_{impa_filename_tag}.nii.gz")
     img.to_filename(output_file)
 
     # -------------------------------------------------

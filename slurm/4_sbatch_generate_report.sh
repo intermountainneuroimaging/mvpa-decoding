@@ -13,7 +13,8 @@
 # Single (non-array) job: stage 4, the final stage of 0_submit_mvpa_pipeline.sh
 # -- first resamples every subject's aggregated importance map into MNI space
 # (native2mni via hcp_resample.py), so the group report can average them onto
-# one shared grid instead of showing one native-space page per subject (see
+# one shared grid instead of showing one per-subject page each (space not
+# asserted) (see
 # README.md section 7, "Importance maps are averaged across subjects only
 # when they share a common grid"), then builds one group PDF report
 # (report_<desc>.pdf) aggregating every subject the preceding
@@ -44,9 +45,10 @@ source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
 
 # --------------------------------------------
 # resample each subject's aggregated importance map into MNI space
-# (native2mni), writing <subject>_impa_mni.nii.gz alongside the native one --
+# (native2mni), writing <subject>_impa_mni.nii.gz alongside the original --
 # generate_report.py detects that suffix and averages across subjects into
-# one group-mean page instead of one native-space page per subject. Loops
+# one group-mean page instead of one per-subject page each (space not
+# asserted). Loops
 # over every subject directory found under $OUTPUT_DIR (any desc), rather
 # than hardcoding this pipeline's own desc, so it never drifts out of sync
 # with model.desc in the config. MNI_TEMPLATE is used as the --reference grid
@@ -64,8 +66,8 @@ source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
 # --------------------------------------------
 for subject_dir in "$OUTPUT_DIR"/*/*/; do
     subject=$(basename "$subject_dir")
-    impa_native="${subject_dir}model/${subject}_impa_native.nii.gz"
-    [ -f "$impa_native" ] || continue
+    impa="${subject_dir}model/${subject}_impa.nii.gz"
+    [ -f "$impa" ] || continue
 
     session_dir=$(find "$HCPPIPE_ROOT/sub-$subject" -maxdepth 1 -type d -name "ses-*" 2>/dev/null | sort | head -n 1)
     if [ -z "$session_dir" ]; then
@@ -75,9 +77,9 @@ for subject_dir in "$OUTPUT_DIR"/*/*/; do
     session=$(basename "$session_dir" | cut -d"-" -f2)
     impa_mni="${subject_dir}model/${subject}_impa_mni.nii.gz"
 
-    echo "  sub-$subject (ses-$session): $impa_native -> $impa_mni"
+    echo "  sub-$subject (ses-$session): $impa -> $impa_mni"
     python "$SCRIPTS_DIR/utils/hcp_resample.py" \
-        --input "$impa_native" \
+        --input "$impa" \
         --output "$impa_mni" \
         --direction native2mni \
         --subject "$subject" --session "$session" \

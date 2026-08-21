@@ -349,6 +349,20 @@ def default_model_config() -> dict:
     }
 
 
+def impa_tag(mnispace: bool) -> str:
+    """The importance-map filename token shared by both workflow scripts and
+    generate_report.py: "impa_mni" when model.mnispace confirms the input
+    BOLD/mask are already in MNI space, "impa" otherwise (space left
+    unasserted in the filename, since it isn't reliably knowable from the
+    file itself). A subject whose workflow ran with mnispace=true therefore
+    writes directly into the same {subject}_impa_mni.nii.gz filename that
+    hcp_resample.py --direction native2mni would otherwise produce -- so
+    generate_report.py's cross-subject group averaging (which keys off that
+    exact filename, see resolve_group_impa_mni) works without any separate
+    resampling step."""
+    return "impa_mni" if mnispace else "impa"
+
+
 def merge_with_defaults(user_cfg, base):
     def recursive_update(d, u):
         for k, v in u.items():

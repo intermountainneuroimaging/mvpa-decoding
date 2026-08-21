@@ -445,6 +445,7 @@ about *which rows* to use (that's `model_conditions`'s job):
   "mask": {
     "mask_pattern": "tutorial/haxby-data/derivatives/sub-{subject}/masks/native_epi_mask.nii.gz"
   },
+  "mnispace": false,
   "featureSelection": {
     "model": "ANOVA",
     "feat_p": 0.05
@@ -466,6 +467,7 @@ about *which rows* to use (that's `model_conditions`'s job):
 |---|---|
 | `desc` | Short name for this classifier variant; sanitized into the output folder name. |
 | `mask.mask_pattern` | *(optional)* The full path to the mask NIfTI -- absolute, or relative to wherever the workflow script is run from (same convention `bids_root`/`derivatives_root` use); never resolved against either of those or any other root. Include `{subject}`/`{session}` placeholders (filled in from whichever row is being loaded) for one native-space mask per subject, as in the example above -- or omit them entirely for a single shared mask used for every subject, e.g. one MNI-space group mask (a template with no placeholders just formats to itself, so every subject resolves to the same literal path). Can still contain glob wildcards either way -- resolved the same way as bold-file lookups. Omit `mask` (or `mask_pattern`) entirely and every voxel is used instead -- a warning is printed, since a real analysis almost always wants a real mask (huge feature count otherwise, including background/non-brain voxels). A *configured* `mask_pattern` that matches no file is still a hard error, not a fallback -- only leaving it unset falls back. |
+| `mnispace` | *(optional, default `false`)* Set `true` when the BOLD/mask this subject's model is fit on are already registered to MNI space -- there's no way to detect this automatically from the file itself, so it's an explicit claim you make. Controls two things at once (see [section 7](#7-generate_reportpy)): the importance-map filename (`{subject}_impa_mni.nii.gz` instead of plain `{subject}_impa.nii.gz`), and whether `generate_report.py` plots it against nilearn's bundled MNI152 template as anatomical background. Setting this `true` also means every subject's importance map already carries the exact filename `generate_report.py`'s cross-subject group averaging looks for -- no separate `hcp_resample.py --direction native2mni` step needed. Leave `false` (or omit) for native-space or otherwise-unregistered data. |
 | `featureSelection.feat_p` | ANOVA p-value threshold -- voxels with `p < feat_p` are kept, widened automatically until at least 5 voxels are selected. Ignored when `n_voxels` is set. |
 | `featureSelection.n_voxels` | *(optional)* Select exactly this many voxels by ANOVA F-score instead, regardless of significance (sklearn's `SelectKBest` equivalent) -- takes priority over `feat_p` when both are present. Useful for keeping feature count fixed across subjects/folds whose signal strength (and thus a p-value threshold's actual voxel count) varies. `model_results_auc.csv`-adjacent output files still record whichever mode was actually used: `threshold_p` is `NaN` in this mode, since there's no threshold, but `selected_voxels` (identical to `n_voxels` here) is populated either way. |
 | `classifier` | Any importable scikit-learn-style estimator: `name` is a dotted import path, `params` are passed straight through as kwargs. |
@@ -744,7 +746,7 @@ to know which workflow produced a given subject's results):
 | Per-fold | Aggregated |
 |---|---|
 | `model/{subject}_fold{N}_model_results_{metric}.csv` | `model/{subject}_model_results_{metric}.csv` |
-| `model/{subject}_fold{N}_impa_native.nii.gz` | `model/{subject}_impa_native.nii.gz` |
+| `model/{subject}_fold{N}_impa.nii.gz` | `model/{subject}_impa.nii.gz` |
 | `model/{subject}_fold{N}_permutation_test.csv` *(optional)* | -- (not combined across folds) |
 | `decoding/{subject}_fold{N}_decoding_results.csv` *(only if `timecourse_decoding` configured)* | `decoding/{subject}_decoding_results.csv` *(same)* |
 | `decoding/{subject}_fold{N}_summary_decoding_results.csv` *(same)* | `decoding/{subject}_summary_decoding_results.csv` *(same)* |
@@ -808,33 +810,46 @@ per-subject/per-fold bar chart instead, since there's only one point per
 metric.
 
 **Importance maps are averaged across subjects only when they share a
-common grid.** `model_impa` (`model/{subject}_impa_native.nii.gz`) is
-always native-space and per-subject -- there's no common voxel grid to
-average onto directly, unlike a normalized-space group analysis, so by
-default the group report shows one native-space page per subject instead
-(only within-subject fold-to-fold averaging, same subject same grid,
-happens automatically). If you resample each subject's `model_impa` into a
-shared MNI grid -- via `hcp_resample.py --direction native2mni` (section 8)
--- and save the result as `model/{subject}_impa_mni.nii.gz` right alongside
-it, `generate_report.py` detects that suffix and plots a single group-mean
-page in MNI space instead of per-subject native pages. Subjects missing
+common grid.** `model_impa` is whatever space the input BOLD/mask happened
+to be in -- native, MNI, or otherwise -- and by default that space isn't
+asserted in the filename (`model/{subject}_impa.nii.gz`), since it isn't
+reliably knowable from the file itself. There's no guarantee subjects share
+a common voxel grid in that case, unlike a normalized-space group analysis,
+so the group report shows one per-subject page instead (only within-subject
+fold-to-fold averaging, same subject same grid, happens automatically). A
+subject's per-subject page is plotted against nilearn's bundled MNI152
+template as anatomical background exactly when the config asserts MNI
+space (see below) -- otherwise it's shown background-free, since overlaying
+a template the map isn't actually registered to would be misleading, not
+just decorative.
+
+Two ways to get a group-mean page in MNI space instead. If your data is
+already in MNI space, set `model.mnispace: true` (section 5) -- the
+workflow scripts then write the importance map directly as
+`model/{subject}_impa_mni.nii.gz`, and `generate_report.py` reads that same
+`model.mnispace` setting from `--config` to know to look for it, no
+resampling step required. Otherwise, resample each subject's native-space
+`model_impa` into a shared MNI grid after the fact -- via `hcp_resample.py
+--direction native2mni` (section 8) -- and save the result as
+`model/{subject}_impa_mni.nii.gz` right alongside it. Either way,
+`generate_report.py` detects that exact filename and plots a single
+group-mean page in MNI space instead of per-subject pages. Subjects missing
 `_impa_mni.nii.gz`, or whose map doesn't match the other subjects' grid
 shape, are excluded from the average with a printed warning rather than
 failing the whole report; the group page's title records how many subjects
 went into the average. The averaged map is also saved as its own NIfTI file
 (`{desc}_group_mean_impa_mni.nii.gz`) right alongside the PDF -- the plotted
 page is a quick look, the file is the actual data for loading elsewhere
-(a group-level stats tool, a different viewer, a different threshold).
-It's plotted with nilearn's "mosaic" display (many tiled slices across all
-three planes, with nilearn's own bundled MNI152 template as an anatomical
-background) rather than the compact 3-slice "ortho" view used for
-native-space maps -- ortho has no shared template to plot against, so it
-stays background-free there. One page per category, since a mosaic needs
-much more room than ortho's single row. `slurm/4_sbatch_generate_report.sh`
-(section 9) runs this resampling automatically for every subject before
-generating the report -- manual `hcp_resample.py` calls are only needed if
-you're generating a
-report outside that pipeline.
+(a group-level stats tool, a different viewer, a different threshold). It's
+plotted with nilearn's "mosaic" display (many tiled slices across all three
+planes) rather than the compact 3-slice "ortho" view used for per-subject
+pages -- one page per category, since a mosaic needs much more room than
+ortho's single row. `slurm/4_sbatch_generate_report.sh` (section 9) runs
+the `hcp_resample.py` resampling automatically for every subject before
+generating the report (skipped entirely for subjects whose `model_impa` is
+already named `_impa_mni.nii.gz`, i.e. ran with `mnispace: true`) -- manual
+`hcp_resample.py` calls are only needed if you're generating a report
+outside that pipeline.
 
 The timecourse page always reads the raw per-TR `decoding_results.csv`, not
 `summary_decoding_results.csv` -- the summary only ever kept each group's

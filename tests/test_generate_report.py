@@ -20,6 +20,7 @@ from workflows.generate_report import (
     load_annotation_info,
     resolve_desc,
     resolve_group_impa_mni,
+    resolve_mnispace,
 )
 
 
@@ -69,8 +70,16 @@ class TestSubjectPaths:
         assert paths["cv_total"] == "/out/desc1/01/cv/01_cv_results_total_scores.csv"
         assert paths["decoding"] == "/out/desc1/01/decoding/01_summary_decoding_results.csv"
         assert paths["decoding_raw"] == "/out/desc1/01/decoding/01_decoding_results.csv"
-        assert paths["model_impa"] == "/out/desc1/01/model/01_impa_native.nii.gz"
+        assert paths["model_impa"] == "/out/desc1/01/model/01_impa.nii.gz"
         assert paths["model_impa_mni"] == "/out/desc1/01/model/01_impa_mni.nii.gz"
+
+    def test_mnispace_true_points_model_impa_at_the_mni_filename(self):
+        paths = subject_paths("/out", "desc1", "01", mnispace=True)
+        assert paths["model_impa"] == "/out/desc1/01/model/01_impa_mni.nii.gz"
+        # coincides with model_impa_mni -- the workflow wrote the MNI-confirmed
+        # file directly, so no separate hcp_resample.py step is needed for
+        # cross-subject group averaging to kick in
+        assert paths["model_impa"] == paths["model_impa_mni"]
 
 
 # =====================================================
@@ -92,8 +101,15 @@ class TestFoldFiles:
         folds = fold_paths(str(tmp_path), "desc1", "01")
         assert sorted(folds.keys()) == [1, 2]
         assert folds[1]["model_total"] == str(base / "model" / "01_fold1_model_results_total_scores.csv")
+        assert folds[1]["model_impa"] == str(base / "model" / "01_fold1_impa.nii.gz")
         assert folds[2]["decoding"] == str(base / "decoding" / "01_fold2_summary_decoding_results.csv")
         assert folds[2]["decoding_raw"] == str(base / "decoding" / "01_fold2_decoding_results.csv")
+
+    def test_fold_paths_mnispace_true_uses_mni_filename(self, tmp_path):
+        base = _make_subject(tmp_path, "desc1", "01")
+        (base / "model" / "01_fold1_model_results_total_scores.csv").write_text("0.5")
+        folds = fold_paths(str(tmp_path), "desc1", "01", mnispace=True)
+        assert folds[1]["model_impa"] == str(base / "model" / "01_fold1_impa_mni.nii.gz")
 
 
 # =====================================================
@@ -322,3 +338,35 @@ class TestResolveDesc:
         config_path.write_text(json.dumps({"model": {}}))
         with pytest.raises(SystemExit):
             resolve_desc(None, str(config_path))
+
+
+# =====================================================
+# resolve_mnispace
+# =====================================================
+
+class TestResolveMnispace:
+    def test_true_when_configured(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({"model": {"mnispace": True}}))
+        assert resolve_mnispace(str(config_path)) is True
+
+    def test_false_when_configured_false(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({"model": {"mnispace": False}}))
+        assert resolve_mnispace(str(config_path)) is False
+
+    def test_false_when_key_absent(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({"model": {}}))
+        assert resolve_mnispace(str(config_path)) is False
+
+    def test_false_when_no_config_given(self):
+        assert resolve_mnispace(None) is False
+
+    def test_false_when_config_missing_on_disk(self, tmp_path):
+        assert resolve_mnispace(str(tmp_path / "nope.json")) is False
+
+    def test_false_when_config_is_bad_json(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text("{not valid json")
+        assert resolve_mnispace(str(config_path)) is False

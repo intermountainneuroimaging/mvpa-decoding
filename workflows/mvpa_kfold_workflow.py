@@ -20,12 +20,17 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     <subject>_trial_pivot.csv                        -- sanity check, pre-model_conditions
     model/<subject>_kfold_folds.json                  -- {fold_id: [held-out run ids]}
     model/<subject>_fold{N}_model_results_{metric}.csv    -- per-fold held-out test metrics
-    model/<subject>_fold{N}_impa_native.nii.gz            -- per-fold importance map
+    model/<subject>_fold{N}_impa[_mni].nii.gz      -- per-fold importance map
     model/<subject>_fold{N}_permutation_test.csv          -- per-fold significance (optional)
     decoding/<subject>_fold{N}_decoding_results.csv       -- per-fold raw decoding (*)
     decoding/<subject>_fold{N}_summary_decoding_results.csv (*)
     model/<subject>_model_results_{metric}.csv        -- aggregated (averaged across folds)
-    model/<subject>_impa_native.nii.gz                -- aggregated importance map
+    model/<subject>_impa[_mni].nii.gz          -- aggregated importance map. Filename tag
+                                                    depends on model.mnispace (default
+                                                    false): "_impa_mni" when the input
+                                                    BOLD/mask are configured as already
+                                                    being in MNI space, plain "_impa"
+                                                    otherwise (space left unasserted)
     decoding/<subject>_decoding_results.csv               -- aggregated raw (pooled across folds) (*)
     decoding/<subject>_summary_decoding_results.csv       -- aggregated summary (*)
 
@@ -58,7 +63,7 @@ from utils.mvpa_common import (
     track_runtime, load_config, apply_regressor_codes,
     load_images_and_mask, build_timecourse_instructions,
     model_classification, model_performance, permutation_significance,
-    timecourse_decoding, summarize_decoding, save_model_results, average_fold_results,
+    timecourse_decoding, summarize_decoding, save_model_results, average_fold_results, impa_tag,
 )
 
 KFOLD_STRATEGIES = ("per_run", "group_kfold", "explicit_groups")
@@ -183,7 +188,7 @@ def resolve_kfold_folds(kfold_cv_cfg: dict, testing_df: pd.DataFrame, timecourse
 # Per-fold execution + aggregation
 # =====================================================
 
-def run_kfold(kfold_cv_cfg, permutation_test_cfg, masker,
+def run_kfold(kfold_cv_cfg, permutation_test_cfg, masker, impa_filename_tag,
               analysis_output_dir, model_descr, subject_id, regressor_categories,
               feature_selection_cfg, classifier_name, classifier_params,
               training_df, training_data, training_labels,
@@ -244,7 +249,7 @@ def run_kfold(kfold_cv_cfg, permutation_test_cfg, masker,
 
             fold_impa_file = os.path.join(
                 analysis_output_dir, model_descr, subject_id, "model",
-                f"{subject_id}_fold{fold_id}_impa_native.nii.gz"
+                f"{subject_id}_fold{fold_id}_{impa_filename_tag}.nii.gz"
             )
             masker.inverse_transform(impa).to_filename(fold_impa_file)
 
@@ -351,6 +356,7 @@ def main(args):
     model_cfg = full_cfg["model"]
     model_descr = quick_safe(model_cfg["desc"])
     mask_pattern_template = model_cfg.get("mask", {}).get("mask_pattern")
+    impa_filename_tag = impa_tag(model_cfg.get("mnispace", False))
     feature_selection_cfg = model_cfg["featureSelection"]
     classifier_name = model_cfg["classifier"]["name"]
     classifier_params = model_cfg["classifier"]["params"]
@@ -421,7 +427,7 @@ def main(args):
 
     print("Training + testing + decoding via model.kfold_cv...")
     aggregated_impa, xout, raw_decoding, summary_decoding = run_kfold(
-        kfold_cv_cfg, permutation_test_cfg, masker,
+        kfold_cv_cfg, permutation_test_cfg, masker, impa_filename_tag,
         analysis_output_dir, model_descr, subject_id, regressor_categories,
         feature_selection_cfg, classifier_name, classifier_params,
         training_df, training_data, training_labels,
@@ -439,7 +445,7 @@ def main(args):
     save_model_results(output_pattern, xout, regressor_categories)
 
     img = masker.inverse_transform(aggregated_impa)
-    output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}" + "_impa_native.nii.gz")
+    output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}_{impa_filename_tag}.nii.gz")
     img.to_filename(output_file)
 
     if not raw_decoding.empty:

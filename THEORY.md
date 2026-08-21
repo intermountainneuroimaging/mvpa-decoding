@@ -80,7 +80,7 @@ time series.
 | Output | Paper analog |
 |---|---|
 | `cv/*_cv_results_accuracy.csv`, `*_auc.csv` | Classifier confusion matrices / AUC per operation (Fig. 2a, 3a) -- "can this be reliably decoded at all" |
-| `*_impa_native.nii.gz` (importance maps) | Positive/negative classifier importance maps (Fig. 2b) -- which voxels/regions drive the classification |
+| `*_impa.nii.gz` (importance maps) | Positive/negative classifier importance maps (Fig. 2b) -- which voxels/regions drive the classification |
 | `decoding/*_summary_decoding_results.csv` | Trial-averaged decoding time series (Fig. 4a/4b) -- how classifier evidence for the removed item evolves over time under each operation. (`*_decoding_results.csv` is the raw, per-TR data this is averaged from.) |
 | `<subject>_trial_pivot.csv` | Sanity check only -- no analog in the paper |
 

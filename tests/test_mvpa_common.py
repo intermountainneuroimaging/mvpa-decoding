@@ -34,6 +34,7 @@ from utils.mvpa_common import (
     summarize_decoding,
     permutation_significance,
     load_images_and_mask,
+    impa_tag,
 )
 
 CLASSIFIER_NAME = "sklearn.linear_model.LogisticRegression"
@@ -54,6 +55,18 @@ def _separable_data(n_per_class=15, n_features=10, n_classes=2, seed=0):
     X = np.vstack(X_parts)
     y = np.concatenate(y_parts)
     return X, y
+
+
+# =====================================================
+# impa_tag
+# =====================================================
+
+class TestImpaTag:
+    def test_false_gives_plain_impa(self):
+        assert impa_tag(False) == "impa"
+
+    def test_true_gives_mni_suffixed_impa(self):
+        assert impa_tag(True) == "impa_mni"
 
 
 # =====================================================
