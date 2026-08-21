@@ -297,7 +297,16 @@ def render_title_page(pdf, desc, subjects, config_path, output_path):
     plt.close(fig)
 
 
-def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flags):
+def _draw_chance_line(ax, level):
+    """Dashed reference line + label, shared by the accuracy and AUC panels below --
+    the two have different chance levels (1/n_categories vs. always 0.5, see
+    render_accuracy_auc_page) but the same visual treatment."""
+    ax.axhline(level, linestyle="--", color="gray", linewidth=1)
+    ax.text(0.98, level, "chance level", transform=ax.get_yaxis_transform(),
+            ha="right", va="bottom", fontsize=7, color="gray")
+
+
+def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flags, regressor_categories):
     cv_totals, model_totals, auc_by_subject = {}, {}, {}
     for s in subjects:
         p = subject_paths(analysis_output_dir, desc, s)
@@ -370,6 +379,8 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
         ax.set_title("Accuracy: internal CV" if is_kfold else "Accuracy: internal CV vs. held-out test")
 
     ax.set_ylabel("Accuracy")
+    if regressor_categories:
+        _draw_chance_line(ax, 1.0 / len(regressor_categories))
 
     # --- right: per-class AUC ---
     ax = axes[1]
@@ -388,7 +399,7 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
                         ax.scatter(categories, fold_auc.values, color="black", s=15, zorder=3)
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
         ax.set_ylabel("AUC")
-        ax.axhline(0.5, linestyle="--", color="gray", linewidth=1)
+        _draw_chance_line(ax, 0.5)
     ax.set_title("Per-class AUC" + (" across subjects" if len(subjects) > 1 else ""))
 
     fig.suptitle(f"{desc}: accuracy & AUC", fontsize=14, fontweight="bold")
@@ -788,7 +799,7 @@ def main():
     print(f"Report scope: {len(subjects)} subject(s): {subjects}")
     with PdfPages(output_path) as pdf:
         render_title_page(pdf, desc, subjects, args.config, output_path)
-        render_accuracy_auc_page(pdf, args.analysis_output_dir, desc, subjects, fold_flags)
+        render_accuracy_auc_page(pdf, args.analysis_output_dir, desc, subjects, fold_flags, regressor_categories)
         render_confusion_matrices_page(pdf, args.analysis_output_dir, desc, subjects)
         render_timecourse_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, window, tr, median_duration,
                                  overlay_conditions)
