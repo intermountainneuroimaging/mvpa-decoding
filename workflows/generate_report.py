@@ -614,8 +614,21 @@ def _plot_categories_page(pdf, impa, title, regressor_categories, mosaic=False, 
     plt.close(fig)
 
 
-def _render_fold_mosaic(pdf, fold_files: dict, mean_file: str, regressor_categories):
-    mean_data = nib.load(mean_file).get_fdata()
+def _render_fold_mosaic(pdf, fold_files: dict, mean_file: str, regressor_categories, mnispace=False):
+    """One row per category, one column per fold plus a trailing "mean" column --
+    same mid-axial slice (by world-space z coordinate, not just a matching array
+    index, so it's the same anatomical location even if a fold's array happens to
+    differ in shape) across every panel for direct visual comparison. Uses
+    nilearn's plot_stat_map (single z-cut) rather than a raw imshow so it gets the
+    same MNI152 background as the ortho/mosaic pages above when mnispace confirms
+    the map is actually in MNI space -- see _plot_categories_page's docstring for
+    why that's conditional rather than always-on."""
+    from nilearn import plotting
+
+    bg_kwargs = {} if mnispace else {"bg_img": None}
+
+    mean_img = nib.load(mean_file)
+    mean_data = mean_img.get_fdata()
     n_cat = mean_data.shape[3] if mean_data.ndim == 4 else 1
     fold_ids = sorted(fold_files.keys())
     n_cols = len(fold_ids) + 1
@@ -624,23 +637,24 @@ def _render_fold_mosaic(pdf, fold_files: dict, mean_file: str, regressor_categor
     for c in range(n_cat):
         mean_vol = mean_data[..., c] if mean_data.ndim == 4 else mean_data
         vmax = float(np.nanmax(np.abs(mean_vol))) or 1.0
+        mid_z_index = mean_vol.shape[2] // 2
+        z_mm = (mean_img.affine @ np.array([0, 0, mid_z_index, 1]))[2]
 
         for col, fid in enumerate(fold_ids):
-            fold_vol_full = nib.load(fold_files[fid]).get_fdata()
+            fold_img = nib.load(fold_files[fid])
+            fold_vol_full = fold_img.get_fdata()
             vol = fold_vol_full[..., c] if fold_vol_full.ndim == 4 else fold_vol_full
-            mid_z = vol.shape[2] // 2
+            cat_img = nib.Nifti1Image(vol, fold_img.affine)
             ax = axes[c][col]
-            ax.imshow(np.rot90(vol[:, :, mid_z]), cmap="RdBu_r", vmin=-vmax, vmax=vmax)
-            ax.set_xticks([])
-            ax.set_yticks([])
+            plotting.plot_stat_map(cat_img, display_mode="z", cut_coords=[z_mm], axes=ax, vmax=vmax,
+                                    colorbar=False, draw_cross=False, annotate=False, **bg_kwargs)
             if c == 0:
                 ax.set_title(f"fold {fid}", fontsize=9)
 
-        mid_z = mean_vol.shape[2] // 2
+        mean_cat_img = nib.Nifti1Image(mean_vol, mean_img.affine)
         ax = axes[c][-1]
-        ax.imshow(np.rot90(mean_vol[:, :, mid_z]), cmap="RdBu_r", vmin=-vmax, vmax=vmax)
-        ax.set_xticks([])
-        ax.set_yticks([])
+        plotting.plot_stat_map(mean_cat_img, display_mode="z", cut_coords=[z_mm], axes=ax, vmax=vmax,
+                                colorbar=False, draw_cross=False, annotate=False, **bg_kwargs)
         if c == 0:
             ax.set_title("mean", fontsize=9)
 
@@ -738,7 +752,7 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
         folds = fold_paths(analysis_output_dir, desc, s, mnispace=mnispace)
         fold_files = {fid: f["model_impa"] for fid, f in folds.items() if os.path.exists(f["model_impa"])}
         if fold_files and os.path.exists(p["model_impa"]):
-            _render_fold_mosaic(pdf, fold_files, p["model_impa"], regressor_categories)
+            _render_fold_mosaic(pdf, fold_files, p["model_impa"], regressor_categories, mnispace=mnispace)
 
 
 # =====================================================
