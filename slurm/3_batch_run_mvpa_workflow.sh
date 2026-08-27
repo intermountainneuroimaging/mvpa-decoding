@@ -87,4 +87,5 @@ subject=`ls -d $BIDS_HCP_ROOT/sub-* | rev | cut -d"/" -f1 | rev | cut -d"-" -f2 
 python "$SCRIPTS_DIR/workflows/mvpa_workflow.py" --subject $subject --config $CONFIG_FILE \
     --master-spreadsheet $MASTER_SPREADSHEET --analysis-output-dir $OUTPUT_DIR
 
-python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR --config $CONFIG_FILE --subject $subject
+python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR --config $CONFIG_FILE \
+    --master-spreadsheet $MASTER_SPREADSHEET --subject $subject
