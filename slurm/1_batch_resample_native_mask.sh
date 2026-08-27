@@ -25,10 +25,13 @@
 #
 # Stage 1 of 0_submit_mvpa_pipeline.sh (mask resample -> master spreadsheet ->
 # k-fold classifier -> group report). Can also be run standalone -- submit
-# from the repo root (`sbatch slurm/1_batch_resample_native_mask.sh`) so
-# slurm/pipeline_vars.sh's SCRIPTS_DIR fallback and the --output/--error log
-# paths above (plain SBATCH directives, not variable-substituted) both
-# resolve correctly -- or export SCRIPTS_DIR and pass --chdir yourself.
+# from the repo root (`sbatch slurm/1_batch_resample_native_mask.sh
+# configs/my-study.json`) so slurm/pipeline_vars.sh's SCRIPTS_DIR fallback
+# and the --output/--error log paths above (plain SBATCH directives, not
+# variable-substituted) both resolve correctly -- or export SCRIPTS_DIR and
+# pass --chdir yourself. The config path is a required argument (`$1`) --
+# see pipeline_vars.sh for the "pipeline" section it reads every other path
+# from.
 
 umask g+w
 
@@ -37,6 +40,17 @@ module load fsl/6.0.7
 
 module load anaconda
 conda activate incenv
+
+CONFIG_FILE="$1"
+if [ -z "$CONFIG_FILE" ]; then
+    echo "Usage: sbatch $(basename "$0") <config.json>" >&2
+    exit 1
+fi
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Config file not found: $CONFIG_FILE" >&2
+    exit 1
+fi
+export CONFIG_FILE
 
 source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
 

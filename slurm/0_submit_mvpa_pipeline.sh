@@ -14,14 +14,19 @@
 # `afterok` on an array job id waits for every task in that array, not just
 # the first.
 #
-# Study-specific variables (dataset paths, config filename, output dirs) are
-# centralized in slurm/pipeline_vars.sh, sourced by each stage script --
-# that's the one file to edit, not each of 1_-4_ individually. It's built
-# around SCRIPTS_DIR, the repo root -- this script resolves its own real
-# location (reliable here because it's invoked directly via `bash`, never
-# through sbatch, which would otherwise obscure the original file path) and
-# exports SCRIPTS_DIR before submitting each job, so 1_-4_ locate
-# workflows/, utils/, configs/, etc. explicitly through it rather than
+# The only required input is a single config JSON -- event_extraction/
+# model_conditions/model as usual, plus a "pipeline" section (dataset paths,
+# output dirs, MNI template) that every stage script reads via
+# slurm/pipeline_vars.sh instead of a separately-hand-edited bash file. This
+# script requires that config path as its own argument and forwards it,
+# unchanged, to every stage it submits -- so all four jobs agree on it by
+# construction, not by four people remembering to edit the same file.
+#
+# It's built around SCRIPTS_DIR, the repo root -- this script resolves its
+# own real location (reliable here because it's invoked directly via
+# `bash`, never through sbatch, which would otherwise obscure the original
+# file path) and exports SCRIPTS_DIR before submitting each job, so 1_-4_
+# locate workflows/, utils/, etc. explicitly through it rather than
 # depending on the job's working directory.
 #
 # Each stage script can also be run standalone (e.g. to rerun just one stage
@@ -30,19 +35,30 @@
 #
 # Run from any directory:
 #
-#   bash /any/path/to/slurm/0_submit_mvpa_pipeline.sh
+#   bash /any/path/to/slurm/0_submit_mvpa_pipeline.sh configs/my-study.json
 #
 # Standalone submission of an individual stage script doesn't inherit
 # SCRIPTS_DIR this way -- slurm/pipeline_vars.sh falls back to the job's own
 # working directory, so submit from the repo root (`sbatch
-# slurm/1_batch_resample_native_mask.sh`) or export it yourself first
-# (`export SCRIPTS_DIR=/path/to/mvpa_banich`). Either way, --output/--error
-# log paths below are plain SBATCH directives (no variable substitution
-# happens in them), so they always resolve relative to wherever `sbatch` was
-# actually invoked from, regardless of SCRIPTS_DIR -- this script `cd`s to
-# the repo root first so its own submissions land in the right place.
+# slurm/1_batch_resample_native_mask.sh configs/my-study.json`) or export it
+# yourself first (`export SCRIPTS_DIR=/path/to/mvpa_banich`). Either way,
+# --output/--error log paths below are plain SBATCH directives (no variable
+# substitution happens in them), so they always resolve relative to
+# wherever `sbatch` was actually invoked from, regardless of SCRIPTS_DIR --
+# this script `cd`s to the repo root first so its own submissions land in
+# the right place.
 
 set -eo pipefail
+
+CONFIG_FILE="$1"
+if [ -z "$CONFIG_FILE" ]; then
+    echo "Usage: bash $0 <config.json>" >&2
+    exit 1
+fi
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Config file not found: $CONFIG_FILE" >&2
+    exit 1
+fi
 
 SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export SCRIPTS_DIR="$(dirname "$SLURM_DIR")"
@@ -53,14 +69,14 @@ module load slurm/alpine
 
 mkdir -p logs
 
-resample_jobid=$(sbatch --parsable "$SCRIPTS_DIR/slurm/1_batch_resample_native_mask.sh")
+resample_jobid=$(sbatch --parsable "$SCRIPTS_DIR/slurm/1_batch_resample_native_mask.sh" "$CONFIG_FILE")
 echo "Submitted mask-resample array job: $resample_jobid"
 
-spreadsheet_jobid=$(sbatch --parsable --dependency=afterok:$resample_jobid "$SCRIPTS_DIR/slurm/2_sbatch_generate_master_spreadsheet.sh")
+spreadsheet_jobid=$(sbatch --parsable --dependency=afterok:$resample_jobid "$SCRIPTS_DIR/slurm/2_sbatch_generate_master_spreadsheet.sh" "$CONFIG_FILE")
 echo "Submitted master_spreadsheet job: $spreadsheet_jobid (depends on $resample_jobid)"
 
-kfold_jobid=$(sbatch --parsable --dependency=afterok:$spreadsheet_jobid "$SCRIPTS_DIR/slurm/3_batch_run_mvpa_workflow.sh")
+kfold_jobid=$(sbatch --parsable --dependency=afterok:$spreadsheet_jobid "$SCRIPTS_DIR/slurm/3_batch_run_mvpa_workflow.sh" "$CONFIG_FILE")
 echo "Submitted k-fold classifier array job: $kfold_jobid (depends on $spreadsheet_jobid)"
 
-report_jobid=$(sbatch --parsable --dependency=afterok:$kfold_jobid "$SCRIPTS_DIR/slurm/4_sbatch_generate_report.sh")
+report_jobid=$(sbatch --parsable --dependency=afterok:$kfold_jobid "$SCRIPTS_DIR/slurm/4_sbatch_generate_report.sh" "$CONFIG_FILE")
 echo "Submitted group report job: $report_jobid (depends on $kfold_jobid)"

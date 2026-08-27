@@ -94,5 +94,14 @@
       "n_permutations": 1000,
       "random_state": 0
     }
+  },
+
+  "pipeline": {
+    "_comment": "Only read by slurm/pipeline_vars.sh -- irrelevant to running mvpa_workflow.py/generate_report.py directly (as this example's own README section does). Every path here is a full, already-resolved absolute path -- see README.md section 9.",
+    "bids_hcp_root": "/path/to/study/bids-hcp",
+    "hcppipe_root": "/path/to/study/HCPPipe",
+    "group_gm_mask": "/path/to/study/masks/group_gm_mask.nii.gz",
+    "output_dir": "/path/to/study/mvpa-decoding",
+    "master_spreadsheet": "/path/to/study/mvpa-decoding/master_spreadsheet.csv"
   }
 }

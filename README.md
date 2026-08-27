@@ -1042,14 +1042,46 @@ to a group PDF report. The four stage scripts are numbered `1_`-`4_` to match
 the order they run in (`0_` for the orchestrator itself, so it sorts first
 in a directory listing too).
 
-**One file to edit for a new study/config: `slurm/pipeline_vars.sh`.** Every
-dataset path, the config filename, and the output/spreadsheet locations are
-centralized there and sourced by each of `1_`-`4_`, instead of being
-hardcoded separately in every stage script. Repoint a deployment at a
-different study by editing this one file.
+**The only required input is your config JSON.** Every stage script takes
+it as a required first argument and reads all of its study-specific paths
+(dataset roots, output/spreadsheet locations, the MNI template) from a
+`"pipeline"` section in that same file -- there's no separate bash file to
+hand-edit for a new study/config anymore, and no risk of the four stage
+scripts silently disagreeing about which study they're pointed at, since
+they all read the exact same config path:
 
-That file is built around `SCRIPTS_DIR`, an explicit variable holding the
-repo root, used to locate `workflows/`, `utils/`, `configs/`, etc. instead
+```json
+"pipeline": {
+  "bids_hcp_root": "/path/to/study/bids-hcp",
+  "hcppipe_root": "/path/to/study/HCPPipe",
+  "group_gm_mask": "/path/to/study/masks/group_gm_mask.nii.gz",
+  "output_dir": "/path/to/study/mvpa-decoding",
+  "master_spreadsheet": "/path/to/study/mvpa-decoding/master_spreadsheet.csv",
+  "mni_template": "/path/to/MNI152_T1_2mm_brain.nii.gz"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `bids_hcp_root` | Root of the BIDS-HCP derivatives tree -- where stage 1 writes each subject/session's resampled native-space mask (section 8's `--derivatives-root`-adjacent layout: `sub-{subject}/ses-{session}/func/`). |
+| `hcppipe_root` | Root of the raw HCP Pipelines output -- where stage 1 finds each session's first functional run (for its native reference grid) and both stages 1/4 resolve HCP warp fields (section 8). |
+| `group_gm_mask` | The group-level MNI-space GM mask stage 1 resamples into each subject/session's native space. |
+| `output_dir` | Where `mvpa_workflow.py`/`generate_report.py` write everything -- passed straight through as `--analysis-output-dir`. |
+| `master_spreadsheet` | Where stage 2 writes `master_spreadsheet.csv` and every later stage reads it from. |
+| `mni_template` | *(optional)* Reference grid for stage 4's importance-map resampling. Falls back to `$FSLDIR/data/standard/MNI152_T1_2mm_brain.nii.gz` (resolved after `module load fsl`) when omitted. |
+
+Every field is a full, already-resolved absolute path -- no `{subject}`/
+`{session}` placeholders (those are per-file, not per-root) and no implicit
+shared-prefix convenience the way a single hand-edited `ANALYSIS_ROOT` bash
+variable used to provide; if you want that, build these paths with a
+shared prefix in whatever generates your config, not in the pipeline
+scripts themselves. `slurm/pipeline_vars.sh` reads and validates this
+section (missing required fields fail fast with a clear message) and is
+still sourced by each of `1_`-`4_`, but there's nothing left in it to edit
+by hand.
+
+The scripts are also built around `SCRIPTS_DIR`, an explicit variable
+holding the repo root, used to locate `workflows/`, `utils/`, etc. instead
 of assuming a job's own working directory happens to already be the repo
 root. `0_` resolves its own real location (reliable here because it's
 invoked directly via `bash`, never through `sbatch`, which would otherwise
@@ -1058,20 +1090,20 @@ submitting each job, so it's already set correctly by inheritance when a
 stage script sources `pipeline_vars.sh`. Run `0_` from anywhere:
 
 ```
-bash /any/path/to/slurm/0_submit_mvpa_pipeline.sh
+bash /any/path/to/slurm/0_submit_mvpa_pipeline.sh configs/my-study.json
 ```
 
 Standalone submission of an individual stage script doesn't inherit
 `SCRIPTS_DIR` this way -- `pipeline_vars.sh` falls back to the job's own
 working directory when `SCRIPTS_DIR` isn't already set, so submit from the
-repo root (`sbatch slurm/1_batch_resample_native_mask.sh`) or export it
-yourself first (`export SCRIPTS_DIR=/path/to/mvpa_banich`). Either way, a
-job's `--output`/`--error` log paths are plain `#SBATCH` directives (no
-variable substitution happens in them, since they're parsed before the
-script body ever runs), so they always resolve relative to wherever
-`sbatch` was actually invoked from, regardless of `SCRIPTS_DIR` -- `0_`
-`cd`s to the repo root before submitting so its own jobs' logs land in the
-right place.
+repo root (`sbatch slurm/1_batch_resample_native_mask.sh configs/my-study.json`)
+or export it yourself first (`export SCRIPTS_DIR=/path/to/mvpa_banich`).
+The config path is still a required argument either way. `--output`/
+`--error` log paths are plain `#SBATCH` directives (no variable
+substitution happens in them, since they're parsed before the script body
+ever runs), so they always resolve relative to wherever `sbatch` was
+actually invoked from, regardless of `SCRIPTS_DIR` -- `0_` `cd`s to the
+repo root before submitting so its own jobs' logs land in the right place.
 
 `0_` submits the four numbered jobs via `sbatch --parsable`, each depending
 on the previous one via `--dependency=afterok` (which, for an array job,
@@ -1085,9 +1117,9 @@ only fires once *every* array task has succeeded):
 | 4. Group report | `slurm/4_sbatch_generate_report.sh` | single job (section 7); resamples every subject's importance map to MNI (section 8) before building the group report |
 
 Every stage script can still be run standalone (e.g. to rerun just one stage
-after fixing a subject-specific failure) with plain `sbatch slurm/<script>.sh`
--- the orchestrator only adds the dependency chaining on top, it doesn't own
-any logic itself.
+after fixing a subject-specific failure) with plain
+`sbatch slurm/<script>.sh configs/my-study.json` -- the orchestrator only
+adds the dependency chaining on top, it doesn't own any logic itself.
 
 `logs/` is created automatically; each stage's own `logs/<job>_%A_%a.{out,err}`
 (or `_%j.{out,err}` for the two single jobs) is where to look first if a
