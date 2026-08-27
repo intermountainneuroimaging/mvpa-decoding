@@ -663,8 +663,20 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr
 
     combined = pd.concat(frames, ignore_index=True)
     evidence_cols = [c for c in combined.columns if c.startswith("evidence_") and not c.endswith("_se")]
+    # evidence_cols (and therefore categories) are already in config order --
+    # decoding_raw writes them via regressor_categories, itself
+    # list(training_conditions.keys()) from mvpa_workflow.py -- so reuse
+    # that same order for the true-condition rows instead of alphabetizing
+    # them, so the matrix reads like a standard one (e.g. "maintain" lands
+    # at row 0, col 0, matching the confusion-matrix page's convention)
     categories = [c.replace("evidence_", "") for c in evidence_cols]
-    true_conditions = sorted(combined["regressor_label"].unique())
+    present_true_conditions = set(combined["regressor_label"].unique())
+    true_conditions = [c for c in categories if c in present_true_conditions]
+    # defensive: a true-condition label with no matching evidence_ column
+    # shouldn't happen (regressor_label is always drawn from the same
+    # regressor_categories that produced categories above), but append it
+    # rather than silently dropping it if it ever does
+    true_conditions += sorted(present_true_conditions - set(categories))
     overlay_categories = sorted(combined["overlay_label"].unique()) if overlay_conditions else [None]
 
     n_rows, n_cols = len(true_conditions), len(categories)
