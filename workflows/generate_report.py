@@ -38,6 +38,7 @@ import glob
 import json
 import os
 import sys
+import textwrap
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -356,7 +357,32 @@ def render_title_page(pdf, desc, subjects, config_path, output_path):
         lines.append("Subjects: " + ", ".join(subjects))
     lines.append(f"Config: {config_path or '(not provided -- timecourse annotation skipped)'}")
     lines.append(f"Output: {output_path}")
-    ax.text(0.05, 0.92, "\n".join(lines), fontsize=13, va="top", family="monospace")
+
+    # soft-wrap every line to whatever actually fits on the page -- measured
+    # from the real renderer rather than a guessed character count (the axes
+    # box is narrower than the full figure, and font substitution/dpi can
+    # shift actual glyph width), since Config/Output are full filesystem
+    # paths with no natural break points (100+ chars on a real cluster run)
+    # that would otherwise run off the page edge instead of onto a
+    # continuation line.
+    x0, y0 = 0.05, 0.92
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    probe = ax.text(0, 0, "M" * 40, fontsize=13, family="monospace")
+    char_width_px = probe.get_window_extent(renderer=renderer).width / 40
+    probe.remove()
+    axes_width_px = ax.get_window_extent(renderer=renderer).width
+    avail_px = axes_width_px * (1 - x0) - char_width_px * 2  # small right-margin buffer
+    wrap_width = max(20, int(avail_px / char_width_px))
+
+    wrapped_lines = []
+    for line in lines:
+        wrapped_lines.extend(textwrap.wrap(
+            line, width=wrap_width, subsequent_indent="    ",
+            break_long_words=True, break_on_hyphens=False,
+        ) or [line])
+
+    ax.text(x0, y0, "\n".join(wrapped_lines), fontsize=13, va="top", family="monospace")
     pdf.savefig(fig)
     plt.close(fig)
 
