@@ -1064,25 +1064,33 @@ they all read the exact same config path:
 }
 ```
 
-| Field | Meaning |
-|---|---|
-| `scripts_dir` | This repo's root on the cluster -- how every stage script locates `workflows/`, `utils/`, etc. See below for why this comes from the config rather than an exported variable or the job's own location. |
-| `bids_hcp_root` | Root of the BIDS-HCP derivatives tree -- where stage 1 writes each subject/session's resampled native-space mask (section 8's `--derivatives-root`-adjacent layout: `sub-{subject}/ses-{session}/func/`). |
-| `hcppipe_root` | Root of the raw HCP Pipelines output -- where stage 1 finds each session's first functional run (for its native reference grid) and both stages 1/4 resolve HCP warp fields (section 8). |
-| `group_gm_mask` | The group-level MNI-space GM mask stage 1 resamples into each subject/session's native space. |
-| `output_dir` | Where `mvpa_workflow.py`/`generate_report.py` write everything -- passed straight through as `--analysis-output-dir`. |
-| `master_spreadsheet` | Where stage 2 writes `master_spreadsheet.csv` and every later stage reads it from. |
-| `mni_template` | *(optional)* Reference grid for stage 4's importance-map resampling. Falls back to `$FSLDIR/data/standard/MNI152_T1_2mm_brain.nii.gz` (resolved after `module load fsl`) when omitted. |
+| Field | Required by | Meaning |
+|---|---|---|
+| `scripts_dir` | every stage | This repo's root on the cluster -- how every stage script locates `workflows/`, `utils/`, etc. See below for why this comes from the config rather than an exported variable or the job's own location. |
+| `bids_hcp_root` | stages 1, 3 | Root of the BIDS-HCP derivatives tree -- where stage 1 writes each subject/session's resampled native-space mask (section 8's `--derivatives-root`-adjacent layout: `sub-{subject}/ses-{session}/func/`), and where stage 3 lists subjects from. |
+| `hcppipe_root` | stage 1; optional for stage 4 | Root of the raw HCP Pipelines output -- where stage 1 finds each session's first functional run (for its native reference grid) and resolves HCP warp fields (section 8). Stage 4 also uses it, but only to resample a plain `{subject}_impa.nii.gz` into `_impa_mni.nii.gz` -- skip it entirely if every classifier under `output_dir` uses `model.mnispace: true` (which writes `_impa_mni.nii.gz` directly, with no plain `_impa.nii.gz` ever produced), and stage 4 will just skip that resample step. |
+| `group_gm_mask` | stage 1 only | The group-level MNI-space GM mask stage 1 resamples into each subject/session's native space. Not needed if your data is already MNI-space (`model.mnispace: true`, mask pointed straight at a shared MNI-space mask) and stage 1 never runs. |
+| `output_dir` | stages 3, 4 | Where `mvpa_workflow.py`/`generate_report.py` write everything -- passed straight through as `--analysis-output-dir`. |
+| `master_spreadsheet` | stages 2, 3, 4 | Where stage 2 writes `master_spreadsheet.csv` and every later stage reads it from. |
+| `mni_template` | optional, stage 4 only | Reference grid for stage 4's importance-map resampling. Falls back to `$FSLDIR/data/standard/MNI152_T1_2mm_brain.nii.gz` (resolved after `module load fsl`) when omitted; moot entirely when `hcppipe_root` is also omitted, since that skips the resample step altogether. |
 
 Every field is a full, already-resolved absolute path -- no `{subject}`/
 `{session}` placeholders (those are per-file, not per-root) and no implicit
 shared-prefix convenience the way a single hand-edited `ANALYSIS_ROOT` bash
 variable used to provide; if you want that, build these paths with a
 shared prefix in whatever generates your config, not in the pipeline
-scripts themselves. `slurm/resolve_pipeline_config.sh` reads and validates this
-section (missing required fields fail fast with a clear message) and is
-still sourced by each of `1_`-`4_`, but there's nothing left in it to edit
-by hand.
+scripts themselves.
+
+**Only the fields a given stage actually reads are required for it.**
+`slurm/resolve_pipeline_config.sh` validates only the subset of fields the
+*calling* stage script needs (each of `1_`-`4_` sets its own
+`REQUIRED_PIPELINE_FIELDS` before sourcing it) -- an omitted field the
+caller doesn't require just resolves to an empty string rather than
+failing, so e.g. an all-MNI-space study (section 5's `model.mnispace`) that
+never runs stage 1 and has nothing for stage 4 to resample can drop
+`hcppipe_root`/`group_gm_mask` from its config entirely. A field a stage
+*does* require still fails fast with a clear message if missing. There's
+nothing left in `resolve_pipeline_config.sh` itself to hand-edit.
 
 **Each of `1_`-`4_` is fully standalone given just its config-path
 argument -- no dependency on `0_` having run first, an already-exported

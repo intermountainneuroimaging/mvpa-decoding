@@ -42,31 +42,51 @@
 # shared-prefix magic the way the old hardcoded ANALYSIS_ROOT bash variable
 # provided; if you want that convenience, build these paths with a shared
 # prefix in whatever generates your config, not here.
+#
+# Only bids_hcp_root/hcppipe_root/group_gm_mask/output_dir/master_spreadsheet
+# are ever validated as "required" -- and only the subset the *calling*
+# stage script actually uses, not all five unconditionally. Each of 1_-4_
+# sets REQUIRED_PIPELINE_FIELDS (space-separated) to exactly the fields it
+# reads before sourcing this file -- e.g. 1_batch_resample_native_mask.sh
+# and 4_sbatch_generate_report.sh's own native->MNI resample step are both
+# optional (skippable if your data's already in MNI space -- see
+# model.mnispace in README.md section 5), so a config that never runs stage
+# 1 and has no native-space importance maps to resample doesn't need to
+# supply hcppipe_root/group_gm_mask at all. Any field not in the caller's
+# required list is exported anyway if the config happens to set it, but
+# otherwise resolves to an empty string rather than erroring -- so a stage
+# script that conditionally uses an optional field (e.g. stage 4's resample
+# step gated on HCPPIPE_ROOT being non-empty) can just check for that.
+# scripts_dir is always required for every stage and is validated/exported
+# by the caller itself before this file is even sourced (see the header
+# comment above), so it's not part of this mechanism.
 
 if [ -z "$CONFIG_FILE" ]; then
     echo "resolve_pipeline_config.sh: CONFIG_FILE is not set -- each stage script requires a config path as its first argument (e.g. \`sbatch slurm/2_sbatch_generate_master_spreadsheet.sh configs/my-study.json\`)." >&2
     exit 1
 fi
 
-_pipeline_json=$(python3 - "$CONFIG_FILE" <<'PYEOF'
+_pipeline_json=$(python3 - "$CONFIG_FILE" "${REQUIRED_PIPELINE_FIELDS:-}" <<'PYEOF'
 import json
 import shlex
 import sys
 
-config_path = sys.argv[1]
+config_path, required_arg = sys.argv[1], sys.argv[2]
 with open(config_path) as f:
     cfg = json.load(f)
 
 pipeline = cfg.get("pipeline", {})
-required = ["scripts_dir", "bids_hcp_root", "hcppipe_root", "group_gm_mask", "output_dir", "master_spreadsheet"]
+optional_fields = ["bids_hcp_root", "hcppipe_root", "group_gm_mask", "output_dir", "master_spreadsheet"]
+required = required_arg.split()
+
 missing = [k for k in required if k not in pipeline]
 if missing:
     print(f"resolve_pipeline_config.sh: {config_path}'s \"pipeline\" section is missing "
           f"required field(s): {missing}", file=sys.stderr)
     sys.exit(1)
 
-for key in required:
-    print(f"{key.upper()}={shlex.quote(str(pipeline[key]))}")
+for key in optional_fields:
+    print(f"{key.upper()}={shlex.quote(str(pipeline.get(key, '')))}")
 
 # optional -- falls back to $FSLDIR's own bundled template (set below,
 # after this script's module loads) when absent from the config

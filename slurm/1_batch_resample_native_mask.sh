@@ -68,6 +68,10 @@ if [ -z "$SCRIPTS_DIR" ]; then
 fi
 export SCRIPTS_DIR
 
+# this stage builds the per-subject/session native mask, so it needs the
+# study's HCP derivatives root, the group MNI mask to resample, and where
+# to write the result -- everything else in "pipeline" is irrelevant here
+export REQUIRED_PIPELINE_FIELDS="bids_hcp_root hcppipe_root group_gm_mask"
 source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 
 # get subject for this array task (same pattern as batch_run_mvpa_workflow.sh)

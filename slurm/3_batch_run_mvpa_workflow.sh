@@ -76,6 +76,10 @@ if [ -z "$SCRIPTS_DIR" ]; then
 fi
 export SCRIPTS_DIR
 
+# this stage runs the classifier + per-subject report -- it needs the
+# subject list (bids_hcp_root) and where to write/read results, not the
+# HCP derivatives root or group mask (those are stage 1/4-only)
+export REQUIRED_PIPELINE_FIELDS="bids_hcp_root output_dir master_spreadsheet"
 source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 
 # get subject for this array task

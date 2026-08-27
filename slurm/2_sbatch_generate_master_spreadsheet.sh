@@ -60,6 +60,9 @@ if [ -z "$SCRIPTS_DIR" ]; then
 fi
 export SCRIPTS_DIR
 
+# this stage only writes master_spreadsheet.csv -- event_extraction (bids_root
+# etc.) comes from the config directly, not from "pipeline"
+export REQUIRED_PIPELINE_FIELDS="master_spreadsheet"
 source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 
 python "$SCRIPTS_DIR/workflows/generate_master_spreadsheet.py" --config $CONFIG_FILE \

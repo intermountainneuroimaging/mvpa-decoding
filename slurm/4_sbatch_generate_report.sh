@@ -71,6 +71,12 @@ if [ -z "$SCRIPTS_DIR" ]; then
 fi
 export SCRIPTS_DIR
 
+# the group report itself only needs output_dir/master_spreadsheet --
+# hcppipe_root is optional here: it's only used by the native->MNI
+# importance-map resample below, which is itself skipped when hcppipe_root
+# isn't set (e.g. every classifier under this output_dir already used
+# model.mnispace=true, so there's no native-space impa left to resample)
+export REQUIRED_PIPELINE_FIELDS="output_dir master_spreadsheet"
 source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 
 # --------------------------------------------
@@ -96,36 +102,45 @@ source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 # 1_batch_resample_native_mask.sh already relies on within a single session's
 # runs. If your subjects have genuinely distinct per-session registrations,
 # this silently picks the wrong one -- check applywarp's output alignment.
+#
+# HCPPIPE_ROOT is optional (see pipeline.hcppipe_root in the config) --
+# skipped entirely when unset, since every classifier under $OUTPUT_DIR
+# might already be model.mnispace=true (writing *_impa_mni.nii.gz directly,
+# with no plain *_impa.nii.gz ever produced to resample in the first place).
 # --------------------------------------------
-for subject_dir in "$OUTPUT_DIR"/*/*/; do
-    subject=$(basename "$subject_dir")
+if [ -z "$HCPPIPE_ROOT" ]; then
+    echo "pipeline.hcppipe_root not set -- skipping native->MNI importance-map resample (using whatever *_impa_mni.nii.gz files already exist, e.g. from model.mnispace=true)"
+else
+    for subject_dir in "$OUTPUT_DIR"/*/*/; do
+        subject=$(basename "$subject_dir")
 
-    session_dir=""
-    for family in model test; do
-        impa="${subject_dir}${family}/${subject}_impa.nii.gz"
-        [ -f "$impa" ] || continue
+        session_dir=""
+        for family in model test; do
+            impa="${subject_dir}${family}/${subject}_impa.nii.gz"
+            [ -f "$impa" ] || continue
 
-        if [ -z "$session_dir" ]; then
-            session_dir=$(find "$HCPPIPE_ROOT/sub-$subject" -maxdepth 1 -type d -name "ses-*" 2>/dev/null | sort | head -n 1)
             if [ -z "$session_dir" ]; then
-                echo "  (!) sub-$subject: no session directory found under $HCPPIPE_ROOT -- skipping MNI resample"
-                break
+                session_dir=$(find "$HCPPIPE_ROOT/sub-$subject" -maxdepth 1 -type d -name "ses-*" 2>/dev/null | sort | head -n 1)
+                if [ -z "$session_dir" ]; then
+                    echo "  (!) sub-$subject: no session directory found under $HCPPIPE_ROOT -- skipping MNI resample"
+                    break
+                fi
+                session=$(basename "$session_dir" | cut -d"-" -f2)
             fi
-            session=$(basename "$session_dir" | cut -d"-" -f2)
-        fi
 
-        impa_mni="${subject_dir}${family}/${subject}_impa_mni.nii.gz"
-        echo "  sub-$subject (ses-$session, $family): $impa -> $impa_mni"
-        python "$SCRIPTS_DIR/utils/hcp_resample.py" \
-            --input "$impa" \
-            --output "$impa_mni" \
-            --direction native2mni \
-            --subject "$subject" --session "$session" \
-            --derivatives-root "$HCPPIPE_ROOT" \
-            --reference "$MNI_TEMPLATE" \
-            --interp trilinear
+            impa_mni="${subject_dir}${family}/${subject}_impa_mni.nii.gz"
+            echo "  sub-$subject (ses-$session, $family): $impa -> $impa_mni"
+            python "$SCRIPTS_DIR/utils/hcp_resample.py" \
+                --input "$impa" \
+                --output "$impa_mni" \
+                --direction native2mni \
+                --subject "$subject" --session "$session" \
+                --derivatives-root "$HCPPIPE_ROOT" \
+                --reference "$MNI_TEMPLATE" \
+                --interp trilinear
+        done
     done
-done
+fi
 
 python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR \
     --config $CONFIG_FILE --master-spreadsheet $MASTER_SPREADSHEET
