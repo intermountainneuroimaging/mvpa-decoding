@@ -822,6 +822,28 @@ def model_performance(pipe, testing_data, testing_labels):
     return xout, impa_full
 
 
+def _partial_roc_auc_ovr(estimator, X, y):
+    """One-vs-rest macro-average AUC, tolerant of a y that doesn't contain
+    every class the estimator was fit on -- e.g. model_conditions.testing
+    deliberately querying fewer categories than model_conditions.training
+    (a real, structural mismatch, not just an occasional permutation
+    artifact). Classes absent from y (or present as only one label, making
+    AUC undefined) are skipped rather than raising, mirroring the per-class
+    tolerance model_performance() already has. sklearn's built-in
+    "roc_auc_ovr" scorer has no such tolerance -- it hard-requires y's class
+    count to equal the estimator's fitted class count, which this fixed
+    train/test partition can never satisfy when testing is a strict subset
+    of training's categories."""
+    proba = estimator.predict_proba(X)
+    aucs = []
+    for j, cls in enumerate(estimator.classes_):
+        yj = (y == cls).astype(int)
+        if yj.min() == yj.max():
+            continue
+        aucs.append(roc_auc_score(yj, proba[:, j]))
+    return float(np.mean(aucs)) if aucs else np.nan
+
+
 def permutation_significance(training_data, training_labels, testing_data, testing_labels, n_permutations, random_state,
                               feature_selection_cfg: dict, classifier_name: str, classifier_params: dict):
     """Real-vs-null significance for the held-out test evaluation, via
@@ -837,10 +859,12 @@ def permutation_significance(training_data, training_labels, testing_data, testi
     distribution for a fixed train/test split (not a naive shuffle done
     outside the fit/CV structure, which would be optimistic).
 
-    One permutation_test_score call per metric (accuracy, roc_auc_ovr --
-    the same one-vs-rest convention model_performance()'s own AUC already
-    uses, just via sklearn's built-in scorer instead of a second hand-rolled
-    computation)."""
+    One permutation_test_score call per metric: accuracy (sklearn's builtin
+    scorer), and a one-vs-rest macro AUC via _partial_roc_auc_ovr (not
+    sklearn's builtin "roc_auc_ovr" scorer -- that one raises whenever y's
+    class count doesn't equal the estimator's fitted class count, which a
+    testing section covering fewer categories than training hits on every
+    single permutation round)."""
     X = np.vstack([training_data, testing_data])
     y = np.concatenate([training_labels, testing_labels])
     test_fold = np.concatenate([
@@ -856,14 +880,14 @@ def permutation_significance(training_data, training_labels, testing_data, testi
     mode, param = resolve_feature_selection_params(training_data, training_labels, feature_selection_cfg)
 
     rows = []
-    for metric in ("accuracy", "roc_auc_ovr"):
+    for metric_name, scoring in (("accuracy", "accuracy"), ("roc_auc_ovr", _partial_roc_auc_ovr)):
         pipe = build_classifier_pipeline(mode, param, classifier_name, classifier_params)
         score, _, p_value = permutation_test_score(
-            pipe, X, y, cv=cv, scoring=metric,
+            pipe, X, y, cv=cv, scoring=scoring,
             n_permutations=n_permutations, random_state=random_state, n_jobs=-1,
         )
-        print(f"  permutation test [{metric}]: real={score:.4f}, p={p_value:.4g} ({n_permutations} permutations)")
-        rows.append({"metric": metric, "real_score": score, "p_value": p_value, "n_permutations": n_permutations})
+        print(f"  permutation test [{metric_name}]: real={score:.4f}, p={p_value:.4g} ({n_permutations} permutations)")
+        rows.append({"metric": metric_name, "real_score": score, "p_value": p_value, "n_permutations": n_permutations})
 
     return pd.DataFrame(rows)
 
