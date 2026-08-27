@@ -578,6 +578,16 @@ class TestModelClassificationAndPerformance:
         assert xout["auc"].shape == (3,)
         assert impa_full.shape == (3, X.shape[1])
 
+    def test_multiclass_evidence_rows_are_normalized_probabilities(self):
+        # each row of the evidence matrix is a mean of per-trial evidence
+        # vectors that individually sum to 1 (decision_evidence's softmax/
+        # predict_proba normalization) -- so the row mean must too, unlike a
+        # naive per-class sigmoid, which has no such constraint
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=4, seed=4)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
+        xout, _ = model_performance(pipe, X, y)
+        np.testing.assert_allclose(xout["evidence"].sum(axis=1), 1.0, atol=1e-8)
+
     def test_n_voxels_selects_exact_count_end_to_end(self):
         X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2, seed=1)
         pipe = model_classification(X, y, feature_selection_cfg={"n_voxels": 4}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)

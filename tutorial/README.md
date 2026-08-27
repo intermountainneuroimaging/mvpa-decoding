@@ -232,13 +232,19 @@ column:
 
 | bottle | cat | chair | face | house | scissors | scrambledpix | shoe |
 |---|---|---|---|---|---|---|---|
-| 0.812 | 0.714 | 0.770 | 0.949 | 0.965 | 0.614 | 0.950 | 0.766 |
+| 0.812 | 0.752 | 0.793 | 0.932 | 0.965 | 0.627 | 0.955 | 0.799 |
+
+(mean 0.829, matching `model_results_total_scores.csv`'s permutation-test
+`roc_auc_ovr` real_score -- both now derive from the same normalized-
+probability evidence, `decision_evidence()`'s `predict_proba()`/softmax,
+where earlier versions of this table used an independent per-class sigmoid
+that didn't sum to 1 and diverged slightly from that reference value.)
 
 Held-out accuracy is well above the 12.5% chance level --
 `face`, `house`, and `scrambledpix` are decoded almost perfectly (AUC
-0.95-0.97), directionally consistent with the classic Haxby finding that
+0.93-0.97), directionally consistent with the classic Haxby finding that
 ventral temporal cortex carries distinguishable, distributed patterns for
-these categories. `scissors` is the weakest category (AUC 0.61), plausibly
+these categories. `scissors` is the weakest category (AUC 0.63), plausibly
 confusable with `chair`/other elongated-object categories (see the
 confusion matrix's `bottle`<->`scissors`/`chair`<->`shoe` cross-talk) in a
 whole-brain mask this crude. `permutation_test` (README.md section 5,

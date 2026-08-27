@@ -42,7 +42,7 @@ Real output against this tutorial's data:
 
 | method | protocol | accuracy | AUC |
 |---|---|---|---|
-| `mvpa_workflow.py` (this repo, ANOVA + LogisticRegression) | matched split | 0.524 | 0.817 |
+| `mvpa_workflow.py` (this repo, ANOVA + LogisticRegression) | matched split | 0.524 | 0.829 |
 | nearest-centroid correlation | matched split | 0.236 | 0.634 |
 | linear SVM | matched split | 0.410 | 0.773 |
 | nearest-centroid correlation | leave-one-run-out | 0.266 | 0.602 |
@@ -52,7 +52,7 @@ All four independently-computed numbers are well above chance (0.125
 accuracy / 0.5 AUC), externally corroborating that this dataset genuinely
 carries decodable category information after this tutorial's preprocessing
 -- not an artifact of `mvpa_workflow.py`'s own code. The lower absolute
-numbers here (vs. 0.524/0.817) are expected, not a discrepancy: this
+numbers here (vs. 0.524/0.829) are expected, not a discrepancy: this
 validation classifies over the full ~31K-voxel mask with no feature
 selection at all, while `mvpa_workflow.py` first narrows to an
 ANOVA-selected subset -- the gap is a reasonable estimate of how much that

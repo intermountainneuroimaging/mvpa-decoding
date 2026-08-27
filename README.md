@@ -671,16 +671,15 @@ split, not a naive shuffle done outside the fit structure. Writes
 exactly (same split, same fixed feature-selection threshold, same classifier
 config -- `model/{subject}_fold{N}_model_results_total_scores.csv` for a
 kfold fold, `test/{subject}_model_results_total_scores.csv` for the
-independent test set). `roc_auc_ovr`'s `real_score` will be *close to but
-not exactly* the mean of the corresponding `model_results_auc.csv`'s
-per-category values -- sklearn's `roc_auc_ovr` scorer uses the classifier's
-`predict_proba()` (softmax across classes) as evidence, while
-`model_performance`'s own per-category AUC uses an independent sigmoid of
-`decision_function` per class (not softmax-normalized) -- both are
-legitimate one-vs-rest AUC computations, they just start from different
-per-class evidence, so don't expect bit-identical numbers between the two
-files for this metric. `p_value` is the fraction of permuted-label refits
-that scored as well or better than the real fit.
+independent test set). `roc_auc_ovr`'s `real_score` will be *close to* the
+mean of the corresponding `model_results_auc.csv`'s per-category values --
+both are one-vs-rest AUC built from the same normalized-probability evidence
+(`decision_evidence`: `predict_proba()`/softmax, rows sum to 1 -- not an
+independent per-class sigmoid), so they should agree closely; sklearn's
+scorer averages the OvR AUCs itself while `model_results_auc.csv` reports
+them per category, so don't expect bit-identical numbers, just closely
+matching ones. `p_value` is the fraction of permuted-label refits that
+scored as well or better than the real fit.
 
 This costs `n_permutations` extra fits (parallelized across cores via
 `n_jobs=-1`) on top of the one real fit -- cheap relative to a single
@@ -893,7 +892,11 @@ files for any subject in scope, and a multi-subject report averages each
 family's matrices across subjects first. Every populated cell is labeled
 with its value to 2 decimal places, colored light-on-dark or dark-on-light
 depending on the cell's own intensity so the numbers stay legible against
-the `viridis` colormap underneath.
+the `viridis` colormap underneath. Both matrices' rows sum to 1 (a genuine
+distribution over categories per true condition): Accuracy is the fraction
+of that condition's trials predicted as each category; Evidence is the mean
+`decision_evidence()` (normalized `predict_proba()`/softmax, not an
+independent per-class sigmoid) across those same trials.
 
 **Importance maps are averaged across subjects only when they share a
 common grid.** A subject can have two independent importance-map families:

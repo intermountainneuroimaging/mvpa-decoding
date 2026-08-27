@@ -777,18 +777,11 @@ def model_performance(pipe, testing_data, testing_labels):
 
     impa_full = extract_importance_map(pipe, n_features)
 
-    # special case where classifier is binary (yes/no) -- only codes one label
-    if n_class == 2:
-        # evidence: sigmoid on decision function → class-1 prob; other is 1-p
-        d = pipe.decision_function(testing_data)
-        p1 = 1.0 / (1.0 + np.exp(-d))
-        p0 = 1.0 - p1
-        xevi = np.vstack([p0, p1]).T
-
-    else:
-        # evidence: multinomial OV(A)R decision_function → pass through sigmoid per class
-        d = pipe.decision_function(testing_data)  # shape: (n, n_class)
-        xevi = 1.0 / (1.0 + np.exp(-d))
+    # evidence: same normalized-probability definition timecourse_decoding()
+    # uses (softmax/predict_proba, rows sum to 1) -- not an independent
+    # per-class sigmoid, which would let "evidence" mean two different things
+    # depending on which report page you're looking at
+    xevi = decision_evidence(pipe, testing_data)
 
     # normalized confusion matrix, and evidence matrix
     acc_mx = np.zeros((n_class, n_class))

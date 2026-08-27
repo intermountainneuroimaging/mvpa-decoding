@@ -140,9 +140,14 @@ def nearest_centroid_correlation(X_train, y_train, X_test, categories):
 
 def linear_svm(X_train, y_train, X_test, categories):
     """PyMVPA's alternative canonical classifier (LinearCSVMC analog).
-    decision_function -> sigmoid evidence, the same AUC methodology
-    model_performance() in mvpa_workflow.py already uses, so only the
-    classifier differs between the two pipelines, not the scoring formula."""
+    decision_function -> independent per-class sigmoid evidence (SVC has no
+    natural multiclass predict_proba without Platt scaling, which needs its
+    own internal CV) -- unlike model_performance() in mvpa_workflow.py,
+    which uses decision_evidence()'s normalized predict_proba()/softmax
+    (rows sum to 1). Both are legitimate one-vs-rest AUC computations, they
+    just start from differently-normalized per-class evidence -- one more
+    reason (on top of the classifier itself differing) this comparison's
+    numbers won't match exactly, only directionally."""
     clf = SVC(kernel="linear", class_weight="balanced")
     clf.fit(X_train, y_train)
     d = clf.decision_function(X_test)  # (n_test, n_categories) for multiclass OVR
