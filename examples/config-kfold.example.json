@@ -97,7 +97,8 @@
   },
 
   "pipeline": {
-    "_comment": "Only read by slurm/pipeline_vars.sh -- irrelevant to running mvpa_workflow.py/generate_report.py directly (as this example's own README section does). Every path here is a full, already-resolved absolute path -- see README.md section 9.",
+    "_comment": "Only read by slurm/resolve_pipeline_config.sh -- irrelevant to running mvpa_workflow.py/generate_report.py directly (as this example's own README section does). Every path here is a full, already-resolved absolute path -- see README.md section 9.",
+    "scripts_dir": "/path/to/mvpa-decoding",
     "bids_hcp_root": "/path/to/study/bids-hcp",
     "hcppipe_root": "/path/to/study/HCPPipe",
     "group_gm_mask": "/path/to/study/masks/group_gm_mask.nii.gz",

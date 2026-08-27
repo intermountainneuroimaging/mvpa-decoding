@@ -17,36 +17,31 @@
 # The only required input is a single config JSON -- event_extraction/
 # model_conditions/model as usual, plus a "pipeline" section (dataset paths,
 # output dirs, MNI template) that every stage script reads via
-# slurm/pipeline_vars.sh instead of a separately-hand-edited bash file. This
+# slurm/resolve_pipeline_config.sh instead of a separately-hand-edited bash file. This
 # script requires that config path as its own argument and forwards it,
 # unchanged, to every stage it submits -- so all four jobs agree on it by
 # construction, not by four people remembering to edit the same file.
 #
-# It's built around SCRIPTS_DIR, the repo root -- this script resolves its
-# own real location (reliable here because it's invoked directly via
-# `bash`, never through sbatch, which would otherwise obscure the original
-# file path) and exports SCRIPTS_DIR before submitting each job, so 1_-4_
-# locate workflows/, utils/, etc. explicitly through it rather than
-# depending on the job's working directory.
+# This script resolves its own real location (reliable here because it's
+# invoked directly via `bash`, never through sbatch, which would otherwise
+# obscure the original file path) purely for its own use -- `cd`ing to the
+# repo root so its own submissions/logs land in the right place, and
+# building the sbatch paths below. Each of 1_-4_ does *not* depend on this
+# in any way: sbatch copies a batch script into its own spool file before
+# running it, so a stage script's own location and this export would both
+# be unreliable for it anyway -- instead, every stage script reads
+# pipeline.scripts_dir out of the config itself (see
+# resolve_pipeline_config.sh), making each one independently runnable with
+# nothing but its own config-path argument, whether launched by this
+# orchestrator or `sbatch`'d directly on its own.
 #
 # Each stage script can also be run standalone (e.g. to rerun just one stage
 # after fixing a subject-specific failure) -- this script only adds the
-# chaining on top.
+# dependency chaining on top.
 #
 # Run from any directory:
 #
 #   bash /any/path/to/slurm/0_submit_mvpa_pipeline.sh configs/my-study.json
-#
-# Standalone submission of an individual stage script doesn't inherit
-# SCRIPTS_DIR this way -- slurm/pipeline_vars.sh falls back to the job's own
-# working directory, so submit from the repo root (`sbatch
-# slurm/1_batch_resample_native_mask.sh configs/my-study.json`) or export it
-# yourself first (`export SCRIPTS_DIR=/path/to/mvpa_banich`). Either way,
-# --output/--error log paths below are plain SBATCH directives (no variable
-# substitution happens in them), so they always resolve relative to
-# wherever `sbatch` was actually invoked from, regardless of SCRIPTS_DIR --
-# this script `cd`s to the repo root first so its own submissions land in
-# the right place.
 
 set -eo pipefail
 
@@ -61,7 +56,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export SCRIPTS_DIR="$(dirname "$SLURM_DIR")"
+SCRIPTS_DIR="$(dirname "$SLURM_DIR")"
 cd "$SCRIPTS_DIR"
 
 module use /curc/sw/modules/slurm

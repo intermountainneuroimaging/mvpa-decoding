@@ -23,18 +23,20 @@
 # --dependency=afterok on the whole array job is what guarantees this --
 # afterok on an array job id waits for every task in it, not just the first).
 #
-# Can also be run standalone -- submit from the repo root (`sbatch
-# slurm/4_sbatch_generate_report.sh configs/my-study.json`) so
-# slurm/pipeline_vars.sh's SCRIPTS_DIR fallback and the --output/--error log
-# paths above (plain SBATCH directives, not variable-substituted) both
-# resolve correctly -- or export SCRIPTS_DIR and pass --chdir yourself. The
-# config path is a required argument (`$1`) -- see pipeline_vars.sh for the
-# "pipeline" section it reads every other path from.
+# Fully standalone -- no dependency on 0_ having run first or exported
+# anything: submit directly with
+# `sbatch slurm/4_sbatch_generate_report.sh configs/my-study.json` from
+# anywhere. The config path (`$1`) is the only required input; its
+# pipeline.scripts_dir is how this script locates the rest of the repo (see
+# resolve_pipeline_config.sh) -- --output/--error log paths above are still
+# plain SBATCH directives (no variable substitution happens in them), so
+# they resolve relative to wherever `sbatch` was invoked from regardless.
 #
 # --time is a rough starting estimate (MNI resampling + PDF/plot rendering
 # across every subject's output, no measured runtime yet) -- check the first
 # run's actual wall time and adjust before relying on it.
 
+set -e
 umask g+w
 
 module use /projects/ics/modules
@@ -54,7 +56,22 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 export CONFIG_FILE
 
-source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
+# pipeline.scripts_dir, read directly rather than relying on an exported
+# SCRIPTS_DIR or the job's working directory -- sbatch copies this script
+# into its own spool file before running it, so neither is reliable here
+# (see resolve_pipeline_config.sh's own header comment for the full reasoning)
+SCRIPTS_DIR=$(python3 -c "
+import json, sys
+with open('$CONFIG_FILE') as f:
+    print(json.load(f).get('pipeline', {}).get('scripts_dir', ''))
+")
+if [ -z "$SCRIPTS_DIR" ]; then
+    echo "$(basename "$0"): $CONFIG_FILE's \"pipeline\" section is missing required field: scripts_dir" >&2
+    exit 1
+fi
+export SCRIPTS_DIR
+
+source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 
 # --------------------------------------------
 # resample each subject's importance map(s) into MNI space (native2mni),

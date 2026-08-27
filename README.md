@@ -1052,6 +1052,7 @@ they all read the exact same config path:
 
 ```json
 "pipeline": {
+  "scripts_dir": "/path/to/mvpa-decoding",
   "bids_hcp_root": "/path/to/study/bids-hcp",
   "hcppipe_root": "/path/to/study/HCPPipe",
   "group_gm_mask": "/path/to/study/masks/group_gm_mask.nii.gz",
@@ -1063,6 +1064,7 @@ they all read the exact same config path:
 
 | Field | Meaning |
 |---|---|
+| `scripts_dir` | This repo's root on the cluster -- how every stage script locates `workflows/`, `utils/`, etc. See below for why this comes from the config rather than an exported variable or the job's own location. |
 | `bids_hcp_root` | Root of the BIDS-HCP derivatives tree -- where stage 1 writes each subject/session's resampled native-space mask (section 8's `--derivatives-root`-adjacent layout: `sub-{subject}/ses-{session}/func/`). |
 | `hcppipe_root` | Root of the raw HCP Pipelines output -- where stage 1 finds each session's first functional run (for its native reference grid) and both stages 1/4 resolve HCP warp fields (section 8). |
 | `group_gm_mask` | The group-level MNI-space GM mask stage 1 resamples into each subject/session's native space. |
@@ -1075,35 +1077,45 @@ Every field is a full, already-resolved absolute path -- no `{subject}`/
 shared-prefix convenience the way a single hand-edited `ANALYSIS_ROOT` bash
 variable used to provide; if you want that, build these paths with a
 shared prefix in whatever generates your config, not in the pipeline
-scripts themselves. `slurm/pipeline_vars.sh` reads and validates this
+scripts themselves. `slurm/resolve_pipeline_config.sh` reads and validates this
 section (missing required fields fail fast with a clear message) and is
 still sourced by each of `1_`-`4_`, but there's nothing left in it to edit
 by hand.
 
-The scripts are also built around `SCRIPTS_DIR`, an explicit variable
-holding the repo root, used to locate `workflows/`, `utils/`, etc. instead
-of assuming a job's own working directory happens to already be the repo
-root. `0_` resolves its own real location (reliable here because it's
-invoked directly via `bash`, never through `sbatch`, which would otherwise
-obscure the original file path) and `export`s `SCRIPTS_DIR` before
-submitting each job, so it's already set correctly by inheritance when a
-stage script sources `pipeline_vars.sh`. Run `0_` from anywhere:
+**Each of `1_`-`4_` is fully standalone given just its config-path
+argument -- no dependency on `0_` having run first, an already-exported
+`SCRIPTS_DIR`, or the job's working directory happening to be the repo
+root.** That's *because* `scripts_dir` lives in the config: `sbatch` copies
+a batch script into its own spool file before running it, so a stage
+script's own location (`${BASH_SOURCE[0]}`) never points back at the real
+repo the way it reliably does for `0_` (which is invoked directly via
+`bash`, never through `sbatch`) -- and a stage script's working directory
+is just wherever `sbatch` happened to be invoked from unless `--chdir` is
+passed. Each of `1_`-`4_` therefore reads `pipeline.scripts_dir` out of its
+config argument *before* it can even locate `resolve_pipeline_config.sh`,
+via a small bootstrap block at the top of the script (see any of `1_`-`4_`
+for the exact sequence), and passes it along as a plain shell variable from
+there. Run any stage on its own, from anywhere:
+
+```
+sbatch slurm/3_batch_run_mvpa_workflow.sh configs/my-study.json
+```
+
+`0_` still resolves its own location (reliable for the reason above) to
+`cd` to the repo root and build the `sbatch` paths it submits, but that's
+purely for its own use -- it doesn't export anything the child jobs
+depend on. Run it the same way, from anywhere:
 
 ```
 bash /any/path/to/slurm/0_submit_mvpa_pipeline.sh configs/my-study.json
 ```
 
-Standalone submission of an individual stage script doesn't inherit
-`SCRIPTS_DIR` this way -- `pipeline_vars.sh` falls back to the job's own
-working directory when `SCRIPTS_DIR` isn't already set, so submit from the
-repo root (`sbatch slurm/1_batch_resample_native_mask.sh configs/my-study.json`)
-or export it yourself first (`export SCRIPTS_DIR=/path/to/mvpa_banich`).
-The config path is still a required argument either way. `--output`/
-`--error` log paths are plain `#SBATCH` directives (no variable
+`--output`/`--error` log paths are plain `#SBATCH` directives (no variable
 substitution happens in them, since they're parsed before the script body
 ever runs), so they always resolve relative to wherever `sbatch` was
-actually invoked from, regardless of `SCRIPTS_DIR` -- `0_` `cd`s to the
-repo root before submitting so its own jobs' logs land in the right place.
+actually invoked from -- `0_` `cd`s to the repo root before submitting so
+its own jobs' logs land in the right place; submitting a stage script
+directly from somewhere else just means its logs land there instead.
 
 `0_` submits the four numbered jobs via `sbatch --parsable`, each depending
 on the previous one via `--dependency=afterok` (which, for an array job,
