@@ -836,7 +836,7 @@ confusion-style accuracy/evidence matrices, annotated timecourse decoding,
 and importance maps. One script, two scales, switched with `--subject`.
 `mvpa_workflow.py`'s two output families -- `model.kfold_cv` (under
 `model/`) and `model_conditions.testing` (under `test/`) -- are entirely
-independent and shown throughout as separate **"CV"**/**"Full"** sections; a
+independent and shown throughout as separate **"CV"**/**"held-out-test"** sections; a
 subject/report may have either, both, or neither, and every page below
 renders whichever families actually have data:
 
@@ -872,9 +872,10 @@ their presence on disk -- they render automatically whenever `model.kfold_cv`
 subject with only `model_conditions.testing` configured (no `model.kfold_cv`)
 simply has no fold files, so no fold panels, same as before.
 
-**Accuracy/AUC panels show CV and Full side by side, whichever exist.** The
-accuracy panel plots one bar per family present (CV from `model/`, Full from
-`test/`) against a chance-level reference line; for a multi-subject report
+**Accuracy/AUC panels show CV and held-out-test side by side, whichever
+exist.** The accuracy panel plots one bar per family present (CV from
+`model/`, held-out-test from `test/`) against a chance-level reference line;
+for a multi-subject report
 that's the mean across subjects with every subject's own value scattered on
 top (deterministic beeswarm spread, not random jitter, so the figure is
 reproducible run to run), while a single-subject report also overlays that
@@ -884,8 +885,8 @@ report, grouped bars (plus per-fold overlay dots for CV) for a
 single-subject one -- also against a chance-level line. Either panel is
 simply blank when neither family has data for the subjects in scope.
 
-**The confusion-matrices page is a CV/Full grid.** Up to two rows -- "CV"
-(from `model/kfold_accuracy`/`kfold_evidence`) and "Full" (from
+**The confusion-matrices page is a CV/held-out-test grid.** Up to two rows --
+"CV" (from `model/kfold_accuracy`/`kfold_evidence`) and "held-out-test" (from
 `test/test_accuracy`/`test_evidence`) -- each with two columns, Accuracy and
 Evidence; a row is omitted entirely (not left blank) when that family has no
 files for any subject in scope, and a multi-subject report averages each
@@ -901,7 +902,7 @@ independent per-class sigmoid) across those same trials.
 **Importance maps are averaged across subjects only when they share a
 common grid.** A subject can have two independent importance-map families:
 "CV" (`kfold_impa` -- the mean importance map across every k-fold fold's
-own fit) and "Full" (`test_impa` -- the one classifier fit on the complete
+own fit) and "held-out-test" (`test_impa` -- the one classifier fit on the complete
 training set, whose weights are also what gets evaluated against
 `model_conditions.testing` when that's configured). Either, both, or
 neither may exist depending on what `model.kfold_cv`/`model_conditions.testing`
@@ -929,10 +930,11 @@ resampling step required. Otherwise, resample each subject's native-space
 --direction native2mni` (section 8) -- and save the result as
 `{subject}_impa_mni.nii.gz` right alongside it. Either way,
 `generate_report.py`'s `resolve_group_impa_mni` looks for `test_impa_mni`
-(Full) first for each subject, falling back to `kfold_impa_mni` (CV) only
-when Full isn't available for that subject -- so a group of subjects with a
-mix of CV-only, Full-only, and both-configured runs can still all
-contribute to one group average, each via whichever family it has.
+(held-out-test) first for each subject, falling back to `kfold_impa_mni`
+(CV) only when held-out-test isn't available for that subject -- so a group
+of subjects with a mix of CV-only, held-out-test-only, and both-configured
+runs can still all contribute to one group average, each via whichever
+family it has.
 Subjects missing both, or whose map doesn't match the other subjects' grid
 shape, are excluded from the average with a printed warning rather than
 failing the whole report; the group page's title records how many subjects

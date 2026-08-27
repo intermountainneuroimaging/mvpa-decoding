@@ -6,7 +6,7 @@ decoding, importance maps) from mvpa_workflow.py's output -- either for one
 subject, or aggregated across every subject found for a given classifier
 ("desc"). mvpa_workflow.py's k-fold cross-validation (model.kfold_cv, under
 model/) and independent test-set evaluation (model_conditions.testing, under
-test/) are entirely independent and shown as separate "CV"/"Full" sections
+test/) are entirely independent and shown as separate "CV"/"held-out-test" sections
 throughout the report -- a subject may have either, both, or neither.
 Fold-variability panels render automatically when k-fold output is present
 (detected by the presence of `_fold{N}_*` files under model/).
@@ -184,7 +184,7 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: b
         # see "kfold_impa_mni" above -- same idea, in test/. Presence of either
         # this or "kfold_impa_mni" is how render_importance_pages decides a
         # cross-subject group average is spatially valid -- see
-        # resolve_group_impa_mni (Full/test preferred, CV/kfold as fallback).
+        # resolve_group_impa_mni (held-out-test preferred, CV/kfold as fallback).
         "test_impa_mni": os.path.join(base, "test", f"{subject}_impa_mni.nii.gz"),
         # "decoding" (the pre-aggregated summary) isn't read by the timecourse page
         # itself -- it reads "decoding_raw" instead, so trial-to-trial variability
@@ -232,7 +232,7 @@ def load_labeled_csv(path: str) -> pd.DataFrame:
 def infer_categories(analysis_output_dir: str, desc: str, subjects: list) -> list:
     """Category order, read from the first available model_results_auc.csv (already
     saved with category labels by save_model_results) -- no config needed. Checks
-    the CV (kfold) family first, then Full (test) -- either is equally valid,
+    the CV (kfold) family first, then held-out-test -- either is equally valid,
     since regressor_categories is shared across both."""
     for s in subjects:
         p = subject_paths(analysis_output_dir, desc, s)
@@ -337,7 +337,7 @@ def _draw_chance_line(ax, level):
 
 
 def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flags, regressor_categories):
-    """CV (k-fold, entirely within model_conditions.training) and Full (the
+    """CV (k-fold, entirely within model_conditions.training) and held-out-test (the
     complete-training-set classifier evaluated against model_conditions.testing)
     are independent -- a subject/group may have either, both, or neither. Both
     panels render whichever families have data, side by side when both exist."""
@@ -362,7 +362,7 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
     if kfold_totals:
         families.append(("CV", kfold_totals, "C0"))
     if test_totals:
-        families.append(("Full", test_totals, "C1"))
+        families.append(("held-out-test", test_totals, "C1"))
 
     if not families:
         ax.axis("off")
@@ -411,7 +411,7 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
     if kfold_auc_by_subject:
         auc_families.append(("CV", pd.DataFrame(kfold_auc_by_subject), "C0"))
     if test_auc_by_subject:
-        auc_families.append(("Full", pd.DataFrame(test_auc_by_subject), "C1"))
+        auc_families.append(("held-out-test", pd.DataFrame(test_auc_by_subject), "C1"))
 
     if not auc_families:
         ax.axis("off")
@@ -446,7 +446,7 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
 
     auc_title = "Per-class AUC" + (" across subjects" if len(subjects) > 1 else "")
     if len(auc_families) > 1:
-        auc_title += " (CV vs. Full)"
+        auc_title += " (CV vs. held-out-test)"
     ax.set_title(auc_title)
 
     fig.suptitle(f"{desc}: accuracy & AUC", fontsize=14, fontweight="bold")
@@ -456,7 +456,7 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
 
 
 def _load_confusion_family(analysis_output_dir, desc, subjects, acc_key, evi_key):
-    """(accuracy_matrix, evidence_matrix) for one family (CV or Full) -- the
+    """(accuracy_matrix, evidence_matrix) for one family (CV or held-out-test) -- the
     single subject's own matrices, or the mean across subjects for a group
     report. Either/both may be None if that family has no files at all."""
     if len(subjects) == 1:
@@ -478,7 +478,7 @@ def _load_confusion_family(analysis_output_dir, desc, subjects, acc_key, evi_key
 
 
 def render_confusion_matrices_page(pdf, analysis_output_dir, desc, subjects):
-    """CV (k-fold) and Full (independent test set) each get their own row --
+    """CV (k-fold) and held-out-test (independent test set) each get their own row --
     a row is omitted entirely (not left blank) when that family has no files
     for any subject in scope. Every populated cell is labeled with its value
     to 2 decimal places."""
@@ -490,7 +490,7 @@ def render_confusion_matrices_page(pdf, analysis_output_dir, desc, subjects):
         families.append(("CV", kfold_acc, kfold_evi))
     test_acc, test_evi = _load_confusion_family(analysis_output_dir, desc, subjects, "test_accuracy", "test_evidence")
     if test_acc is not None or test_evi is not None:
-        families.append(("Full", test_acc, test_evi))
+        families.append(("held-out-test", test_acc, test_evi))
 
     if not families:
         return
@@ -767,20 +767,20 @@ def _render_fold_mosaic(pdf, fold_files: dict, mean_file: str, regressor_categor
 
 
 def resolve_group_impa_mni(analysis_output_dir: str, desc: str, subjects: list) -> tuple:
-    """Which subjects have an MNI-registered importance map, preferring the Full
-    (test-set) family's test_impa_mni and falling back to the CV (k-fold)
-    family's kfold_impa_mni only when Full isn't available for that subject --
-    neither is ever written by the workflow script itself unless model.mnispace
-    is set, otherwise only by the user separately running `hcp_resample.py
-    --direction native2mni` on the corresponding plain impa file. Returns
-    ({subject: (path, family_label)}, [subjects missing both]) -- pure
-    path-existence check, no image I/O; shape compatibility is checked
-    separately at load time."""
+    """Which subjects have an MNI-registered importance map, preferring the
+    held-out-test family's test_impa_mni and falling back to the CV (k-fold)
+    family's kfold_impa_mni only when held-out-test isn't available for that
+    subject -- neither is ever written by the workflow script itself unless
+    model.mnispace is set, otherwise only by the user separately running
+    `hcp_resample.py --direction native2mni` on the corresponding plain impa
+    file. Returns ({subject: (path, family_label)}, [subjects missing both])
+    -- pure path-existence check, no image I/O; shape compatibility is
+    checked separately at load time."""
     available, missing = {}, []
     for s in subjects:
         p = subject_paths(analysis_output_dir, desc, s)
         if os.path.exists(p["test_impa_mni"]):
-            available[s] = (p["test_impa_mni"], "Full")
+            available[s] = (p["test_impa_mni"], "held-out-test")
         elif os.path.exists(p["kfold_impa_mni"]):
             available[s] = (p["kfold_impa_mni"], "CV")
         else:
@@ -793,10 +793,10 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
     """A subject can have two independent importance-map families now: "CV"
     (kfold_impa -- the mean importance map across every k-fold fold's own fit,
     each fold trained on a different subset of runs, broken out fold-by-fold in
-    the mosaic below) and "Full" (test_impa -- the one classifier fit on the
-    complete training set, whose weights are also what gets evaluated against
-    model_conditions.testing when that's configured). Either, both, or neither
-    may exist for a subject depending on what model.kfold_cv/
+    the mosaic below) and "held-out-test" (test_impa -- the one classifier fit
+    on the complete training set, whose weights are also what gets evaluated
+    against model_conditions.testing when that's configured). Either, both, or
+    neither may exist for a subject depending on what model.kfold_cv/
     model_conditions.testing were configured.
 
     Neither family's space is asserted/known (whatever the input BOLD/mask
@@ -804,8 +804,9 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
     grid -- per-subject maps are therefore never averaged across subjects
     (only across folds, within one subject's CV family, where the grid is
     guaranteed shared) -- see resolve_group_impa_mni for the one exception: if
-    Full (or, failing that, CV) has been separately resampled into MNI space
-    (shared grid) for enough subjects, a real group average becomes possible."""
+    held-out-test (or, failing that, CV) has been separately resampled into
+    MNI space (shared grid) for enough subjects, a real group average becomes
+    possible."""
     if len(subjects) > 1:
         mni_paths, missing = resolve_group_impa_mni(analysis_output_dir, desc, subjects)
         if mni_paths:
@@ -814,7 +815,7 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
                       f"({', '.join(missing)}) -- group map averaged across the remaining {len(mni_paths)}")
             n_cv_fallback = sum(1 for _, fam in mni_paths.values() if fam == "CV")
             if n_cv_fallback:
-                print(f"  (!) {n_cv_fallback} subject(s) had no Full (test-set) MNI map -- used their CV "
+                print(f"  (!) {n_cv_fallback} subject(s) had no held-out-test MNI map -- used their CV "
                       f"(k-fold) MNI map for the group average instead")
 
             imgs = {s: nib.load(path) for s, (path, _) in mni_paths.items()}
@@ -849,7 +850,7 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
                 _plot_categories_page(pdf, p["kfold_impa"], f"{s} (CV, aggregated across folds)",
                                        regressor_categories, mnispace=mnispace)
             if os.path.exists(p["test_impa"]):
-                _plot_categories_page(pdf, p["test_impa"], f"{s} (Full, full training set)",
+                _plot_categories_page(pdf, p["test_impa"], f"{s} (held-out-test, full training set)",
                                        regressor_categories, mnispace=mnispace)
         return
 
@@ -866,7 +867,7 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
                 _render_fold_mosaic(pdf, fold_files, p["kfold_impa"], regressor_categories, mnispace=mnispace)
 
     if os.path.exists(p["test_impa"]):
-        _plot_categories_page(pdf, p["test_impa"], f"{s} (Full, full training set)",
+        _plot_categories_page(pdf, p["test_impa"], f"{s} (held-out-test, full training set)",
                                regressor_categories, mnispace=mnispace)
 
 

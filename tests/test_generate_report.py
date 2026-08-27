@@ -155,7 +155,7 @@ class TestResolveGroupImpaMni:
         (base01 / "test" / "01_impa_mni.nii.gz").write_text("fake")
 
         available, missing = resolve_group_impa_mni(str(tmp_path), "desc1", ["01", "02"])
-        assert available == {"01": (str(base01 / "test" / "01_impa_mni.nii.gz"), "Full")}
+        assert available == {"01": (str(base01 / "test" / "01_impa_mni.nii.gz"), "held-out-test")}
         assert missing == ["02"]
 
     def test_all_subjects_have_full_test_mni_map(self, tmp_path):
@@ -165,7 +165,7 @@ class TestResolveGroupImpaMni:
 
         available, missing = resolve_group_impa_mni(str(tmp_path), "desc1", ["01", "02"])
         assert sorted(available.keys()) == ["01", "02"]
-        assert all(fam == "Full" for _, fam in available.values())
+        assert all(fam == "held-out-test" for _, fam in available.values())
         assert missing == []
 
     def test_falls_back_to_kfold_cv_mni_map_when_full_test_absent(self, tmp_path):
@@ -183,7 +183,7 @@ class TestResolveGroupImpaMni:
         (base / "test" / "01_impa_mni.nii.gz").write_text("fake-full")
 
         available, missing = resolve_group_impa_mni(str(tmp_path), "desc1", ["01"])
-        assert available == {"01": (str(base / "test" / "01_impa_mni.nii.gz"), "Full")}
+        assert available == {"01": (str(base / "test" / "01_impa_mni.nii.gz"), "held-out-test")}
 
 
 # =====================================================
