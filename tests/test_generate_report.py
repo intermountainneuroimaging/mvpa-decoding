@@ -16,6 +16,7 @@ from workflows.generate_report import (
     load_scalar_csv,
     load_labeled_csv,
     infer_categories,
+    compile_group_summary,
     summarize_raw_for_timecourse,
     load_annotation_info,
     resolve_desc,
@@ -227,6 +228,55 @@ class TestInferCategories:
         _make_subject(tmp_path, "desc1", "01")
         categories = infer_categories(str(tmp_path), "desc1", ["01"])
         assert categories == []
+
+
+# =====================================================
+# compile_group_summary
+# =====================================================
+
+def _write_family_csvs(base, subdir, subject, total, auc, acc, evi, categories):
+    d = base / subdir
+    d.mkdir(parents=True, exist_ok=True)
+    np.savetxt(d / f"{subject}_model_results_total_scores.csv", [total], delimiter=",", fmt="%.6f")
+    pd.DataFrame({"auc": auc}, index=categories).to_csv(d / f"{subject}_model_results_auc.csv")
+    pd.DataFrame(acc, index=categories, columns=categories).to_csv(d / f"{subject}_model_results_accuracy.csv")
+    pd.DataFrame(evi, index=categories, columns=categories).to_csv(d / f"{subject}_model_results_evidence.csv")
+
+
+class TestCompileGroupSummary:
+    def test_one_row_per_subject_per_family(self, tmp_path):
+        categories = ["face", "place"]
+        base01 = _make_subject(tmp_path, "desc1", "01", with_test_dir=True)
+        _write_family_csvs(base01, "model", "01", 0.7, [0.8, 0.75], [[0.9, 0.1], [0.2, 0.8]], [[0.85, 0.15], [0.25, 0.75]], categories)
+        _write_family_csvs(base01, "test", "01", 0.6, [0.65, 0.7], [[0.7, 0.3], [0.4, 0.6]], [[0.65, 0.35], [0.45, 0.55]], categories)
+
+        base02 = _make_subject(tmp_path, "desc1", "02")
+        _write_family_csvs(base02, "model", "02", 0.65, [0.72, 0.68], [[0.8, 0.2], [0.3, 0.7]], [[0.78, 0.22], [0.32, 0.68]], categories)
+
+        summary = compile_group_summary(str(tmp_path), "desc1", ["01", "02"])
+
+        assert sorted(zip(summary["subject"], summary["family"])) == [
+            ("01", "CV"), ("01", "held-out-test"), ("02", "CV"),
+        ]
+
+        row01_cv = summary[(summary["subject"] == "01") & (summary["family"] == "CV")].iloc[0]
+        assert row01_cv["total_accuracy"] == pytest.approx(0.7)
+        assert row01_cv["auc_face"] == pytest.approx(0.8)
+        assert row01_cv["auc_place"] == pytest.approx(0.75)
+        assert row01_cv["accuracy_face_face"] == pytest.approx(0.9)
+        assert row01_cv["accuracy_place_face"] == pytest.approx(0.2)
+        assert row01_cv["evidence_face_place"] == pytest.approx(0.15)
+
+        row02_cv = summary[(summary["subject"] == "02") & (summary["family"] == "CV")].iloc[0]
+        assert row02_cv["total_accuracy"] == pytest.approx(0.65)
+
+        # subject 02 has no test/ family at all -- no row for it
+        assert not ((summary["subject"] == "02") & (summary["family"] == "held-out-test")).any()
+
+    def test_no_subjects_have_any_results(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")
+        summary = compile_group_summary(str(tmp_path), "desc1", ["01"])
+        assert summary.empty
 
 
 # =====================================================

@@ -242,6 +242,40 @@ def infer_categories(analysis_output_dir: str, desc: str, subjects: list) -> lis
     return []
 
 
+def compile_group_summary(analysis_output_dir: str, desc: str, subjects: list) -> pd.DataFrame:
+    """One row per (subject, family) with every scalar/vector/matrix metric
+    mvpa_workflow.py produced for that family flattened into its own column --
+    total_accuracy, auc_<category>, accuracy_<true>_<pred>, evidence_<true>_<pred>
+    -- so the whole group's numbers live in one spreadsheet instead of scattered
+    across each subject's own model/test CSVs. A subject missing a family (no
+    model.kfold_cv, or no model_conditions.testing) simply contributes no row
+    for that family; a subject/category set that differs from the rest just
+    leaves the mismatched columns blank for that row (pandas fills NaN)."""
+    rows = []
+    for s in subjects:
+        p = subject_paths(analysis_output_dir, desc, s)
+        for family, prefix in (("CV", "kfold"), ("held-out-test", "test")):
+            total_key, auc_key, acc_key, evi_key = f"{prefix}_total", f"{prefix}_auc", f"{prefix}_accuracy", f"{prefix}_evidence"
+            if not os.path.exists(p[total_key]):
+                continue
+            row = {"subject": s, "family": family, "total_accuracy": load_scalar_csv(p[total_key])}
+            if os.path.exists(p[auc_key]):
+                for cat, val in load_labeled_csv(p[auc_key]).iloc[:, 0].items():
+                    row[f"auc_{cat}"] = val
+            if os.path.exists(p[acc_key]):
+                acc = load_labeled_csv(p[acc_key])
+                for true_cat in acc.index:
+                    for pred_cat in acc.columns:
+                        row[f"accuracy_{true_cat}_{pred_cat}"] = acc.loc[true_cat, pred_cat]
+            if os.path.exists(p[evi_key]):
+                evi = load_labeled_csv(p[evi_key])
+                for true_cat in evi.index:
+                    for pred_cat in evi.columns:
+                        row[f"evidence_{true_cat}_{pred_cat}"] = evi.loc[true_cat, pred_cat]
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 # =====================================================
 # Timecourse annotation info (best-effort -- never raises)
 # =====================================================
@@ -904,6 +938,12 @@ def main():
                                  os.path.dirname(output_path), mnispace=mnispace)
 
     print(f"Report written to: {output_path}")
+
+    if len(subjects) > 1:
+        summary = compile_group_summary(args.analysis_output_dir, desc, subjects)
+        summary_path = os.path.join(os.path.dirname(output_path), f"{desc}_group_summary.csv")
+        summary.to_csv(summary_path, index=False)
+        print(f"Group summary spreadsheet saved to: {summary_path}")
 
 
 if __name__ == "__main__":
