@@ -23,16 +23,20 @@
 # --dependency=afterok on the whole array job is what guarantees this --
 # afterok on an array job id waits for every task in it, not just the first).
 #
-# Can also be run standalone -- submit from the repo root (`sbatch
-# slurm/4_sbatch_generate_report.sh`) so slurm/pipeline_vars.sh's SCRIPTS_DIR
-# fallback and the --output/--error log paths above (plain SBATCH
-# directives, not variable-substituted) both resolve correctly -- or export
-# SCRIPTS_DIR and pass --chdir yourself.
+# Fully standalone -- no dependency on 0_ having run first or exported
+# anything: submit directly with
+# `sbatch slurm/4_sbatch_generate_report.sh configs/my-study.json` from
+# anywhere. The config path (`$1`) is the only required input; its
+# pipeline.scripts_dir is how this script locates the rest of the repo (see
+# resolve_pipeline_config.sh) -- --output/--error log paths above are still
+# plain SBATCH directives (no variable substitution happens in them), so
+# they resolve relative to wherever `sbatch` was invoked from regardless.
 #
 # --time is a rough starting estimate (MNI resampling + PDF/plot rendering
 # across every subject's output, no measured runtime yet) -- check the first
 # run's actual wall time and adjust before relying on it.
 
+set -e
 umask g+w
 
 module use /projects/ics/modules
@@ -41,20 +45,55 @@ module load fsl/6.0.7
 module load anaconda
 conda activate incenv
 
-source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
+CONFIG_FILE="$1"
+if [ -z "$CONFIG_FILE" ]; then
+    echo "Usage: sbatch $(basename "$0") <config.json>" >&2
+    exit 1
+fi
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Config file not found: $CONFIG_FILE" >&2
+    exit 1
+fi
+export CONFIG_FILE
+
+# pipeline.scripts_dir, read directly rather than relying on an exported
+# SCRIPTS_DIR or the job's working directory -- sbatch copies this script
+# into its own spool file before running it, so neither is reliable here
+# (see resolve_pipeline_config.sh's own header comment for the full reasoning)
+SCRIPTS_DIR=$(python3 -c "
+import json, sys
+with open('$CONFIG_FILE') as f:
+    print(json.load(f).get('pipeline', {}).get('scripts_dir', ''))
+")
+if [ -z "$SCRIPTS_DIR" ]; then
+    echo "$(basename "$0"): $CONFIG_FILE's \"pipeline\" section is missing required field: scripts_dir" >&2
+    exit 1
+fi
+export SCRIPTS_DIR
+
+# the group report itself only needs output_dir/master_spreadsheet --
+# hcppipe_root is optional here: it's only used by the native->MNI
+# importance-map resample below, which is itself skipped when hcppipe_root
+# isn't set (e.g. every classifier under this output_dir already used
+# model.mnispace=true, so there's no native-space impa left to resample)
+export REQUIRED_PIPELINE_FIELDS="output_dir master_spreadsheet"
+source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 
 # --------------------------------------------
-# resample each subject's aggregated importance map into MNI space
-# (native2mni), writing <subject>_impa_mni.nii.gz alongside the original --
-# generate_report.py detects that suffix and averages across subjects into
-# one group-mean page instead of one per-subject page each (space not
-# asserted). Loops
-# over every subject directory found under $OUTPUT_DIR (any desc), rather
-# than hardcoding this pipeline's own desc, so it never drifts out of sync
-# with model.desc in the config. MNI_TEMPLATE is used as the --reference grid
-# so every subject's warped map lands on the exact same grid the group
-# average needs (shape-mismatched subjects are otherwise excluded with a
-# warning, not a failure -- see README.md section 7).
+# resample each subject's importance map(s) into MNI space (native2mni),
+# writing <subject>_impa_mni.nii.gz alongside the original -- generate_report.py
+# detects that suffix and averages across subjects into one group-mean page
+# instead of one per-subject page each (space not asserted). model/ (k-fold
+# CV) and test/ (independent test set) are two independent output families --
+# a subject may have either, both, or neither -- so both are resampled
+# whenever present; generate_report.py's resolve_group_impa_mni prefers the
+# test/ (Full) family when both exist for the group average. Loops over
+# every subject directory found under $OUTPUT_DIR (any desc), rather than
+# hardcoding this pipeline's own desc, so it never drifts out of sync with
+# model.desc in the config. MNI_TEMPLATE is used as the --reference grid so
+# every subject's warped map lands on the exact same grid the group average
+# needs (shape-mismatched subjects are otherwise excluded with a warning,
+# not a failure -- see README.md section 7).
 #
 # A subject's own sessions are assumed to share one native/structural
 # registration (the standard, non-longitudinal HCP Pipelines setup), so any
@@ -63,30 +102,45 @@ source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
 # 1_batch_resample_native_mask.sh already relies on within a single session's
 # runs. If your subjects have genuinely distinct per-session registrations,
 # this silently picks the wrong one -- check applywarp's output alignment.
+#
+# HCPPIPE_ROOT is optional (see pipeline.hcppipe_root in the config) --
+# skipped entirely when unset, since every classifier under $OUTPUT_DIR
+# might already be model.mnispace=true (writing *_impa_mni.nii.gz directly,
+# with no plain *_impa.nii.gz ever produced to resample in the first place).
 # --------------------------------------------
-for subject_dir in "$OUTPUT_DIR"/*/*/; do
-    subject=$(basename "$subject_dir")
-    impa="${subject_dir}model/${subject}_impa.nii.gz"
-    [ -f "$impa" ] || continue
+if [ -z "$HCPPIPE_ROOT" ]; then
+    echo "pipeline.hcppipe_root not set -- skipping native->MNI importance-map resample (using whatever *_impa_mni.nii.gz files already exist, e.g. from model.mnispace=true)"
+else
+    for subject_dir in "$OUTPUT_DIR"/*/*/; do
+        subject=$(basename "$subject_dir")
 
-    session_dir=$(find "$HCPPIPE_ROOT/sub-$subject" -maxdepth 1 -type d -name "ses-*" 2>/dev/null | sort | head -n 1)
-    if [ -z "$session_dir" ]; then
-        echo "  (!) sub-$subject: no session directory found under $HCPPIPE_ROOT -- skipping MNI resample"
-        continue
-    fi
-    session=$(basename "$session_dir" | cut -d"-" -f2)
-    impa_mni="${subject_dir}model/${subject}_impa_mni.nii.gz"
+        session_dir=""
+        for family in model test; do
+            impa="${subject_dir}${family}/${subject}_impa.nii.gz"
+            [ -f "$impa" ] || continue
 
-    echo "  sub-$subject (ses-$session): $impa -> $impa_mni"
-    python "$SCRIPTS_DIR/utils/hcp_resample.py" \
-        --input "$impa" \
-        --output "$impa_mni" \
-        --direction native2mni \
-        --subject "$subject" --session "$session" \
-        --derivatives-root "$HCPPIPE_ROOT" \
-        --reference "$MNI_TEMPLATE" \
-        --interp trilinear
-done
+            if [ -z "$session_dir" ]; then
+                session_dir=$(find "$HCPPIPE_ROOT/sub-$subject" -maxdepth 1 -type d -name "ses-*" 2>/dev/null | sort | head -n 1)
+                if [ -z "$session_dir" ]; then
+                    echo "  (!) sub-$subject: no session directory found under $HCPPIPE_ROOT -- skipping MNI resample"
+                    break
+                fi
+                session=$(basename "$session_dir" | cut -d"-" -f2)
+            fi
+
+            impa_mni="${subject_dir}${family}/${subject}_impa_mni.nii.gz"
+            echo "  sub-$subject (ses-$session, $family): $impa -> $impa_mni"
+            python "$SCRIPTS_DIR/utils/hcp_resample.py" \
+                --input "$impa" \
+                --output "$impa_mni" \
+                --direction native2mni \
+                --subject "$subject" --session "$session" \
+                --derivatives-root "$HCPPIPE_ROOT" \
+                --reference "$MNI_TEMPLATE" \
+                --interp trilinear
+        done
+    done
+fi
 
 python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR \
     --config $CONFIG_FILE --master-spreadsheet $MASTER_SPREADSHEET

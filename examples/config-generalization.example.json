@@ -1,7 +1,7 @@
 {
   "config_version": "1.0",
   "created_by": "AKH",
-  "notes": "MVPA face/place; masking on grey matter",
+  "notes": "MVPA face/place; masking on grey matter. Independent train(loc)/test(WM*) split, no model.kfold_cv -- mvpa_workflow.py no longer derives an internal leave-one-run-out CV diagnostic over model_conditions.training automatically (that heuristic is retired); add model.kfold_cv (e.g. {\"strategy\": \"per_run\"}) if you also want that diagnostic alongside this held-out test.",
 
   "event_extraction": {
     "bids_root": "examples/sample-data",

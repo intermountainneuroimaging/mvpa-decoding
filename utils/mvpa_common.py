@@ -2,10 +2,11 @@
 """
 Shared utilities for the mvpa_banich toolchain: BIDS filename parsing, the
 onset/duration -> BOLD volume-range math, the model_conditions query DSL, and
-the config-loading/classification/decoding primitives used by both
-mvpa_generalization_workflow.py (independent train/test) and
-mvpa_kfold_workflow.py (same-task, split-by-run k-fold) -- also used directly
-by generate_master_spreadsheet.py and validate_model_config.py.
+the config-loading/classification/decoding primitives used by
+mvpa_workflow.py (independent train/test evaluation, k-fold cross-validation
+within training, and timecourse decoding -- each an independent, optional
+step) -- also used directly by generate_master_spreadsheet.py and
+validate_model_config.py.
 """
 
 import importlib
@@ -246,7 +247,7 @@ def resolve_window_times(window: dict, onset: float, duration: float):
 
 # =====================================================
 # Small shared helpers (no dependency on any script's module-level state --
-# safe to import from mvpa_generalization_workflow.py, generate_report.py, or anywhere else)
+# safe to import from mvpa_workflow.py, generate_report.py, or anywhere else)
 # =====================================================
 
 def quick_safe(name) -> str:
@@ -731,12 +732,32 @@ def model_classification(training_data, training_labels, feature_selection_cfg: 
     return pipe
 
 
+def extract_importance_map(pipe, n_features: int) -> np.ndarray:
+    """Classifier weights reshaped back into whole-brain (unsliced) voxel space --
+    pure function of the fitted pipeline itself, no labeled data needed, so it can
+    produce a model's importance map even when there's no test set to score it
+    against (e.g. a training-only classifier used solely for timecourse decoding)."""
+    clf = pipe.named_steps["classifier"]
+    xfeat = pipe.named_steps["feature_selection"].get_support()
+    n_class = len(clf.classes_)
+
+    # special case where classifier is binary (yes/no) -- only codes one label
+    if n_class == 2:
+        # voxel weights -- volume 0 and volume 1 are mat*-1 of each other
+        impa = np.vstack((clf.coef_, -clf.coef_))
+    else:
+        impa = clf.coef_
+
+    impa_full = np.zeros((n_class, n_features), dtype=impa.dtype)
+    impa_full[:, xfeat] = impa
+    return impa_full
+
+
 def model_performance(pipe, testing_data, testing_labels):
 
     print("Testing model performance...")
 
     clf = pipe.named_steps["classifier"]
-    xfeat = pipe.named_steps["feature_selection"].get_support()
 
     # classes the classifier was actually trained on -- not np.unique(testing_labels),
     # which would drift shape-to-shape if a given fold's held-out data happens to be
@@ -754,32 +775,13 @@ def model_performance(pipe, testing_data, testing_labels):
     # total model accuracy
     ttl_score = accuracy_score(testing_labels, xpred)
 
-    # special case where classifier is binary (yes/no) -- only codes one label
-    if n_class == 2:
+    impa_full = extract_importance_map(pipe, n_features)
 
-        # voxel weights
-        impa = np.vstack((clf.coef_, -clf.coef_))
-        ## important volume 0 and volume 1 are mat*-1 of eachother.. Compute 1 tail ttests always
-        print(impa.shape)
-
-        # evidence: sigmoid on decision function → class-1 prob; other is 1-p
-        d = pipe.decision_function(testing_data)
-        p1 = 1.0 / (1.0 + np.exp(-d))
-        p0 = 1.0 - p1
-        xevi = np.vstack([p0, p1]).T
-
-    else:
-
-        # voxel weights
-        impa = clf.coef_
-
-        # evidence: multinomial OV(A)R decision_function → pass through sigmoid per class
-        d = pipe.decision_function(testing_data)  # shape: (n, n_class)
-        xevi = 1.0 / (1.0 + np.exp(-d))
-
-    # store importance values in original dataformat
-    impa_full = np.zeros((n_class, n_features), dtype=impa.dtype)
-    impa_full[:, xfeat] = impa
+    # evidence: same normalized-probability definition timecourse_decoding()
+    # uses (softmax/predict_proba, rows sum to 1) -- not an independent
+    # per-class sigmoid, which would let "evidence" mean two different things
+    # depending on which report page you're looking at
+    xevi = decision_evidence(pipe, testing_data)
 
     # normalized confusion matrix, and evidence matrix
     acc_mx = np.zeros((n_class, n_class))
@@ -808,16 +810,48 @@ def model_performance(pipe, testing_data, testing_labels):
         for j in range(n_class)
     ], dtype=float)
 
+    # feature-selection footprint of this particular fit -- same three values
+    # timecourse_decoding() already reports, so a fold's/test-set's own
+    # selected-voxel count is visible next to its accuracy/AUC rather than
+    # only ever showing up for the timecourse page
+    n_selected = int(pipe.named_steps["feature_selection"].get_support().sum())
+
     # record model results
     xout = {
         'total_scores': ttl_score,
         'accuracy': acc_mx,  #acc_mx
         'evidence': evi_mx,  #evi_mx
 
-        'auc': auc
+        'auc': auc,
+
+        'whole_voxels': n_features,
+        'selected_voxels': n_selected,
+        'feature_percent': 100 * n_selected / n_features,
     }
 
     return xout, impa_full
+
+
+def _partial_roc_auc_ovr(estimator, X, y):
+    """One-vs-rest macro-average AUC, tolerant of a y that doesn't contain
+    every class the estimator was fit on -- e.g. model_conditions.testing
+    deliberately querying fewer categories than model_conditions.training
+    (a real, structural mismatch, not just an occasional permutation
+    artifact). Classes absent from y (or present as only one label, making
+    AUC undefined) are skipped rather than raising, mirroring the per-class
+    tolerance model_performance() already has. sklearn's built-in
+    "roc_auc_ovr" scorer has no such tolerance -- it hard-requires y's class
+    count to equal the estimator's fitted class count, which this fixed
+    train/test partition can never satisfy when testing is a strict subset
+    of training's categories."""
+    proba = estimator.predict_proba(X)
+    aucs = []
+    for j, cls in enumerate(estimator.classes_):
+        yj = (y == cls).astype(int)
+        if yj.min() == yj.max():
+            continue
+        aucs.append(roc_auc_score(yj, proba[:, j]))
+    return float(np.mean(aucs)) if aucs else np.nan
 
 
 def permutation_significance(training_data, training_labels, testing_data, testing_labels, n_permutations, random_state,
@@ -835,10 +869,12 @@ def permutation_significance(training_data, training_labels, testing_data, testi
     distribution for a fixed train/test split (not a naive shuffle done
     outside the fit/CV structure, which would be optimistic).
 
-    One permutation_test_score call per metric (accuracy, roc_auc_ovr --
-    the same one-vs-rest convention model_performance()'s own AUC already
-    uses, just via sklearn's built-in scorer instead of a second hand-rolled
-    computation)."""
+    One permutation_test_score call per metric: accuracy (sklearn's builtin
+    scorer), and a one-vs-rest macro AUC via _partial_roc_auc_ovr (not
+    sklearn's builtin "roc_auc_ovr" scorer -- that one raises whenever y's
+    class count doesn't equal the estimator's fitted class count, which a
+    testing section covering fewer categories than training hits on every
+    single permutation round)."""
     X = np.vstack([training_data, testing_data])
     y = np.concatenate([training_labels, testing_labels])
     test_fold = np.concatenate([
@@ -854,14 +890,14 @@ def permutation_significance(training_data, training_labels, testing_data, testi
     mode, param = resolve_feature_selection_params(training_data, training_labels, feature_selection_cfg)
 
     rows = []
-    for metric in ("accuracy", "roc_auc_ovr"):
+    for metric_name, scoring in (("accuracy", "accuracy"), ("roc_auc_ovr", _partial_roc_auc_ovr)):
         pipe = build_classifier_pipeline(mode, param, classifier_name, classifier_params)
         score, _, p_value = permutation_test_score(
-            pipe, X, y, cv=cv, scoring=metric,
+            pipe, X, y, cv=cv, scoring=scoring,
             n_permutations=n_permutations, random_state=random_state, n_jobs=-1,
         )
-        print(f"  permutation test [{metric}]: real={score:.4f}, p={p_value:.4g} ({n_permutations} permutations)")
-        rows.append({"metric": metric, "real_score": score, "p_value": p_value, "n_permutations": n_permutations})
+        print(f"  permutation test [{metric_name}]: real={score:.4f}, p={p_value:.4g} ({n_permutations} permutations)")
+        rows.append({"metric": metric_name, "real_score": score, "p_value": p_value, "n_permutations": n_permutations})
 
     return pd.DataFrame(rows)
 

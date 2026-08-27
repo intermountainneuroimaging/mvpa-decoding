@@ -1,7 +1,7 @@
 {
   "config_version": "1.0",
   "created_by": "AKH",
-  "notes": "Haxby et al. 2001 (OpenNeuro ds000105) 8-way object category classifier; minimally preprocessed (motion correction + rigid coregistration to run 1 + linear detrending via FSL, see tutorial/preprocess_haxby.sh) -- not a scientifically rigorous preprocessing pipeline",
+  "notes": "Haxby et al. 2001 (OpenNeuro ds000105) 8-way object category classifier; minimally preprocessed (motion correction + rigid coregistration to run 1 + linear detrending via FSL, see tutorial/preprocess_haxby.sh) -- not a scientifically rigorous preprocessing pipeline. Independent train(runs 1-9)/test(runs 10-12) split, no model.kfold_cv -- see tutorial/README.md's Results section for how this affects the reported internal-CV number under mvpa_workflow.py; add model.kfold_cv (e.g. {\"strategy\": \"per_run\"}) to reproduce that diagnostic explicitly, or see config-kfold-haxby.example.json for the same categories run as a pure k-fold example.",
   "event_extraction": {
     "bids_root": "tutorial/haxby-data",
     "derivatives_root": "tutorial/haxby-data/derivatives",

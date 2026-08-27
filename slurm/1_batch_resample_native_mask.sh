@@ -24,12 +24,16 @@
 # check with: ls -d $HCPPIPE_ROOT/sub-* | wc -l
 #
 # Stage 1 of 0_submit_mvpa_pipeline.sh (mask resample -> master spreadsheet ->
-# k-fold classifier -> group report). Can also be run standalone -- submit
-# from the repo root (`sbatch slurm/1_batch_resample_native_mask.sh`) so
-# slurm/pipeline_vars.sh's SCRIPTS_DIR fallback and the --output/--error log
-# paths above (plain SBATCH directives, not variable-substituted) both
-# resolve correctly -- or export SCRIPTS_DIR and pass --chdir yourself.
+# k-fold classifier -> group report). Fully standalone -- no dependency on
+# 0_ having run first or exported anything: submit directly with
+# `sbatch slurm/1_batch_resample_native_mask.sh configs/my-study.json` from
+# anywhere. The config path (`$1`) is the only required input; its
+# pipeline.scripts_dir is how this script locates the rest of the repo (see
+# resolve_pipeline_config.sh) -- --output/--error log paths above are still
+# plain SBATCH directives (no variable substitution happens in them), so
+# they resolve relative to wherever `sbatch` was invoked from regardless.
 
+set -e
 umask g+w
 
 module use /projects/ics/modules
@@ -38,7 +42,37 @@ module load fsl/6.0.7
 module load anaconda
 conda activate incenv
 
-source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
+CONFIG_FILE="$1"
+if [ -z "$CONFIG_FILE" ]; then
+    echo "Usage: sbatch $(basename "$0") <config.json>" >&2
+    exit 1
+fi
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Config file not found: $CONFIG_FILE" >&2
+    exit 1
+fi
+export CONFIG_FILE
+
+# pipeline.scripts_dir, read directly rather than relying on an exported
+# SCRIPTS_DIR or the job's working directory -- sbatch copies this script
+# into its own spool file before running it, so neither is reliable here
+# (see resolve_pipeline_config.sh's own header comment for the full reasoning)
+SCRIPTS_DIR=$(python3 -c "
+import json, sys
+with open('$CONFIG_FILE') as f:
+    print(json.load(f).get('pipeline', {}).get('scripts_dir', ''))
+")
+if [ -z "$SCRIPTS_DIR" ]; then
+    echo "$(basename "$0"): $CONFIG_FILE's \"pipeline\" section is missing required field: scripts_dir" >&2
+    exit 1
+fi
+export SCRIPTS_DIR
+
+# this stage builds the per-subject/session native mask, so it needs the
+# study's HCP derivatives root, the group MNI mask to resample, and where
+# to write the result -- everything else in "pipeline" is irrelevant here
+export REQUIRED_PIPELINE_FIELDS="bids_hcp_root hcppipe_root group_gm_mask"
+source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 
 # get subject for this array task (same pattern as batch_run_mvpa_workflow.sh)
 subject=`ls -d $HCPPIPE_ROOT/sub-* | rev | cut -d"/" -f1 | rev | cut -d"-" -f2 | sed -n "$SLURM_ARRAY_TASK_ID p"`

@@ -1,7 +1,7 @@
 # Theoretical background & use case
 
 This pipeline (`generate_master_spreadsheet.py` → `validate_model_config.py` →
-`mvpa_generalization_workflow.py`) is a config-driven replication of the multivariate
+`mvpa_workflow.py`) is a config-driven replication of the multivariate
 pattern analysis (MVPA) approach in:
 
 > Kim, H., Smolker, H. R., Smith, L. L., Banich, M. T., & Lewis-Peacock, J. A.
@@ -14,7 +14,7 @@ Neuroimaging Consortium, CU Boulder) is the direct methodological ancestor of
 this codebase: same TR (460 ms), the same 4.6 s / 10-TR hemodynamic-lag shift,
 the same ANOVA feature selection (voxel-wise, p < 0.05), the same L2-penalized
 logistic regression classifier, and the same leave-one-run-out cross-validation
-scheme.
+scheme (`model.kfold_cv.strategy: "per_run"`).
 
 ## The scientific question
 
@@ -67,7 +67,7 @@ down faster or further than simply maintaining the item is evidence that the
 item's representation is being actively removed from the focus of attention,
 not just passively decaying.
 
-This repo's `mvpa_generalization_workflow.py` reproduces that logic directly:
+This repo's `mvpa_workflow.py` reproduces that logic directly:
 `build_timecourse_instructions()` recomputes, per trial, exactly this kind of
 onset-locked window (via `onset`/`duration`/`trial_index`, independent of the
 `hemodynamic_lag` used to build the table), predicts the trained classifier at
@@ -79,7 +79,7 @@ time series.
 
 | Output | Paper analog |
 |---|---|
-| `cv/*_cv_results_accuracy.csv`, `*_auc.csv` | Classifier confusion matrices / AUC per operation (Fig. 2a, 3a) -- "can this be reliably decoded at all" |
+| `model/*_model_results_accuracy.csv`, `*_auc.csv` (k-fold CV, via `model.kfold_cv`) | Classifier confusion matrices / AUC per operation (Fig. 2a, 3a) -- "can this be reliably decoded at all" |
 | `*_impa.nii.gz` (importance maps) | Positive/negative classifier importance maps (Fig. 2b) -- which voxels/regions drive the classification |
 | `decoding/*_summary_decoding_results.csv` | Trial-averaged decoding time series (Fig. 4a/4b) -- how classifier evidence for the removed item evolves over time under each operation. (`*_decoding_results.csv` is the raw, per-TR data this is averaged from.) |
 | `<subject>_trial_pivot.csv` | Sanity check only -- no analog in the paper |

@@ -2,11 +2,14 @@
 
 """
 Generate a PDF report (accuracy/AUC, confusion-style matrices, timecourse
-decoding, importance maps) from mvpa_generalization_workflow.py's or
-mvpa_kfold_workflow.py's output -- either for one subject, or aggregated
-across every subject found for a given classifier ("desc"). Fold-variability
-panels render automatically when the input is mvpa_kfold_workflow.py's
-output (detected by the presence of `_fold{N}_*` files).
+decoding, importance maps) from mvpa_workflow.py's output -- either for one
+subject, or aggregated across every subject found for a given classifier
+("desc"). mvpa_workflow.py's k-fold cross-validation (model.kfold_cv, under
+model/) and independent test-set evaluation (model_conditions.testing, under
+test/) are entirely independent and shown as separate "CV"/"held-out-test" sections
+throughout the report -- a subject may have either, both, or neither.
+Fold-variability panels render automatically when k-fold output is present
+(detected by the presence of `_fold{N}_*` files under model/).
 
 Usage:
     # group report -- aggregates every subject found under <dir>/<desc>/*/ --
@@ -35,6 +38,7 @@ import glob
 import json
 import os
 import sys
+import textwrap
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -60,8 +64,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--analysis-output-dir", required=True,
-        help="Same --analysis-output-dir passed to mvpa_generalization_workflow.py -- results are read from "
-             "<this>/<desc>/*/{cv,model,decoding}/"
+        help="Same --analysis-output-dir passed to mvpa_workflow.py -- results are read from "
+             "<this>/<desc>/*/{model,test,decoding}/"
     )
     parser.add_argument(
         "--desc", default=None,
@@ -123,16 +127,24 @@ def resolve_mnispace(config_path: str) -> bool:
 # Subject-scope discovery + file layout
 # =====================================================
 
+def _subject_has_results(base: str, subject: str) -> bool:
+    """model/ (k-fold) or test/ (independent test set) -- a subject can have
+    either, both, or (in a training+timecourse_decoding-only run) neither,
+    in which case they're not a "result" for report purposes."""
+    subj_base = os.path.join(base, subject)
+    return os.path.isdir(os.path.join(subj_base, "model")) or os.path.isdir(os.path.join(subj_base, "test"))
+
+
 def list_subject_dirs(analysis_output_dir: str, desc: str, subject: str = None) -> list:
     base = os.path.join(analysis_output_dir, desc)
     if subject:
-        if not os.path.isdir(os.path.join(base, subject, "model")):
+        if not _subject_has_results(base, subject):
             raise SystemExit(f"No results found for subject {subject!r} at {os.path.join(base, subject)}")
         return [subject]
 
     subjects = sorted(
         name for name in os.listdir(base)
-        if os.path.isdir(os.path.join(base, name, "model"))
+        if _subject_has_results(base, name)
     ) if os.path.isdir(base) else []
     if not subjects:
         raise SystemExit(f"No subject result folders found under {base}")
@@ -141,30 +153,52 @@ def list_subject_dirs(analysis_output_dir: str, desc: str, subject: str = None) 
 
 def subject_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: bool = False) -> dict:
     base = os.path.join(analysis_output_dir, desc, subject)
+    tag = impa_tag(mnispace)
     return {
-        "cv_total": os.path.join(base, "cv", f"{subject}_cv_results_total_scores.csv"),
-        "model_total": os.path.join(base, "model", f"{subject}_model_results_total_scores.csv"),
-        "model_auc": os.path.join(base, "model", f"{subject}_model_results_auc.csv"),
-        "model_accuracy": os.path.join(base, "model", f"{subject}_model_results_accuracy.csv"),
-        "model_evidence": os.path.join(base, "model", f"{subject}_model_results_evidence.csv"),
+        # K-fold cross-validation, entirely within model_conditions.training
+        # (mvpa_workflow.py's run_kfold) -- aggregated across folds. model/ is
+        # exclusively this family's directory.
+        "kfold_total": os.path.join(base, "model", f"{subject}_model_results_total_scores.csv"),
+        "kfold_auc": os.path.join(base, "model", f"{subject}_model_results_auc.csv"),
+        "kfold_accuracy": os.path.join(base, "model", f"{subject}_model_results_accuracy.csv"),
+        "kfold_evidence": os.path.join(base, "model", f"{subject}_model_results_evidence.csv"),
+        "kfold_whole_voxels": os.path.join(base, "model", f"{subject}_model_results_whole_voxels.csv"),
+        "kfold_selected_voxels": os.path.join(base, "model", f"{subject}_model_results_selected_voxels.csv"),
+        "kfold_feature_percent": os.path.join(base, "model", f"{subject}_model_results_feature_percent.csv"),
         # filename tag depends on model.mnispace (see impa_tag): "impa_mni" when
         # the input BOLD/mask were confirmed-by-config to already be in MNI
         # space, plain "impa" otherwise (space left unasserted, since it isn't
         # reliably knowable from the file itself -- see render_importance_pages).
-        "model_impa": os.path.join(base, "model", f"{subject}_{impa_tag(mnispace)}.nii.gz"),
+        "kfold_impa": os.path.join(base, "model", f"{subject}_{tag}.nii.gz"),
         # always "impa_mni" regardless of the mnispace argument above -- either
         # because mnispace=true made the workflow write that filename directly
-        # (in which case this coincides with "model_impa"), or because the user
-        # separately resampled a plain "impa" file via `hcp_resample.py
+        # (in which case this coincides with "kfold_impa"), or because the user
+        # separately resampled the plain "impa" file via `hcp_resample.py
         # --direction native2mni --output .../model/{subject}_impa_mni.nii.gz`.
-        # Its presence is how render_importance_pages decides a cross-subject
-        # group average is spatially valid -- see resolve_group_impa_mni.
-        "model_impa_mni": os.path.join(base, "model", f"{subject}_impa_mni.nii.gz"),
+        "kfold_impa_mni": os.path.join(base, "model", f"{subject}_impa_mni.nii.gz"),
+        # Independent test set: one classifier fit on the complete training
+        # set, evaluated against model_conditions.testing (mvpa_workflow.py).
+        # test/ is exclusively this family's directory -- same filenames as
+        # the kfold family above, just under a different directory.
+        "test_total": os.path.join(base, "test", f"{subject}_model_results_total_scores.csv"),
+        "test_auc": os.path.join(base, "test", f"{subject}_model_results_auc.csv"),
+        "test_accuracy": os.path.join(base, "test", f"{subject}_model_results_accuracy.csv"),
+        "test_evidence": os.path.join(base, "test", f"{subject}_model_results_evidence.csv"),
+        "test_whole_voxels": os.path.join(base, "test", f"{subject}_model_results_whole_voxels.csv"),
+        "test_selected_voxels": os.path.join(base, "test", f"{subject}_model_results_selected_voxels.csv"),
+        "test_feature_percent": os.path.join(base, "test", f"{subject}_model_results_feature_percent.csv"),
+        "test_impa": os.path.join(base, "test", f"{subject}_{tag}.nii.gz"),
+        # see "kfold_impa_mni" above -- same idea, in test/. Presence of either
+        # this or "kfold_impa_mni" is how render_importance_pages decides a
+        # cross-subject group average is spatially valid -- see
+        # resolve_group_impa_mni (held-out-test preferred, CV/kfold as fallback).
+        "test_impa_mni": os.path.join(base, "test", f"{subject}_impa_mni.nii.gz"),
         # "decoding" (the pre-aggregated summary) isn't read by the timecourse page
         # itself -- it reads "decoding_raw" instead, so trial-to-trial variability
-        # within each subject/fold (never retained in the summary) is available for
+        # within each subject (never retained in the summary) is available for
         # the plot -- see summarize_raw_for_timecourse. Kept here for any other
-        # consumer that wants the plain one-row-per-group summary.
+        # consumer that wants the plain one-row-per-group summary. Always the
+        # complete-training-set classifier's decoding -- never per-fold.
         "decoding": os.path.join(base, "decoding", f"{subject}_summary_decoding_results.csv"),
         "decoding_raw": os.path.join(base, "decoding", f"{subject}_decoding_results.csv"),
     }
@@ -176,19 +210,19 @@ def has_fold_files(analysis_output_dir: str, desc: str, subject: str) -> bool:
 
 
 def fold_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: bool = False) -> dict:
-    """{fold_id: {..same keys as subject_paths' model/decoding entries..}} for every
-    fold found for this subject (empty dict if no fold-workflow output exists)."""
+    """{fold_id: {kfold_total/kfold_auc/kfold_impa}} for every k-fold fold found
+    for this subject (empty dict if model.kfold_cv wasn't configured/run). Always
+    under model/ -- k-fold is the only fold-based family; there's no such thing
+    as a "test fold" since the independent test-set evaluation is a single fit."""
     base = os.path.join(analysis_output_dir, desc, subject)
     totals = sorted(glob.glob(os.path.join(base, "model", f"{subject}_fold*_model_results_total_scores.csv")))
     fold_ids = [int(os.path.basename(p).split("_fold")[1].split("_")[0]) for p in totals]
     tag = impa_tag(mnispace)
     return {
         fid: {
-            "model_total": os.path.join(base, "model", f"{subject}_fold{fid}_model_results_total_scores.csv"),
-            "model_auc": os.path.join(base, "model", f"{subject}_fold{fid}_model_results_auc.csv"),
-            "model_impa": os.path.join(base, "model", f"{subject}_fold{fid}_{tag}.nii.gz"),
-            "decoding": os.path.join(base, "decoding", f"{subject}_fold{fid}_summary_decoding_results.csv"),
-            "decoding_raw": os.path.join(base, "decoding", f"{subject}_fold{fid}_decoding_results.csv"),
+            "kfold_total": os.path.join(base, "model", f"{subject}_fold{fid}_model_results_total_scores.csv"),
+            "kfold_auc": os.path.join(base, "model", f"{subject}_fold{fid}_model_results_auc.csv"),
+            "kfold_impa": os.path.join(base, "model", f"{subject}_fold{fid}_{tag}.nii.gz"),
         }
         for fid in fold_ids
     }
@@ -204,12 +238,70 @@ def load_labeled_csv(path: str) -> pd.DataFrame:
 
 def infer_categories(analysis_output_dir: str, desc: str, subjects: list) -> list:
     """Category order, read from the first available model_results_auc.csv (already
-    saved with category labels by save_model_results) -- no config needed."""
+    saved with category labels by save_model_results) -- no config needed. Checks
+    the CV (kfold) family first, then held-out-test -- either is equally valid,
+    since regressor_categories is shared across both."""
     for s in subjects:
         p = subject_paths(analysis_output_dir, desc, s)
-        if os.path.exists(p["model_auc"]):
-            return load_labeled_csv(p["model_auc"]).index.tolist()
+        for key in ("kfold_auc", "test_auc"):
+            if os.path.exists(p[key]):
+                return load_labeled_csv(p[key]).index.tolist()
     return []
+
+
+def compile_group_summary(analysis_output_dir: str, desc: str, subjects: list) -> pd.DataFrame:
+    """One row per (subject, family) with every scalar/vector/matrix metric
+    mvpa_workflow.py produced for that family flattened into its own column --
+    total_accuracy, whole_voxels, selected_voxels, feature_percent,
+    auc_<category>, accuracy_<true>_<pred>, evidence_<true>_<pred> -- so the
+    whole group's numbers live in one spreadsheet instead of scattered
+    across each subject's own model/test CSVs. A subject missing a family (no
+    model.kfold_cv, or no model_conditions.testing) simply contributes no row
+    for that family; a subject/category set that differs from the rest just
+    leaves the mismatched columns blank for that row (pandas fills NaN)."""
+    rows = []
+    for s in subjects:
+        p = subject_paths(analysis_output_dir, desc, s)
+        for family, prefix in (("CV", "kfold"), ("held-out-test", "test")):
+            total_key, auc_key, acc_key, evi_key = f"{prefix}_total", f"{prefix}_auc", f"{prefix}_accuracy", f"{prefix}_evidence"
+            if not os.path.exists(p[total_key]):
+                continue
+            row = {"subject": s, "family": family, "total_accuracy": load_scalar_csv(p[total_key])}
+            for metric in ("whole_voxels", "selected_voxels", "feature_percent"):
+                metric_key = f"{prefix}_{metric}"
+                if os.path.exists(p[metric_key]):
+                    row[metric] = load_scalar_csv(p[metric_key])
+            if os.path.exists(p[auc_key]):
+                for cat, val in load_labeled_csv(p[auc_key]).iloc[:, 0].items():
+                    row[f"auc_{cat}"] = val
+            if os.path.exists(p[acc_key]):
+                acc = load_labeled_csv(p[acc_key])
+                for true_cat in acc.index:
+                    for pred_cat in acc.columns:
+                        row[f"accuracy_{true_cat}_{pred_cat}"] = acc.loc[true_cat, pred_cat]
+            if os.path.exists(p[evi_key]):
+                evi = load_labeled_csv(p[evi_key])
+                for true_cat in evi.index:
+                    for pred_cat in evi.columns:
+                        row[f"evidence_{true_cat}_{pred_cat}"] = evi.loc[true_cat, pred_cat]
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def compile_group_decoding(analysis_output_dir: str, desc: str, subjects: list) -> pd.DataFrame:
+    """Every subject's full per-TR timecourse decoding output
+    (decoding_raw -- one row per decoded volume, not the pre-aggregated
+    per-(window_index, regressor_label) summary) concatenated into one
+    table -- each row already carries its own "subject" column (from
+    build_timecourse_instructions), so no extra tagging is needed here.
+    Subjects with no timecourse_decoding output simply contribute nothing."""
+    frames = [
+        pd.read_csv(p["decoding_raw"], dtype={"subject": str})
+        for s in subjects
+        for p in [subject_paths(analysis_output_dir, desc, s)]
+        if os.path.exists(p["decoding_raw"])
+    ]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 # =====================================================
@@ -292,7 +384,32 @@ def render_title_page(pdf, desc, subjects, config_path, output_path):
         lines.append("Subjects: " + ", ".join(subjects))
     lines.append(f"Config: {config_path or '(not provided -- timecourse annotation skipped)'}")
     lines.append(f"Output: {output_path}")
-    ax.text(0.05, 0.92, "\n".join(lines), fontsize=13, va="top", family="monospace")
+
+    # soft-wrap every line to whatever actually fits on the page -- measured
+    # from the real renderer rather than a guessed character count (the axes
+    # box is narrower than the full figure, and font substitution/dpi can
+    # shift actual glyph width), since Config/Output are full filesystem
+    # paths with no natural break points (100+ chars on a real cluster run)
+    # that would otherwise run off the page edge instead of onto a
+    # continuation line.
+    x0, y0 = 0.05, 0.92
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    probe = ax.text(0, 0, "M" * 40, fontsize=13, family="monospace")
+    char_width_px = probe.get_window_extent(renderer=renderer).width / 40
+    probe.remove()
+    axes_width_px = ax.get_window_extent(renderer=renderer).width
+    avail_px = axes_width_px * (1 - x0) - char_width_px * 2  # small right-margin buffer
+    wrap_width = max(20, int(avail_px / char_width_px))
+
+    wrapped_lines = []
+    for line in lines:
+        wrapped_lines.extend(textwrap.wrap(
+            line, width=wrap_width, subsequent_indent="    ",
+            break_long_words=True, break_on_hyphens=False,
+        ) or [line])
+
+    ax.text(x0, y0, "\n".join(wrapped_lines), fontsize=13, va="top", family="monospace")
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -307,100 +424,117 @@ def _draw_chance_line(ax, level):
 
 
 def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flags, regressor_categories):
-    cv_totals, model_totals, auc_by_subject = {}, {}, {}
+    """CV (k-fold, entirely within model_conditions.training) and held-out-test (the
+    complete-training-set classifier evaluated against model_conditions.testing)
+    are independent -- a subject/group may have either, both, or neither. Both
+    panels render whichever families have data, side by side when both exist."""
+    kfold_totals, test_totals = {}, {}
+    kfold_auc_by_subject, test_auc_by_subject = {}, {}
     for s in subjects:
         p = subject_paths(analysis_output_dir, desc, s)
-        if os.path.exists(p["cv_total"]):
-            cv_totals[s] = load_scalar_csv(p["cv_total"])
-        if os.path.exists(p["model_total"]):
-            model_totals[s] = load_scalar_csv(p["model_total"])
-        if os.path.exists(p["model_auc"]):
-            auc_by_subject[s] = load_labeled_csv(p["model_auc"]).iloc[:, 0]
-
-    # mvpa_kfold_workflow.py never writes cv/<subject>_cv_results_total_scores.csv
-    # -- same-task k-fold data has no separate internal-CV-vs-held-out-test
-    # split the way mvpa_generalization_workflow.py's independent train/test
-    # does; the fold-aggregated model_total *is* the cross-validated estimate.
-    # Label that one bar accordingly instead of "held-out test", which implies
-    # a genuinely independent test set that k-fold output doesn't have.
-    is_kfold = any(fold_flags.get(s) for s in subjects)
+        if os.path.exists(p["kfold_total"]):
+            kfold_totals[s] = load_scalar_csv(p["kfold_total"])
+        if os.path.exists(p["test_total"]):
+            test_totals[s] = load_scalar_csv(p["test_total"])
+        if os.path.exists(p["kfold_auc"]):
+            kfold_auc_by_subject[s] = load_labeled_csv(p["kfold_auc"]).iloc[:, 0]
+        if os.path.exists(p["test_auc"]):
+            test_auc_by_subject[s] = load_labeled_csv(p["test_auc"]).iloc[:, 0]
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 6))
 
-    # --- left: internal-CV vs held-out test accuracy ---
+    # --- left: accuracy ---
     ax = axes[0]
-    if len(subjects) > 1:
-        # group report -- one bar per metric (mean across subjects), with each
+    families = []
+    if kfold_totals:
+        families.append(("CV", kfold_totals, "C0"))
+    if test_totals:
+        families.append(("held-out-test", test_totals, "C1"))
+
+    if not families:
+        ax.axis("off")
+    elif len(subjects) > 1:
+        # group report -- one bar per family (mean across subjects), with each
         # subject's own value scattered on top (beeswarm-style, deterministic
         # spread rather than random jitter so the figure is reproducible)
-        if is_kfold:
-            labels_acc = ["internal CV"]
-            per_metric_vals = [[model_totals[s] for s in subjects if s in model_totals]]
-            bar_colors = ["C0"]
-        else:
-            labels_acc = ["internal CV\n(training)", "held-out test"]
-            per_metric_vals = [
-                [cv_totals[s] for s in subjects if s in cv_totals],
-                [model_totals[s] for s in subjects if s in model_totals],
-            ]
-            bar_colors = ["C0", "C1"]
-        means = [np.mean(vals) if vals else np.nan for vals in per_metric_vals]
+        labels_acc = [name for name, _, _ in families]
+        per_family_vals = [[vals[s] for s in subjects if s in vals] for _, vals, _ in families]
+        bar_colors = [c for _, _, c in families]
+        means = [np.mean(v) if v else np.nan for v in per_family_vals]
         ax.bar(labels_acc, means, color=bar_colors, alpha=0.7, zorder=1)
 
-        for xi, vals in enumerate(per_metric_vals):
+        for xi, vals in enumerate(per_family_vals):
             if not vals:
                 continue
             jitter = np.linspace(-0.12, 0.12, len(vals)) if len(vals) > 1 else np.array([0.0])
             ax.scatter(xi + jitter, vals, color="black", zorder=3, s=20)
 
-        title = "Accuracy: internal CV" if is_kfold else "Accuracy: internal CV vs. held-out test"
-        ax.set_title(f"{title}\n(bars = mean, dots = individual subjects)")
+        ax.set_title("Accuracy: " + " vs. ".join(labels_acc) + "\n(bars = mean, dots = individual subjects)")
     else:
-        x = np.arange(len(subjects))
-        if is_kfold:
-            width = 0.5
-            ax.bar(x, [model_totals.get(s, np.nan) for s in subjects], width, label="internal CV", color="C0")
-            fold_scatter_x = x[0]
-        else:
-            width = 0.35
-            ax.bar(x - width / 2, [cv_totals.get(s, np.nan) for s in subjects], width, label="internal CV (training)")
-            ax.bar(x + width / 2, [model_totals.get(s, np.nan) for s in subjects], width, label="held-out test")
-            fold_scatter_x = x[0] + width / 2
+        s = subjects[0]
+        x = np.arange(len(families))
+        width = 0.5
+        ax.bar(x, [vals.get(s, np.nan) for _, vals, _ in families], width, color=[c for _, _, c in families])
 
-        if fold_flags.get(subjects[0]):
-            folds = fold_paths(analysis_output_dir, desc, subjects[0])
-            fold_vals = [load_scalar_csv(f["model_total"]) for f in folds.values() if os.path.exists(f["model_total"])]
+        if kfold_totals:
+            folds = fold_paths(analysis_output_dir, desc, s)
+            fold_vals = [load_scalar_csv(f["kfold_total"]) for f in folds.values() if os.path.exists(f["kfold_total"])]
             if fold_vals:
-                ax.scatter([fold_scatter_x] * len(fold_vals), fold_vals, color="black", zorder=3, s=20, label="per-fold test")
+                cv_x = [name for name, _, _ in families].index("CV")
+                ax.scatter([cv_x] * len(fold_vals), fold_vals, color="black", zorder=3, s=20, label="per-fold")
+                ax.legend(fontsize=8)
 
         ax.set_xticks(x)
-        ax.set_xticklabels(subjects, rotation=45, ha="right")
-        ax.legend(fontsize=8)
-        ax.set_title("Accuracy: internal CV" if is_kfold else "Accuracy: internal CV vs. held-out test")
+        ax.set_xticklabels([name for name, _, _ in families])
+        ax.set_title("Accuracy: " + " vs. ".join(name for name, _, _ in families))
 
     ax.set_ylabel("Accuracy")
-    if regressor_categories:
+    if regressor_categories and families:
         _draw_chance_line(ax, 1.0 / len(regressor_categories))
 
     # --- right: per-class AUC ---
     ax = axes[1]
-    if auc_by_subject:
-        auc_df = pd.DataFrame(auc_by_subject)  # rows=category, cols=subject
-        categories = auc_df.index.tolist()
-        if len(subjects) > 1:
-            ax.boxplot([auc_df.loc[c].dropna().values for c in categories], tick_labels=categories)
-        else:
-            ax.bar(categories, auc_df.iloc[:, 0].values)
-            if fold_flags.get(subjects[0]):
-                folds = fold_paths(analysis_output_dir, desc, subjects[0])
-                for f in folds.values():
-                    if os.path.exists(f["model_auc"]):
-                        fold_auc = load_labeled_csv(f["model_auc"]).iloc[:, 0].reindex(categories)
-                        ax.scatter(categories, fold_auc.values, color="black", s=15, zorder=3)
-        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    auc_families = []
+    if kfold_auc_by_subject:
+        auc_families.append(("CV", pd.DataFrame(kfold_auc_by_subject), "C0"))
+    if test_auc_by_subject:
+        auc_families.append(("held-out-test", pd.DataFrame(test_auc_by_subject), "C1"))
+
+    if not auc_families:
+        ax.axis("off")
+    else:
+        categories = auc_families[0][1].index.tolist()
+        n_fam = len(auc_families)
+        width = 0.8 / n_fam
+        for fi, (name, auc_df, color) in enumerate(auc_families):
+            offset = (fi - (n_fam - 1) / 2) * width
+            positions = np.arange(len(categories)) + offset
+            if len(subjects) > 1:
+                bp = ax.boxplot([auc_df.loc[c].dropna().values for c in categories],
+                                 positions=positions, widths=width * 0.9, patch_artist=True)
+                for box in bp["boxes"]:
+                    box.set_facecolor(color)
+                    box.set_alpha(0.6)
+            else:
+                s = subjects[0]
+                ax.bar(positions, auc_df.reindex(categories).iloc[:, 0].values, width * 0.9, color=color, label=name)
+                if name == "CV" and fold_flags.get(s):
+                    folds = fold_paths(analysis_output_dir, desc, s)
+                    for f in folds.values():
+                        if os.path.exists(f["kfold_auc"]):
+                            fold_auc = load_labeled_csv(f["kfold_auc"]).iloc[:, 0].reindex(categories)
+                            ax.scatter(positions, fold_auc.values, color="black", s=15, zorder=3)
+        if len(subjects) == 1:
+            ax.legend(fontsize=8)
+        ax.set_xticks(range(len(categories)))
+        ax.set_xticklabels(categories, rotation=45, ha="right")
         ax.set_ylabel("AUC")
         _draw_chance_line(ax, 0.5)
-    ax.set_title("Per-class AUC" + (" across subjects" if len(subjects) > 1 else ""))
+
+    auc_title = "Per-class AUC" + (" across subjects" if len(subjects) > 1 else "")
+    if len(auc_families) > 1:
+        auc_title += " (CV vs. held-out-test)"
+    ax.set_title(auc_title)
 
     fig.suptitle(f"{desc}: accuracy & AUC", fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.93])
@@ -408,41 +542,76 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
     plt.close(fig)
 
 
-def render_confusion_matrices_page(pdf, analysis_output_dir, desc, subjects):
+def _load_confusion_family(analysis_output_dir, desc, subjects, acc_key, evi_key):
+    """(accuracy_matrix, evidence_matrix) for one family (CV or held-out-test) -- the
+    single subject's own matrices, or the mean across subjects for a group
+    report. Either/both may be None if that family has no files at all."""
     if len(subjects) == 1:
         p = subject_paths(analysis_output_dir, desc, subjects[0])
-        acc = load_labeled_csv(p["model_accuracy"]) if os.path.exists(p["model_accuracy"]) else None
-        evi = load_labeled_csv(p["model_evidence"]) if os.path.exists(p["model_evidence"]) else None
-        title_suffix = f"subject {subjects[0]}"
-    else:
-        accs, evis = [], []
-        for s in subjects:
-            p = subject_paths(analysis_output_dir, desc, s)
-            if os.path.exists(p["model_accuracy"]):
-                accs.append(load_labeled_csv(p["model_accuracy"]))
-            if os.path.exists(p["model_evidence"]):
-                evis.append(load_labeled_csv(p["model_evidence"]))
-        acc = sum(accs) / len(accs) if accs else None
-        evi = sum(evis) / len(evis) if evis else None
-        title_suffix = f"mean across {len(subjects)} subjects"
+        acc = load_labeled_csv(p[acc_key]) if os.path.exists(p[acc_key]) else None
+        evi = load_labeled_csv(p[evi_key]) if os.path.exists(p[evi_key]) else None
+        return acc, evi
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 5))
-    for ax, mat, name in zip(axes, [acc, evi], ["Accuracy", "Evidence"]):
-        if mat is None:
-            ax.axis("off")
-            continue
-        im = ax.imshow(mat.values, cmap="viridis", vmin=0, vmax=max(1.0, float(np.nanmax(mat.values))))
-        ax.set_xticks(range(len(mat.columns)))
-        ax.set_xticklabels(mat.columns, rotation=45, ha="right")
-        ax.set_yticks(range(len(mat.index)))
-        ax.set_yticklabels(mat.index)
-        ax.set_xlabel("Predicted / evidence for")
-        ax.set_ylabel("True condition")
-        ax.set_title(name)
-        fig.colorbar(im, ax=ax, fraction=0.046)
+    accs, evis = [], []
+    for s in subjects:
+        p = subject_paths(analysis_output_dir, desc, s)
+        if os.path.exists(p[acc_key]):
+            accs.append(load_labeled_csv(p[acc_key]))
+        if os.path.exists(p[evi_key]):
+            evis.append(load_labeled_csv(p[evi_key]))
+    acc = sum(accs) / len(accs) if accs else None
+    evi = sum(evis) / len(evis) if evis else None
+    return acc, evi
+
+
+def render_confusion_matrices_page(pdf, analysis_output_dir, desc, subjects):
+    """CV (k-fold) and held-out-test (independent test set) each get their own row --
+    a row is omitted entirely (not left blank) when that family has no files
+    for any subject in scope. Every populated cell is labeled with its value
+    to 2 decimal places."""
+    title_suffix = f"subject {subjects[0]}" if len(subjects) == 1 else f"mean across {len(subjects)} subjects"
+
+    families = []
+    kfold_acc, kfold_evi = _load_confusion_family(analysis_output_dir, desc, subjects, "kfold_accuracy", "kfold_evidence")
+    if kfold_acc is not None or kfold_evi is not None:
+        families.append(("CV", kfold_acc, kfold_evi))
+    test_acc, test_evi = _load_confusion_family(analysis_output_dir, desc, subjects, "test_accuracy", "test_evidence")
+    if test_acc is not None or test_evi is not None:
+        families.append(("held-out-test", test_acc, test_evi))
+
+    if not families:
+        return
+
+    fig, axes = plt.subplots(len(families), 2, figsize=(11, 5 * len(families)), squeeze=False)
+    for row, (family_label, acc, evi) in enumerate(families):
+        for col, (mat, name) in enumerate([(acc, "Accuracy"), (evi, "Evidence")]):
+            ax = axes[row][col]
+            if mat is None:
+                ax.axis("off")
+                continue
+            values = mat.values
+            im = ax.imshow(values, cmap="viridis", vmin=0, vmax=max(1.0, float(np.nanmax(values))))
+            ax.set_xticks(range(len(mat.columns)))
+            ax.set_xticklabels(mat.columns, rotation=45, ha="right")
+            ax.set_yticks(range(len(mat.index)))
+            ax.set_yticklabels(mat.index)
+            ax.set_xlabel("Predicted / evidence for")
+            ax.set_ylabel("True condition")
+            ax.set_title(f"{family_label}: {name}")
+            fig.colorbar(im, ax=ax, fraction=0.046)
+
+            for yi in range(values.shape[0]):
+                for xi in range(values.shape[1]):
+                    val = values[yi, xi]
+                    if np.isnan(val):
+                        continue
+                    # light text on dark cells, dark text on light cells --
+                    # im.norm(val) is this cell's position in [vmin, vmax]
+                    text_color = "white" if im.norm(val) < 0.6 else "black"
+                    ax.text(xi, yi, f"{val:.2f}", ha="center", va="center", color=text_color, fontsize=8)
 
     fig.suptitle(f"{desc}: confusion-style matrices ({title_suffix})", fontsize=14, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -474,21 +643,19 @@ def summarize_raw_for_timecourse(raw_df: pd.DataFrame, overlay_conditions: dict 
     return pd.concat([means, ses], axis=1).reset_index()
 
 
-def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags, window, tr, median_duration,
+def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr, median_duration,
                              overlay_conditions=None):
+    """Timecourse decoding always comes from the complete-training-set
+    classifier (mvpa_workflow.py never runs it per-fold), so there's exactly
+    one decoding_raw file per subject regardless of whether model.kfold_cv
+    is also configured -- no fold-level variability source anymore."""
     overlay_conditions = overlay_conditions or {}
     frames = []
-    use_fold_variability = len(subjects) == 1 and fold_flags.get(subjects[0])
 
     for s in subjects:
-        if use_fold_variability:
-            per_group_paths = fold_paths(analysis_output_dir, desc, s).values()
-        else:
-            per_group_paths = [subject_paths(analysis_output_dir, desc, s)]
-
-        for p in per_group_paths:
-            if os.path.exists(p["decoding_raw"]):
-                frames.append(summarize_raw_for_timecourse(pd.read_csv(p["decoding_raw"]), overlay_conditions))
+        p = subject_paths(analysis_output_dir, desc, s)
+        if os.path.exists(p["decoding_raw"]):
+            frames.append(summarize_raw_for_timecourse(pd.read_csv(p["decoding_raw"]), overlay_conditions))
 
     if not frames:
         print("(!) no decoding_results.csv found for the subjects in scope -- skipping timecourse page")
@@ -496,8 +663,20 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
 
     combined = pd.concat(frames, ignore_index=True)
     evidence_cols = [c for c in combined.columns if c.startswith("evidence_") and not c.endswith("_se")]
+    # evidence_cols (and therefore categories) are already in config order --
+    # decoding_raw writes them via regressor_categories, itself
+    # list(training_conditions.keys()) from mvpa_workflow.py -- so reuse
+    # that same order for the true-condition rows instead of alphabetizing
+    # them, so the matrix reads like a standard one (e.g. "maintain" lands
+    # at row 0, col 0, matching the confusion-matrix page's convention)
     categories = [c.replace("evidence_", "") for c in evidence_cols]
-    true_conditions = sorted(combined["regressor_label"].unique())
+    present_true_conditions = set(combined["regressor_label"].unique())
+    true_conditions = [c for c in categories if c in present_true_conditions]
+    # defensive: a true-condition label with no matching evidence_ column
+    # shouldn't happen (regressor_label is always drawn from the same
+    # regressor_categories that produced categories above), but append it
+    # rather than silently dropping it if it ever does
+    true_conditions += sorted(present_true_conditions - set(categories))
     overlay_categories = sorted(combined["overlay_label"].unique()) if overlay_conditions else [None]
 
     n_rows, n_cols = len(true_conditions), len(categories)
@@ -506,8 +685,9 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
         return
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2.5 * n_rows), sharex=True, sharey=True, squeeze=False)
-    group_unit = "folds" if use_fold_variability else "subjects"
-    variability_label = f"darker band: +/- SE across {group_unit}; lighter band: +/- trial-to-trial SE"
+    # zero-width for a single-subject report -- nothing to average across when
+    # there's only one subject's own decoding
+    variability_label = "darker band: +/- SE across subjects; lighter band: +/- trial-to-trial SE"
     x_is_seconds = tr is not None
     x_label = "Time from window start (s)" if x_is_seconds else "window_index"
     overlay_colors = plt.get_cmap("tab10").colors
@@ -686,16 +866,22 @@ def _render_fold_mosaic(pdf, fold_files: dict, mean_file: str, regressor_categor
 
 
 def resolve_group_impa_mni(analysis_output_dir: str, desc: str, subjects: list) -> tuple:
-    """Which subjects have an MNI-registered importance map (model_impa_mni --
-    never written by the workflow scripts themselves, only by the user separately
-    running `hcp_resample.py --direction native2mni` on their own model_impa
-    file). Returns ({subject: path}, [subjects missing it]) -- pure path-existence
-    check, no image I/O; shape compatibility is checked separately at load time."""
+    """Which subjects have an MNI-registered importance map, preferring the
+    held-out-test family's test_impa_mni and falling back to the CV (k-fold)
+    family's kfold_impa_mni only when held-out-test isn't available for that
+    subject -- neither is ever written by the workflow script itself unless
+    model.mnispace is set, otherwise only by the user separately running
+    `hcp_resample.py --direction native2mni` on the corresponding plain impa
+    file. Returns ({subject: (path, family_label)}, [subjects missing both])
+    -- pure path-existence check, no image I/O; shape compatibility is
+    checked separately at load time."""
     available, missing = {}, []
     for s in subjects:
         p = subject_paths(analysis_output_dir, desc, s)
-        if os.path.exists(p["model_impa_mni"]):
-            available[s] = p["model_impa_mni"]
+        if os.path.exists(p["test_impa_mni"]):
+            available[s] = (p["test_impa_mni"], "held-out-test")
+        elif os.path.exists(p["kfold_impa_mni"]):
+            available[s] = (p["kfold_impa_mni"], "CV")
         else:
             missing.append(s)
     return available, missing
@@ -703,30 +889,35 @@ def resolve_group_impa_mni(analysis_output_dir: str, desc: str, subjects: list) 
 
 def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags, regressor_categories, output_dir,
                              mnispace=False):
-    # model_impa's space isn't asserted/known (whatever the input BOLD/mask
-    # happened to be in), so subjects aren't guaranteed to share a common
-    # voxel grid -- per-subject maps are therefore never averaged across
-    # subjects (only across folds, within one subject, where the grid is
-    # guaranteed shared) -- see resolve_group_impa_mni for the one exception:
-    # if the user has separately resampled model_impa into MNI space (shared
-    # grid), a real group average becomes possible.
-    #
-    # model_impa means something different depending on which workflow produced it
-    # (fold_flags[s] is exactly that signal, via has_fold_files -- see subject_paths):
-    #   - mvpa_generalization_workflow.py: the one classifier fit on the full
-    #     training set, evaluated against the held-out test set. Nothing is
-    #     averaged -- this is that single fit's own weights.
-    #   - mvpa_kfold_workflow.py: the mean importance map across every fold's own
-    #     fit (each fold trained on a different subset of runs) -- a genuine
-    #     aggregate, further broken out fold-by-fold in the mosaic below.
+    """A subject can have two independent importance-map families now: "CV"
+    (kfold_impa -- the mean importance map across every k-fold fold's own fit,
+    each fold trained on a different subset of runs, broken out fold-by-fold in
+    the mosaic below) and "held-out-test" (test_impa -- the one classifier fit
+    on the complete training set, whose weights are also what gets evaluated
+    against model_conditions.testing when that's configured). Either, both, or
+    neither may exist for a subject depending on what model.kfold_cv/
+    model_conditions.testing were configured.
+
+    Neither family's space is asserted/known (whatever the input BOLD/mask
+    happened to be in), so subjects aren't guaranteed to share a common voxel
+    grid -- per-subject maps are therefore never averaged across subjects
+    (only across folds, within one subject's CV family, where the grid is
+    guaranteed shared) -- see resolve_group_impa_mni for the one exception: if
+    held-out-test (or, failing that, CV) has been separately resampled into
+    MNI space (shared grid) for enough subjects, a real group average becomes
+    possible."""
     if len(subjects) > 1:
         mni_paths, missing = resolve_group_impa_mni(analysis_output_dir, desc, subjects)
         if mni_paths:
             if missing:
                 print(f"  (!) {len(missing)} subject(s) have no MNI-registered importance map "
                       f"({', '.join(missing)}) -- group map averaged across the remaining {len(mni_paths)}")
+            n_cv_fallback = sum(1 for _, fam in mni_paths.values() if fam == "CV")
+            if n_cv_fallback:
+                print(f"  (!) {n_cv_fallback} subject(s) had no held-out-test MNI map -- used their CV "
+                      f"(k-fold) MNI map for the group average instead")
 
-            imgs = {s: nib.load(path) for s, path in mni_paths.items()}
+            imgs = {s: nib.load(path) for s, (path, _) in mni_paths.items()}
             ref_subject, ref_img = next(iter(imgs.items()))
             mismatched = [s for s, img in imgs.items() if img.shape != ref_img.shape]
             if mismatched:
@@ -749,29 +940,34 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
                                    regressor_categories, mosaic=True)
             return
 
-        print("  (!) no subject has an MNI-registered importance map (model/{subject}_impa_mni.nii.gz) -- "
-              "falling back to per-subject maps (space not asserted), which aren't guaranteed spatially "
-              "comparable across subjects. Resample each subject's model_impa via "
-              "`hcp_resample.py --direction native2mni` to enable a group map.")
+        print("  (!) no subject has an MNI-registered importance map -- falling back to per-subject maps "
+              "(space not asserted), which aren't guaranteed spatially comparable across subjects. Resample "
+              "each subject's impa via `hcp_resample.py --direction native2mni` to enable a group map.")
         for s in subjects:
             p = subject_paths(analysis_output_dir, desc, s, mnispace=mnispace)
-            if os.path.exists(p["model_impa"]):
-                label = "aggregated across folds" if fold_flags.get(s) else "full training set"
-                _plot_categories_page(pdf, p["model_impa"], f"{s} ({label})", regressor_categories, mnispace=mnispace)
+            if os.path.exists(p["kfold_impa"]):
+                _plot_categories_page(pdf, p["kfold_impa"], f"{s} (CV, aggregated across folds)",
+                                       regressor_categories, mnispace=mnispace)
+            if os.path.exists(p["test_impa"]):
+                _plot_categories_page(pdf, p["test_impa"], f"{s} (held-out-test, full training set)",
+                                       regressor_categories, mnispace=mnispace)
         return
 
     s = subjects[0]
     p = subject_paths(analysis_output_dir, desc, s, mnispace=mnispace)
-    is_kfold = fold_flags.get(s)
-    if os.path.exists(p["model_impa"]):
-        label = "aggregated across folds" if is_kfold else "full training set"
-        _plot_categories_page(pdf, p["model_impa"], f"{s} ({label})", regressor_categories, mnispace=mnispace)
 
-    if is_kfold:
-        folds = fold_paths(analysis_output_dir, desc, s, mnispace=mnispace)
-        fold_files = {fid: f["model_impa"] for fid, f in folds.items() if os.path.exists(f["model_impa"])}
-        if fold_files and os.path.exists(p["model_impa"]):
-            _render_fold_mosaic(pdf, fold_files, p["model_impa"], regressor_categories, mnispace=mnispace)
+    if os.path.exists(p["kfold_impa"]):
+        _plot_categories_page(pdf, p["kfold_impa"], f"{s} (CV, aggregated across folds)",
+                               regressor_categories, mnispace=mnispace)
+        if fold_flags.get(s):
+            folds = fold_paths(analysis_output_dir, desc, s, mnispace=mnispace)
+            fold_files = {fid: f["kfold_impa"] for fid, f in folds.items() if os.path.exists(f["kfold_impa"])}
+            if fold_files:
+                _render_fold_mosaic(pdf, fold_files, p["kfold_impa"], regressor_categories, mnispace=mnispace)
+
+    if os.path.exists(p["test_impa"]):
+        _plot_categories_page(pdf, p["test_impa"], f"{s} (held-out-test, full training set)",
+                               regressor_categories, mnispace=mnispace)
 
 
 # =====================================================
@@ -801,12 +997,24 @@ def main():
         render_title_page(pdf, desc, subjects, args.config, output_path)
         render_accuracy_auc_page(pdf, args.analysis_output_dir, desc, subjects, fold_flags, regressor_categories)
         render_confusion_matrices_page(pdf, args.analysis_output_dir, desc, subjects)
-        render_timecourse_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, window, tr, median_duration,
+        render_timecourse_pages(pdf, args.analysis_output_dir, desc, subjects, window, tr, median_duration,
                                  overlay_conditions)
         render_importance_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, regressor_categories,
                                  os.path.dirname(output_path), mnispace=mnispace)
 
     print(f"Report written to: {output_path}")
+
+    if len(subjects) > 1:
+        summary = compile_group_summary(args.analysis_output_dir, desc, subjects)
+        summary_path = os.path.join(os.path.dirname(output_path), f"{desc}_group_summary.csv")
+        summary.to_csv(summary_path, index=False)
+        print(f"Group summary spreadsheet saved to: {summary_path}")
+
+        decoding = compile_group_decoding(args.analysis_output_dir, desc, subjects)
+        if not decoding.empty:
+            decoding_path = os.path.join(os.path.dirname(output_path), f"{desc}_group_decoding_results.csv")
+            decoding.to_csv(decoding_path, index=False)
+            print(f"Group decoding spreadsheet saved to: {decoding_path}")
 
 
 if __name__ == "__main__":

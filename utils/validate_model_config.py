@@ -2,9 +2,10 @@
 """
 Validate the "model_conditions" section of the mvpa config: which
 volume_of_interest rows count as which classifier condition, for
-training / testing (both required) / timecourse_decoding (optional -- omit
-the whole section to skip timecourse decoding entirely, in both the
-workflow scripts and generate_report.py's timecourse page).
+training (required) / testing / timecourse_decoding (both optional -- omit
+either section entirely to skip that step in mvpa_workflow.py: testing
+skips the independent test-set evaluation, timecourse_decoding skips
+decoding entirely, including generate_report.py's timecourse page).
 
 Each section's "conditions" is a mapping of condition name -> query, where a
 query is a small recursive boolean tree over the master_spreadsheet columns:
@@ -52,8 +53,8 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
 from utils.mvpa_common import validate_query_node, evaluate_query_node, validate_window
 
-REQUIRED_SECTIONS = ("training", "testing")
-SECTIONS = REQUIRED_SECTIONS + ("timecourse_decoding",)
+REQUIRED_SECTIONS = ("training",)
+SECTIONS = REQUIRED_SECTIONS + ("testing", "timecourse_decoding")
 
 
 def load_json(path: str) -> dict:

@@ -35,6 +35,7 @@ from utils.mvpa_common import (
     permutation_significance,
     load_images_and_mask,
     impa_tag,
+    extract_importance_map,
 )
 
 CLASSIFIER_NAME = "sklearn.linear_model.LogisticRegression"
@@ -537,6 +538,23 @@ class TestBuildClassifierPipeline:
 # model_classification / model_performance (end-to-end, tiny synthetic data)
 # =====================================================
 
+class TestExtractImportanceMap:
+    def test_matches_model_performance_without_needing_labeled_data(self):
+        # extract_importance_map should produce exactly what model_performance
+        # returns as its impa_full, without ever touching testing_data/testing_labels
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2, seed=1)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
+        _, impa_from_model_performance = model_performance(pipe, X, y)
+        impa_standalone = extract_importance_map(pipe, n_features=X.shape[1])
+        np.testing.assert_array_equal(impa_standalone, impa_from_model_performance)
+
+    def test_multiclass_shape(self):
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3, seed=2)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
+        impa = extract_importance_map(pipe, n_features=X.shape[1])
+        assert impa.shape == (3, X.shape[1])
+
+
 class TestModelClassificationAndPerformance:
     def test_binary_end_to_end(self):
         X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2, seed=1)
@@ -548,6 +566,9 @@ class TestModelClassificationAndPerformance:
         assert xout["evidence"].shape == (2, 2)
         assert xout["auc"].shape == (2,)
         assert impa_full.shape == (2, X.shape[1])
+        assert xout["whole_voxels"] == X.shape[1]
+        assert xout["selected_voxels"] == int(pipe.named_steps["feature_selection"].get_support().sum())
+        assert xout["feature_percent"] == pytest.approx(100 * xout["selected_voxels"] / xout["whole_voxels"])
 
     def test_multiclass_end_to_end(self):
         X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3, seed=2)
@@ -560,12 +581,25 @@ class TestModelClassificationAndPerformance:
         assert xout["auc"].shape == (3,)
         assert impa_full.shape == (3, X.shape[1])
 
+    def test_multiclass_evidence_rows_are_normalized_probabilities(self):
+        # each row of the evidence matrix is a mean of per-trial evidence
+        # vectors that individually sum to 1 (decision_evidence's softmax/
+        # predict_proba normalization) -- so the row mean must too, unlike a
+        # naive per-class sigmoid, which has no such constraint
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=4, seed=4)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
+        xout, _ = model_performance(pipe, X, y)
+        np.testing.assert_allclose(xout["evidence"].sum(axis=1), 1.0, atol=1e-8)
+
     def test_n_voxels_selects_exact_count_end_to_end(self):
         X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2, seed=1)
         pipe = model_classification(X, y, feature_selection_cfg={"n_voxels": 4}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
         assert int(pipe.named_steps["feature_selection"].get_support().sum()) == 4
         xout, impa_full = model_performance(pipe, X, y)
         assert xout["total_scores"] > 0.8  # cleanly separable data
+        assert xout["whole_voxels"] == 10
+        assert xout["selected_voxels"] == 4
+        assert xout["feature_percent"] == pytest.approx(40.0)
 
 
 # =====================================================

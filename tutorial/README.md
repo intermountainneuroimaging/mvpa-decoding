@@ -101,7 +101,19 @@ Runtime: ~9 minutes for all 12 runs (mostly `mcflirt` and `applyxfm4D`, each
 
 ## Step 3: The config
 
-`config-haxby.example.json` provides a examplar for the running MVPA on a preprocessed dataset. We will use a k-fold design since the Haxby dataset does not have a seperate localizer and main task design. Instead k-fold designs portion out a subset of the data as a hold out test-sample while training on the remaining runs. This is done in sucessive folds to ensure that small differences between runs to not catastrofically affect the generalizablity of the data. A few configuration settings to pay attention to:
+`config-haxby.example.json` provides an exemplar for running MVPA on a
+preprocessed dataset. Since the Haxby dataset has no separate localizer and
+main-task design, we hold out a fixed block of runs (10-12) as an
+independent test set (`model_conditions.testing`) while training on the
+rest (1-9) -- this is `mvpa_workflow.py`'s independent-test-set step,
+written under `test/` and labeled "Full" by `generate_report.py`. This
+config doesn't set `model.kfold_cv`, so it doesn't also cross-validate
+within the 9 training runs -- see
+[`config-kfold-haxby.example.json`](config-kfold-haxby.example.json) and
+[README.md section 5](../README.md#5-model) for the fold-based alternative
+(`model.kfold_cv`, written under `model/` and labeled "CV"), which portions
+training data itself into successive held-out folds instead of relying on a
+single fixed split. A few configuration settings to pay attention to:
 
 - **`derivatives_root`/`bold_glob` point at the preprocessed data**, not
   `bids_root` -- `bids_root` still finds the events.tsv files (co-located
@@ -170,24 +182,38 @@ correctly resolved to the preprocessed derivatives.
 ## Step 6: Train and evaluate
 
 ```
-python workflows/mvpa_generalization_workflow.py --subject 1 --config tutorial/config-haxby.example.json \
+python workflows/mvpa_workflow.py --subject 1 --config tutorial/config-haxby.example.json \
     --master-spreadsheet master_spreadsheet_haxby.csv --analysis-output-dir ./haxby_out
 ```
 
-Ran in ~23 seconds (9-fold CV + final model + timecourse decoding). This
-dataset's tiny volumes (40x64x64, ~23K-voxel mask) make it fast compared to
-this repo's other, larger sample data.
+Since this config sets `model_conditions.testing`/`timecourse_decoding` but
+not `model.kfold_cv`, `mvpa_workflow.py` fits one classifier on the full
+9-run training set and writes only `test/` (the "Full" independent-test-set
+family) and `decoding/` output for this subject -- no `model/` directory at
+all, since there's no k-fold step configured here. Ran in ~23 seconds (final
+model + held-out test evaluation + timecourse decoding). This dataset's tiny
+volumes (40x64x64, ~23K-voxel mask) make it fast compared to this repo's
+other, larger sample data.
 
 ## Results
 
 Numbers below are from the current FSL-based `preprocess_haxby.sh`
 (`mcflirt`/`flirt`/`applyxfm4D`/`fsl_glm`, including the in-mask `+10000`
-offset -- see [Step 2](#step-2-basic-preprocessing)). Internal CV accuracy
-(9-fold, leave-one-run-out across training runs 1-9): **0.405**. Held-out
-test (runs 10-12, never touched during training or CV): **0.524** (chance =
-0.125 for 8 balanced classes).
+offset -- see [Step 2](#step-2-basic-preprocessing)). Held-out test accuracy
+(runs 10-12, never touched during training, written under `test/`): **0.524**
+(chance = 0.125 for 8 balanced classes).
 
-**Held-out confusion matrix** -- rows = actual category, columns =
+*(An earlier version of this walkthrough, run against a predecessor script
+that computed a leave-one-run-out cross-validation diagnostic automatically
+from `model_conditions.training` alone, also reported 9-fold internal-CV
+accuracy of 0.405 across training runs 1-9. `mvpa_workflow.py` no longer
+does this automatically -- add `model.kfold_cv: {"strategy": "per_run"}` to
+reproduce the equivalent CV diagnostic explicitly, written under `model/`
+and labeled "CV" in `generate_report.py`; see
+[`config-kfold-haxby.example.json`](config-kfold-haxby.example.json) for a
+complete example of that.)*
+
+**Held-out confusion matrix** (the "Full" family, `test/`) -- rows = actual category, columns =
 predicted, cells = proportion of that category's trials predicted as each
 column:
 
@@ -206,19 +232,25 @@ column:
 
 | bottle | cat | chair | face | house | scissors | scrambledpix | shoe |
 |---|---|---|---|---|---|---|---|
-| 0.812 | 0.714 | 0.770 | 0.949 | 0.965 | 0.614 | 0.950 | 0.766 |
+| 0.812 | 0.752 | 0.793 | 0.932 | 0.965 | 0.627 | 0.955 | 0.799 |
 
-Both CV and held-out accuracy are well above the 12.5% chance level --
+(mean 0.829, matching `model_results_total_scores.csv`'s permutation-test
+`roc_auc_ovr` real_score -- both now derive from the same normalized-
+probability evidence, `decision_evidence()`'s `predict_proba()`/softmax,
+where earlier versions of this table used an independent per-class sigmoid
+that didn't sum to 1 and diverged slightly from that reference value.)
+
+Held-out accuracy is well above the 12.5% chance level --
 `face`, `house`, and `scrambledpix` are decoded almost perfectly (AUC
-0.95-0.97), directionally consistent with the classic Haxby finding that
+0.93-0.97), directionally consistent with the classic Haxby finding that
 ventral temporal cortex carries distinguishable, distributed patterns for
-these categories. `scissors` is the weakest category (AUC 0.61), plausibly
+these categories. `scissors` is the weakest category (AUC 0.63), plausibly
 confusable with `chair`/other elongated-object categories (see the
 confusion matrix's `bottle`<->`scissors`/`chair`<->`shoe` cross-talk) in a
 whole-brain mask this crude. `permutation_test` (README.md section 5,
 1000 permutations) confirms both accuracy and AUC are significant at
 p < 0.001 -- see [`generate_report.py`](../README.md#7-generating-a-report-workflowsgenerate_reportpy)
-or `model/1_permutation_test.csv` for the full numbers if you run it
+or `test/1_permutation_test.csv` for the full numbers if you run it
 yourself.
 
 ## Where this tutorial oversimplifies
