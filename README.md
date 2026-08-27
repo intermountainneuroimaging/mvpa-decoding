@@ -15,16 +15,22 @@ One JSON config, three top-level sections, three scripts:
 |---|---|---|
 | 1. Build the volume table | `workflows/generate_master_spreadsheet.py` | `event_extraction` (+ optional `expected_events.json`) |
 | 2. Define & validate MVPA conditions | `utils/validate_model_config.py` | `model_conditions` |
-| 3. Train/decode | `workflows/mvpa_generalization_workflow.py` | `model` (+ `model_conditions` to select/label rows) |
+| 3. Train/decode | `workflows/mvpa_workflow.py` | `model` (+ `model_conditions` to select/label rows) |
 
-Step 3 has two interchangeable scripts, same config format:
-`workflows/mvpa_generalization_workflow.py` for independent train/test data
-(possibly different tasks entirely -- the default, described first) or
-`workflows/mvpa_kfold_workflow.py` for same-task data split into folds by
-`run` (section 6) -- pick whichever matches your design, not both. All
-scripts take the **same** config file via `--config`. Shared logic -- BIDS
-filename parsing, the query DSL, window math, and (for the two train/decode
-scripts) the actual classification/decoding primitives -- lives in
+Step 3 is one script running up to three independent, config-driven steps --
+each only runs (and only writes its own output) when its config section is
+present: `model.kfold_cv` cross-validates entirely within
+`model_conditions.training` (section 5, output under `model/`);
+`model_conditions.testing` evaluates one classifier fit on the complete
+training set against a genuinely separate test set (optional -- section 4,
+output under `test/`); `model_conditions.timecourse_decoding` predicts at
+every TR across a decode window, using that same complete-training-set fit
+(section 4, output under `decoding/`). Any combination -- one, two, all
+three, or none of them beyond the sanity-check trial pivot table -- is valid
+in a single run; see [section 6](#6-running-workflowsmvpa_workflowpy) for
+the full breakdown. All scripts take the **same** config file via
+`--config`. Shared logic -- BIDS filename parsing, the query DSL, window
+math, and the actual classification/decoding primitives -- lives in
 `utils/mvpa_common.py`, imported by all of them. Everything below is grounded in
 `tutorial/config-haxby.example.json`, a complete config that runs end-to-end
 against `tutorial/haxby-data/` (Haxby et al. 2001 / OpenNeuro ds000105 --
@@ -176,7 +182,7 @@ an event's active window:
 | `subject`, `session`, `task`, `run` | *Inferred* from the events filename. |
 | `volume_of_interest` | *Computed*: the BOLD frame index, from `onset + hemodynamic_lag` through `onset + hemodynamic_lag + duration`, using the BOLD file's own TR, clipped to its frame count. |
 | `trial_type` | Verbatim from the events file -- never reinterpreted, split, or renamed. |
-| `trial_index` | *Computed*: 1-based sequential index (in onset order) among this run's *retained* events -- i.e. after the hardcoded exclusions below, so it's always contiguous. Identifies "which event produced this volume," used by `mvpa_generalization_workflow.py` for trial-balancing and for recomputing `timecourse_decoding`'s window. |
+| `trial_index` | *Computed*: 1-based sequential index (in onset order) among this run's *retained* events -- i.e. after the hardcoded exclusions below, so it's always contiguous. Identifies "which event produced this volume," used by `mvpa_workflow.py` for trial-balancing and for recomputing `timecourse_decoding`'s window. |
 | `onset`, `duration` | Verbatim from the events file, repeated across every volume belonging to that event. |
 | `boldfile`, `eventfile` | Resolved source file paths, for traceability/sorting. |
 | *(varies)* | Any other BIDS entity found in the filename, e.g. `dir` -- *inferred*, present only if that entity appears in your filenames (the tutorial data has none). |
@@ -265,8 +271,8 @@ to confirm resolution is doing what you expect even when it "works".
 ## 4. `model_conditions`
 
 Read by `validate_model_config.py`. This defines, for each of three
-sections (`training`, `testing` -- both required -- and `timecourse_decoding`,
-optional), a set of named **conditions** -- the classifier's class labels --
+sections (`training` -- required -- and `testing`/`timecourse_decoding`,
+both optional), a set of named **conditions** -- the classifier's class labels --
 each backed by a **query** that selects which `master_spreadsheet.csv` rows
 belong to it.
 
@@ -308,13 +314,24 @@ A query is a small recursive boolean tree over *any* column of
 }
 ```
 
-**`testing`** -- held-out rows used to score the trained classifier. In the
-example, the remaining 3 runs (10-12) -- same task, same categories, held out
-by run rather than by a different task. That's what this particular example
+**`testing`** -- *(optional)* held-out rows used to score the classifier
+`mvpa_workflow.py` fits on the complete `training` set. In the example, the
+remaining 3 runs (10-12) -- same task, same categories, held out by run
+rather than by a different task. That's what this particular example
 happens to do; `training`/`testing` can just as easily reference genuinely
 different tasks (e.g. train on a localizer, test on a separate main-task
 run) -- the query language doesn't care which, `task` is just another
-column:
+column. Omit the whole section (not just leave it empty) to skip this
+independent-test-set evaluation entirely -- no `test/` output at all for
+that subject (no `test/{subject}_model_results_{metric}.csv`, no
+`test/{subject}_impa[_mni].nii.gz`, no `test/{subject}_permutation_test.csv`
+even if `model.permutation_test` is configured), no extra runtime for that
+step. This is unlike `training`, which is always required -- a classifier
+is always fit on the complete `training` set regardless of what else is
+configured (that fit is what `timecourse_decoding`, below, predicts with,
+and -- when `testing` *is* present -- what gets scored against it), and
+`model.kfold_cv` ([section 5](#5-model)) cross-validates entirely within
+`training` data too, so there has to be something there either way:
 
 ```json
 "testing": {
@@ -328,13 +345,14 @@ column:
 ```
 
 **`timecourse_decoding`** -- *(optional)* same idea, but for the trial-by-trial
-decoding sweep. Here the example also adds a required **`window`**. Omit the
+decoding sweep. Always uses the one classifier fit on the complete
+`training` set (never per-fold, even when `model.kfold_cv` is also
+configured). Here the example also adds a required **`window`**. Omit the
 whole section (not just leave it empty) to skip timecourse decoding
-entirely -- no `decoding/` output files (per-subject or per-fold), no extra
-runtime for that step, and `generate_report.py`'s timecourse page is
-automatically skipped too (it already skips whenever it finds no
-`decoding_results.csv` for any subject in scope, so there's nothing extra to
-configure on the report side):
+entirely -- no `decoding/` output files at all, no extra runtime for that
+step, and `generate_report.py`'s timecourse page is automatically skipped
+too (it already skips whenever it finds no `decoding_results.csv` for any
+subject in scope, so there's nothing extra to configure on the report side):
 
 ```json
 "timecourse_decoding": {
@@ -436,7 +454,7 @@ Validating tutorial/config-haxby.example.json against master_spreadsheet_haxby.c
 
 ## 5. `model`
 
-Read by `mvpa_generalization_workflow.py`. Everything the analysis itself needs that isn't
+Read by `mvpa_workflow.py`. Everything the analysis itself needs that isn't
 about *which rows* to use (that's `model_conditions`'s job):
 
 ```json
@@ -471,190 +489,19 @@ about *which rows* to use (that's `model_conditions`'s job):
 | `featureSelection.feat_p` | ANOVA p-value threshold -- voxels with `p < feat_p` are kept, widened automatically until at least 5 voxels are selected. Ignored when `n_voxels` is set. |
 | `featureSelection.n_voxels` | *(optional)* Select exactly this many voxels by ANOVA F-score instead, regardless of significance (sklearn's `SelectKBest` equivalent) -- takes priority over `feat_p` when both are present. Useful for keeping feature count fixed across subjects/folds whose signal strength (and thus a p-value threshold's actual voxel count) varies. `model_results_auc.csv`-adjacent output files still record whichever mode was actually used: `threshold_p` is `NaN` in this mode, since there's no threshold, but `selected_voxels` (identical to `n_voxels` here) is populated either way. |
 | `classifier` | Any importable scikit-learn-style estimator: `name` is a dotted import path, `params` are passed straight through as kwargs. |
+| `kfold_cv` | *(optional)* Cross-validates entirely within `model_conditions.training` -- see below. Omitting it entirely skips k-fold cross-validation: no `model/` output at all, no extra runtime for that step. |
 
 Omit either of `featureSelection`/`classifier` and it falls back to a
 default (ANOVA @ p<0.05, `LogisticRegression`); omit `mask` and every voxel
 is used (with a warning) -- only `desc` is truly required.
 
-There's no `model.cv` field -- it's not a configurable knob, it's determined
-automatically from the training data itself (`resolve_internal_cv_folds` in
-`mvpa_generalization_workflow.py`):
+### `kfold_cv` (optional): cross-validating within `model_conditions.training`
 
-- **Leave-one-run-out** (`PredefinedSplit` on the `run` column, one fold per
-  distinct run) when every training run contains the same set of conditions
-  -- i.e. every run is a full replicate of the training task. This is the
-  default case, and matches the leave-one-run-out scheme in the paper this
-  pipeline replicates (see [THEORY.md](THEORY.md)).
-- **4-fold stratified CV over trials pooled across all runs** (not scoped to
-  any one run) when runs *don't* all share the same conditions -- holding
-  out a whole run in that case would risk silently dropping a condition from
-  one side of a fold entirely, so fold membership is built directly from
-  trials instead. Each condition's trials are gathered from every run
-  together and partitioned into 4 folds independently (`StratifiedKFold`),
-  grouped by `(run, trial_index)` so every volume belonging to one event
-  stays on the same side of its fold -- row-level splitting would let
-  correlated volumes from the same trial leak across train/test. If the
-  rarest condition has fewer than 4 trials, the fold count is reduced
-  automatically (down to a minimum of 2) so every fold still gets at least
-  one trial of every condition; fewer than 2 trials for the rarest condition
-  is a hard error. A warning is printed when this fallback triggers, and
-  each fold's train/test row counts and held-out trials are logged as
-  they're built.
-
-Either way this only ever touches `model_conditions.training` data -- it
-never looks at `testing`/`timecourse_decoding` rows. It's a sanity-check
-diagnostic (does the classifier find real signal within its own training
-task at all?), separate from and complementary to the actual held-out test
-against `testing_conditions` (does that pattern generalize to new/different
-data?) -- `generate_report.py`'s accuracy/AUC page (section 7) plots both
-side by side as "internal CV (training)" vs. "held-out test". (For same-task
-data where you want to control fold membership yourself for the *actual*
-evaluation, not just this internal diagnostic, that's `model.kfold_cv` on
-`mvpa_kfold_workflow.py` instead -- see section 6.)
-
-### `permutation_test` (optional): significance testing for the held-out result
-
-Accuracy/AUC on their own don't say whether a classifier is doing better
-than chance -- add `permutation_test` to `model` to find out, via
-[`sklearn.model_selection.permutation_test_score`](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.permutation_test_score.html)
-(the tool nilearn's own decoding docs recommend for this exact fMRI
-classification case):
-
-```json
-"model": {
-  ...,
-  "permutation_test": {
-    "n_permutations": 1000,
-    "random_state": 0
-  }
-}
-```
-
-Omitting `permutation_test` entirely skips it -- no extra runtime, no output
-file, today's exact behavior. Present (even as `{}`) runs it, with
-`n_permutations` defaulting to 1000 and `random_state` to 0 if unset.
-
-For each of `accuracy` and `roc_auc_ovr`, the training/testing split is
-encoded as a single fixed `PredefinedSplit` fold, then
-`permutation_test_score` repeatedly reshuffles the combined label vector and
-refits the *entire* pipeline (feature selection + classifier, both) on each
-shuffle -- the textbook-correct way to build a null distribution for a fixed
-train/test split, not a naive shuffle done outside the fit structure. Writes
-`model/{subject}_permutation_test.csv` (`metric,real_score,p_value,n_permutations`).
-
-`accuracy`'s `real_score` matches `model_results_total_scores.csv` exactly
-(same split, same fixed feature-selection threshold, same classifier
-config). `roc_auc_ovr`'s `real_score` will be *close to but not exactly*
-the mean of `model_results_auc.csv`'s per-category values -- sklearn's
-`roc_auc_ovr` scorer uses the classifier's `predict_proba()` (softmax
-across classes) as evidence, while `model_performance`'s own per-category
-AUC uses an independent sigmoid of `decision_function` per class (not
-softmax-normalized) -- both are legitimate one-vs-rest AUC computations,
-they just start from different per-class evidence, so don't expect
-bit-identical numbers between the two files for this metric. `p_value` is
-the fraction of permuted-label refits that scored as well or better than
-the real fit.
-
-This costs `n_permutations` extra fits (parallelized across cores via
-`n_jobs=-1`) on top of the one real fit -- cheap relative to a single
-subject's BOLD loading time in practice, but scales with `n_permutations`,
-so drop it for quick iteration and turn it on for a result you're about to
-report.
-
-`mvpa_generalization_workflow.py` is dedicated to this independent-train/independent-test
-case (training and testing come from separate `model_conditions` sections,
-possibly different tasks entirely). For same-task data split into
-training/testing by `run` per fold, see `mvpa_kfold_workflow.py` and
-`model.kfold_cv` below instead -- a separate script, not a mode switch on
-this one.
-
-## Running `workflows/mvpa_generalization_workflow.py`
-
-```
-python workflows/mvpa_generalization_workflow.py --subject 1 --config tutorial/config-haxby.example.json \
-    --master-spreadsheet master_spreadsheet_haxby.csv --analysis-output-dir ./out
-```
-
-There's no separate `inputs.json`/`--input-scaffold` anymore -- everything
-comes from the one config plus `master_spreadsheet.csv`. For a given
-`--subject`, the script:
-
-1. Filters `master_spreadsheet.csv` to that subject and writes a **trial
-   pivot table** (see below) -- a sanity check, computed before any
-   condition filtering.
-2. Evaluates `model_conditions.training`/`testing`'s queries to label and
-   select rows (a row matching more than one condition takes the first
-   match, in the order conditions are listed -- `validate_model_config.py`
-   already warns about that case).
-3. Loads BOLD patterns directly from each row's `boldfile` (already a
-   concrete, resolved path -- no glob/pattern matching needed at this stage),
-   z-scores, and slices to `volume_of_interest`.
-4. Cross-validates (`GroupKFold` on `run`) and trains a final classifier,
-   writing accuracy/evidence/AUC and importance-map NIfTIs under
-   `<analysis-output-dir>/<desc>/<subject>/{cv,model}/`. This works for
-   **any number of conditions (2 or more)** -- `model_performance` derives
-   its class list from `clf.classes_` (what the classifier actually learned),
-   not from whatever happens to appear in a given CV fold's held-out data,
-   so accuracy/evidence/AUC stay consistently shaped across folds regardless
-   of how many conditions you configure.
-5. For `timecourse_decoding`: relabels rows via that section's own
-   conditions, then **recomputes a fresh volume range per source event**
-   from `model_conditions.timecourse_decoding.window` and each event's
-   `onset`/`duration`/`trial_index` (independent of whatever
-   `hemodynamic_lag` was used to build `volume_of_interest` originally),
-   predicts with the trained classifier, and writes two files to
-   `<analysis-output-dir>/<desc>/<subject>/decoding/`:
-   - `{subject}_decoding_results.csv` -- **raw**, one row per volume actually
-     decoded, with its own `predicted_label` and `evidence_<category>`
-     columns. This is the real per-TR data -- use it for anything that needs
-     trial-level detail (custom stats, sanity-checking individual trials).
-   - `{subject}_summary_decoding_results.csv` -- the raw table grouped by
-     `(window_index, regressor_label)` and averaged across every trial in
-     that group (trial-count-weighted, not an average of averages) -- the
-     confusion-style timecourse view `generate_report.py` (section 7) reads.
-
-`tutorial/haxby-data/derivatives/sub-1/masks/native_epi_mask.nii.gz` is a
-real mask already, so this runs as shown above with no extra setup -- if
-your own dataset doesn't have one yet, point `model.mask.mask_pattern` at a
-real (or throwaway, for testing) mask file first.
-
-### Trial pivot table (sanity check)
-
-Written to `<analysis-output-dir>/<desc>/<subject>/<subject>_trial_pivot.csv`
-before any `model_conditions` filtering -- one row per event retained in
-`master_spreadsheet.csv` (i.e. every row of that subject's events.tsv files
-across all runs, minus the hardcoded fixation/block/postRT exclusions above),
-with its `volume_of_interest` values spread across `vol_of_interest_1..N`
-columns (`N` = the widest trial; shorter trials are NaN-padded). Useful for
-eyeballing whether the volume counts per trial look right -- not used by the
-modeling steps themselves.
-
-## 6. K-fold workflow (`workflows/mvpa_kfold_workflow.py`)
-
-For same-task data: `model_conditions.training`/`testing` may still be
-different conditions, but both are expected to be drawn from the same task's
-runs. Instead of one train-once/test-once split, `mvpa_kfold_workflow.py`
-repeatedly holds out a group of runs, trains on the rest, tests + decodes
-only on the held-out group, then aggregates every fold into one final
-answer -- the same `model_classification`/`model_performance`/
-`timecourse_decoding` steps `mvpa_generalization_workflow.py` uses (both scripts import
-them from `mvpa_common.py`, so they can never drift apart on how a model is
-actually fit or scored). See `tutorial/config-kfold-haxby.example.json` for
-a complete example (12-run leave-one-run-out over `tutorial/haxby-data`'s 8
-object categories -- the same categories `tutorial/config-haxby.example.json`
-uses for section 5's independent-train/test example, just with `training`/
-`testing`/`timecourse_decoding` referencing every run instead of a fixed
-9-run/3-run split, since fold membership is `model.kfold_cv`'s job here).
-
-```
-python workflows/mvpa_kfold_workflow.py --subject 1 --config tutorial/config-kfold-haxby.example.json \
-    --master-spreadsheet master_spreadsheet_haxby.csv --analysis-output-dir ./out
-```
-
-### `model.kfold_cv`
-
-Required for this script (it's the whole point of running it) -- how runs
-are split into folds:
+There's no automatic internal-CV diagnostic anymore -- earlier versions of
+this pipeline derived a leave-one-run-out (or stratified-trial) split
+automatically from the training data itself. That heuristic is retired: if
+you want a k-fold-style diagnostic today, configure it explicitly via
+`model.kfold_cv`, e.g. the old leave-one-run-out default's equivalent:
 
 ```json
 "model": {
@@ -665,10 +512,17 @@ are split into folds:
 }
 ```
 
+`mvpa_workflow.py` repeatedly holds out a group of runs from
+`model_conditions.training`: trains on the rest of `training`, evaluates on
+the held-out group, then aggregates across every fold -- entirely within
+`training` data, never touching `testing`. `resolve_kfold_folds` (in
+`mvpa_workflow.py`) resolves fold membership from just `(kfold_cv_cfg,
+training_df)`:
+
 | `strategy` | Meaning |
 |---|---|
-| `"per_run"` | Automatic, leave-one-run-out -- one fold per run found in this subject's testing/timecourse_decoding-eligible data. |
-| `"group_kfold"` | Automatic -- requires an integer `n_splits` (>= 2, <= the number of distinct runs); runs are split into `n_splits` contiguous groups. |
+| `"per_run"` | Automatic, leave-one-run-out -- one fold per distinct run found in this subject's `model_conditions.training` data. |
+| `"group_kfold"` | Automatic -- requires an integer `n_splits` (>= 2, <= the number of distinct training runs); runs are split into `n_splits` contiguous groups. |
 | `"explicit_groups"` | User-defined -- requires `"held_out_runs"`. See below. |
 
 Whichever strategy is used, the resolved fold membership is always written
@@ -688,14 +542,14 @@ inner list is that fold's held-out run(s)**, not what to train on:
 }
 ```
 
-This example produces 4 folds, grouping Haxby's 12 runs into 3-run blocks.
-For fold 1 (`[1, 2, 3]`): training uses every training-condition row whose
-`run` is *not* 1, 2, or 3; testing/timecourse_decoding use only rows whose
-`run` *is* 1, 2, or 3. Folds 2-4 work the same way against `[4, 5, 6]`,
-`[7, 8, 9]`, and `[10, 11, 12]`. Each fold trains and evaluates
-independently -- run IDs that never appear in `held_out_runs` are simply
-never held out, so they're always available for training but never scored
-on their own.
+For a training set spanning runs 1-12, this example produces 4 folds,
+grouping them into 3-run blocks. For fold 1 (`[1, 2, 3]`): that fold trains
+on every `training`-condition row whose `run` is *not* 1, 2, or 3, and
+evaluates on the rows whose `run` *is* 1, 2, or 3. Folds 2-4 work the same
+way against `[4, 5, 6]`, `[7, 8, 9]`, and `[10, 11, 12]`. Each fold trains
+and evaluates independently -- run IDs that never appear in `held_out_runs`
+are simply never held out, so they're always available for training but
+never scored on their own.
 
 A few things worth knowing before writing your own:
 
@@ -706,67 +560,286 @@ A few things worth knowing before writing your own:
   build unequal-sized folds, or to only ever evaluate a specific subset of
   runs -- not by accident.
 - **Coverage is checked, but only warned about, not enforced.** If a run
-  present in this subject's testing/timecourse_decoding data isn't covered
+  present in this subject's `model_conditions.training` data isn't covered
   by any group in `held_out_runs`, you'll see `(!) model.kfold_cv.held_out_runs
   doesn't cover run(s) [...]` -- those rows are simply never evaluated in any
   fold, the run itself is not an error. Conversely, if `held_out_runs`
-  references a run ID that doesn't exist in this subject's data at all,
-  you'll see `(!) model.kfold_cv.held_out_runs references run(s) [...] that
-  don't appear ...` and that fold ends up with 0 test/timecourse rows
+  references a run ID that doesn't exist in this subject's training data at
+  all, you'll see `(!) model.kfold_cv.held_out_runs references run(s) [...]
+  that don't appear ...` and that fold ends up with 0 held-out rows
   (skipped at runtime with its own warning, not a crash).
-- **Run IDs must match exactly, no type coercion.** `training_df["run"]` /
-  `testing_df["run"]` (from `master_spreadsheet.csv`) are typically integers,
-  and `held_out_runs` is matched against them with `.isin()` -- a JSON string
-  `"1"` will never match integer `1`, it'll just silently produce an empty
-  fold (with the "references run(s) that don't appear" warning above) rather
-  than raising. If your runs come out as strings, write `held_out_runs` as
-  strings too (`"held_out_runs": [["1", "2"]]`), matching whatever
+- **Run IDs must match exactly, no type coercion.** `training_df["run"]`
+  (from `master_spreadsheet.csv`) is typically integers, and `held_out_runs`
+  is matched against it with `.isin()` -- a JSON string `"1"` will never
+  match integer `1`, it'll just silently produce an empty fold (with the
+  "references run(s) that don't appear" warning above) rather than raising.
+  If your runs come out as strings, write `held_out_runs` as strings too
+  (`"held_out_runs": [["1", "2"]]`), matching whatever
   `master_spreadsheet.csv`'s `run` column actually contains.
 - **Which config `run` values are valid to reference** -- the "universe" of
   runs `held_out_runs` is checked against is the set of `run` values present
-  across `model_conditions.testing` and `model_conditions.timecourse_decoding`'s
-  *matched* rows for this subject, not every run in `master_spreadsheet.csv`.
-  A run with no testing/timecourse rows for this subject (e.g. it only has
-  training-condition trials) won't show up in that universe, so referencing
-  it in `held_out_runs` triggers the "doesn't appear" warning even though the
-  run genuinely exists in the data -- it just has nothing to evaluate on.
+  in this subject's *matched* `model_conditions.training` rows specifically
+  -- not every run in `master_spreadsheet.csv`, and not `testing`/
+  `timecourse_decoding` (unlike before this pipeline's k-fold and
+  independent-test-set steps were split into two separate config sections,
+  fold membership now only ever depends on `training`). A run with no
+  training-condition trials for this subject won't show up in that
+  universe, so referencing it in `held_out_runs` triggers the "doesn't
+  appear" warning even though the run genuinely exists in the data -- it
+  just has nothing to fold over.
 
-`model.permutation_test` (see above) works the same way here as in
-`mvpa_generalization_workflow.py`, except it runs **once per fold**, on that fold's own
-train/test split -- `model/{subject}_fold{N}_permutation_test.csv`. Folds
-aren't combined into one pooled p-value; interpret them fold-by-fold.
+`model.permutation_test` (below) works the same way here as for the
+independent-test-set evaluation, except it runs **once per fold**, on that
+fold's own train/held-out split within `training` --
+`model/{subject}_fold{N}_permutation_test.csv`. Folds aren't combined into
+one pooled p-value; interpret them fold-by-fold.
+
+<details>
+<summary>Historical note: the retired automatic internal-CV heuristic</summary>
+
+Prior to `model.kfold_cv`, `mvpa_generalization_workflow.py` derived a CV
+split from the training data itself, with no config knob:
+
+- **Leave-one-run-out** (`PredefinedSplit` on the `run` column, one fold per
+  distinct run) when every training run contains the same set of conditions
+  -- i.e. every run is a full replicate of the training task. This was the
+  default case, and matches the leave-one-run-out scheme in the paper this
+  pipeline replicates (see [THEORY.md](THEORY.md)) -- reproduce it today via
+  `model.kfold_cv: {"strategy": "per_run"}`.
+- **4-fold stratified CV over trials pooled across all runs** (not scoped to
+  any one run) when runs *didn't* all share the same conditions -- holding
+  out a whole run in that case would risk silently dropping a condition from
+  one side of a fold entirely, so fold membership was built directly from
+  trials instead. Each condition's trials were gathered from every run
+  together and partitioned into 4 folds independently (`StratifiedKFold`),
+  grouped by `(run, trial_index)` so every volume belonging to one event
+  stayed on the same side of its fold -- row-level splitting would let
+  correlated volumes from the same trial leak across train/test. If the
+  rarest condition had fewer than 4 trials, the fold count was reduced
+  automatically (down to a minimum of 2) so every fold still got at least
+  one trial of every condition; fewer than 2 trials for the rarest condition
+  was a hard error. A warning was printed when this fallback triggered, and
+  each fold's train/test row counts and held-out trials were logged as
+  they're built.
+
+Either way this only ever touched `model_conditions.training` data -- it
+never looked at `testing`/`timecourse_decoding` rows, same as
+`model.kfold_cv` today.
+
+</details>
+
+### `permutation_test` (optional): significance testing for held-out results
+
+Accuracy/AUC on their own don't say whether a classifier is doing better
+than chance -- add `permutation_test` to `model` to find out, via
+[`sklearn.model_selection.permutation_test_score`](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.permutation_test_score.html)
+(the tool nilearn's own decoding docs recommend for this exact fMRI
+classification case):
+
+```json
+"model": {
+  ...,
+  "permutation_test": {
+    "n_permutations": 1000,
+    "random_state": 0
+  }
+}
+```
+
+Omitting `permutation_test` entirely skips it -- no extra runtime, no output
+file. Present (even as `{}`) runs it, with `n_permutations` defaulting to
+1000 and `random_state` to 0 if unset -- independently for each of
+`model.kfold_cv` (if configured, once per fold: `training` vs. that fold's
+own held-out runs) and `model_conditions.testing` (if configured: the
+complete `training` set vs. `testing`). Whichever of those two steps are
+configured, each gets its own permutation test; neither depends on the
+other being present.
+
+For each of `accuracy` and `roc_auc_ovr`, the train/held-out split in play
+(a fold's split, or the full training/testing split) is encoded as a single
+fixed `PredefinedSplit` fold, then `permutation_test_score` repeatedly
+reshuffles the combined label vector and refits the *entire* pipeline
+(feature selection + classifier, both) on each shuffle -- the
+textbook-correct way to build a null distribution for a fixed train/test
+split, not a naive shuffle done outside the fit structure. Writes
+`model/{subject}_fold{N}_permutation_test.csv` per fold for `model.kfold_cv`
+(not pooled across folds -- interpret them fold-by-fold), and/or
+`test/{subject}_permutation_test.csv` for `model_conditions.testing`
+(`metric,real_score,p_value,n_permutations` either way).
+
+`accuracy`'s `real_score` matches the corresponding `model_results_total_scores.csv`
+exactly (same split, same fixed feature-selection threshold, same classifier
+config -- `model/{subject}_fold{N}_model_results_total_scores.csv` for a
+kfold fold, `test/{subject}_model_results_total_scores.csv` for the
+independent test set). `roc_auc_ovr`'s `real_score` will be *close to but
+not exactly* the mean of the corresponding `model_results_auc.csv`'s
+per-category values -- sklearn's `roc_auc_ovr` scorer uses the classifier's
+`predict_proba()` (softmax across classes) as evidence, while
+`model_performance`'s own per-category AUC uses an independent sigmoid of
+`decision_function` per class (not softmax-normalized) -- both are
+legitimate one-vs-rest AUC computations, they just start from different
+per-class evidence, so don't expect bit-identical numbers between the two
+files for this metric. `p_value` is the fraction of permuted-label refits
+that scored as well or better than the real fit.
+
+This costs `n_permutations` extra fits (parallelized across cores via
+`n_jobs=-1`) on top of the one real fit -- cheap relative to a single
+subject's BOLD loading time in practice, but scales with `n_permutations`
+(and, for `model.kfold_cv`, with the number of folds too, since each fold
+pays for its own `n_permutations` fits), so drop it for quick iteration and
+turn it on for a result you're about to report.
+
+## 6. Running `workflows/mvpa_workflow.py`
+
+`mvpa_workflow.py` replaces two previous, separate scripts
+(`mvpa_generalization_workflow.py` and `mvpa_kfold_workflow.py`) with one:
+it always fits a classifier on the complete `model_conditions.training` set,
+then runs up to three further steps -- each **independently optional**,
+each only writing its own output when its config section is present:
+
+1. **`model.kfold_cv`** (section 5) -- k-fold cross-validates entirely
+   within `model_conditions.training` (train on non-held-out runs, evaluate
+   on held-out runs of that same training data). Output under `model/`.
+2. **`model_conditions.testing`** (section 4) -- evaluates the
+   complete-training-set classifier against a genuinely separate test set.
+   Output under `test/`.
+3. **`model_conditions.timecourse_decoding`** (section 4) -- predicts at
+   every TR across a decode window, using that same complete-training-set
+   classifier (never per-fold, even when `model.kfold_cv` is also
+   configured). Output under `decoding/`.
+
+Any combination of the three is valid -- all three, any two, one, or none
+(in which case the run only produces the trial pivot table sanity check
+below, with a printed warning that nothing else was configured). This
+example runs all three against `tutorial/config-haxby.example.json`'s
+training(1-9)/testing(10-12) split:
+
+```
+python workflows/mvpa_workflow.py --subject 1 --config tutorial/config-haxby.example.json \
+    --master-spreadsheet master_spreadsheet_haxby.csv --analysis-output-dir ./out
+```
+
+There's no separate `inputs.json`/`--input-scaffold` -- everything comes
+from the one config plus `master_spreadsheet.csv`. For a given `--subject`,
+the script:
+
+1. Filters `master_spreadsheet.csv` to that subject and writes a **trial
+   pivot table** (see below) -- a sanity check, computed before any
+   `model_conditions` filtering.
+2. Evaluates `model_conditions.training`/`testing`/`timecourse_decoding`'s
+   queries to label and select rows (a row matching more than one condition
+   takes the first match, in the order conditions are listed --
+   `validate_model_config.py` already warns about that case). Loads BOLD
+   patterns directly from each row's `boldfile` (already a concrete,
+   resolved path -- no glob/pattern matching needed at this stage),
+   z-scores, and slices to `volume_of_interest`.
+3. **Always** trains a classifier on the complete `training` set -- this is
+   what `timecourse_decoding` predicts with below, and (when `testing` is
+   configured) what gets evaluated against it.
+4. If `model.kfold_cv` is configured: resolves fold membership from
+   `training` data alone (`resolve_kfold_folds`), then repeatedly trains a
+   *fresh* classifier on the non-held-out folds and evaluates on the
+   held-out fold, aggregating across folds. Writes per-fold and aggregated
+   accuracy/evidence/AUC and importance-map NIfTIs, plus the fold manifest,
+   under `<analysis-output-dir>/<desc>/<subject>/model/`.
+5. If `model_conditions.testing` is configured: evaluates the
+   complete-training-set classifier (from step 3) against `testing`,
+   writing accuracy/evidence/AUC and an importance-map NIfTI under
+   `<analysis-output-dir>/<desc>/<subject>/test/`.
+6. If `model_conditions.timecourse_decoding` is configured: relabels rows
+   via that section's own conditions, then **recomputes a fresh volume
+   range per source event** from `model_conditions.timecourse_decoding.window`
+   and each event's `onset`/`duration`/`trial_index` (independent of
+   whatever `hemodynamic_lag` was used to build `volume_of_interest`
+   originally), predicts with the complete-training-set classifier (from
+   step 3), and writes two files to
+   `<analysis-output-dir>/<desc>/<subject>/decoding/`:
+   - `{subject}_decoding_results.csv` -- **raw**, one row per volume actually
+     decoded, with its own `predicted_label` and `evidence_<category>`
+     columns. This is the real per-TR data -- use it for anything that needs
+     trial-level detail (custom stats, sanity-checking individual trials).
+   - `{subject}_summary_decoding_results.csv` -- the raw table grouped by
+     `(window_index, regressor_label)` and averaged across every trial in
+     that group (trial-count-weighted, not an average of averages) -- the
+     confusion-style timecourse view `generate_report.py` (section 7) reads.
+
+This works for **any number of conditions (2 or more)** in every step --
+`model_performance` derives its class list from `clf.classes_` (what the
+classifier actually learned), not from whatever happens to appear in a
+given fold's/test set's held-out data, so accuracy/evidence/AUC stay
+consistently shaped regardless of how many conditions you configure.
+
+`tutorial/haxby-data/derivatives/sub-1/masks/native_epi_mask.nii.gz` is a
+real mask already, so this runs as shown above with no extra setup -- if
+your own dataset doesn't have one yet, point `model.mask.mask_pattern` at a
+real (or throwaway, for testing) mask file first.
+
+### Trial pivot table (sanity check)
+
+Written to `<analysis-output-dir>/<desc>/<subject>/<subject>_trial_pivot.csv`
+before any `model_conditions` filtering -- one row per event retained in
+`master_spreadsheet.csv` (i.e. every row of that subject's events.tsv files
+across all runs, minus the hardcoded fixation/block/postRT exclusions above),
+tagged with `training_condition` (which `model_conditions.training` query,
+if any, matched that row) and, when `model_conditions.testing` is
+configured, `testing_condition` likewise. When `model.kfold_cv` is
+configured, one additional `fold{N}_split` column per fold shows `"train"`/
+`"test"`/`""` for that fold specifically -- fold membership is entirely
+within `training_condition` rows, since k-fold no longer touches `testing`
+rows at all. Useful for eyeballing whether the volume counts and fold
+membership per trial look right -- not used by the modeling steps
+themselves.
 
 ### Outputs
 
-Per-fold files (fold `N`'s own held-out evaluation) alongside aggregated
-files (averaged/pooled across every fold, same filenames `mvpa_generalization_workflow.py`
-writes -- so `generate_report.py` and other downstream consumers don't need
-to know which workflow produced a given subject's results):
+Copied from `mvpa_workflow.py`'s own module docstring -- the authoritative
+listing -- under `<analysis-output-dir>/<model.desc>/<subject>/`:
 
-| Per-fold | Aggregated |
-|---|---|
-| `model/{subject}_fold{N}_model_results_{metric}.csv` | `model/{subject}_model_results_{metric}.csv` |
-| `model/{subject}_fold{N}_impa.nii.gz` | `model/{subject}_impa.nii.gz` |
-| `model/{subject}_fold{N}_permutation_test.csv` *(optional)* | -- (not combined across folds) |
-| `decoding/{subject}_fold{N}_decoding_results.csv` *(only if `timecourse_decoding` configured)* | `decoding/{subject}_decoding_results.csv` *(same)* |
-| `decoding/{subject}_fold{N}_summary_decoding_results.csv` *(same)* | `decoding/{subject}_summary_decoding_results.csv` *(same)* |
+```
+<subject>_trial_pivot.csv                     -- sanity check, pre-model_conditions
 
-Aggregation: scalar/matrix metrics and importance maps are averaged across
-folds; decoding rows from different folds are genuinely disjoint trials
-(folds partition runs), so the aggregated raw table is a concatenation, and
-the aggregated summary is recomputed fresh from that pooled table
-(trial-count-weighted, not an average of per-fold averages).
+model.kfold_cv configured -- k-fold CV entirely within model_conditions.training:
+  model/<subject>_kfold_folds.json                    -- {fold_id: [held-out run ids]}
+  model/<subject>_fold{N}_model_results_{metric}.csv  -- per-fold held-out metrics
+  model/<subject>_fold{N}_impa[_mni].nii.gz           -- per-fold importance map
+  model/<subject>_fold{N}_permutation_test.csv        -- per-fold significance (optional)
+  model/<subject>_model_results_{metric}.csv          -- aggregated across folds
+  model/<subject>_impa[_mni].nii.gz                   -- aggregated importance map
 
-`generate_report.py` already detects `_fold{N}_*` files purely by their
-presence on disk (see section 7) -- fold-variability panels (accuracy/AUC
-overlays, timecourse bands, an importance-map consistency mosaic) render
-automatically against this script's output with no changes needed.
+model_conditions.testing configured -- one fit on all of training, evaluated
+against all of testing:
+  test/<subject>_model_results_{metric}.csv           -- held-out test metrics
+  test/<subject>_impa[_mni].nii.gz                     -- that fit's importance map
+  test/<subject>_permutation_test.csv                 -- significance (optional)
+
+model_conditions.timecourse_decoding configured -- always the complete-training
+classifier, never per-fold:
+  decoding/<subject>_decoding_results.csv             -- raw, one row per decoded TR
+  decoding/<subject>_summary_decoding_results.csv     -- averaged per (window_index, regressor_label)
+```
+
+`model/` is therefore exclusively k-fold's directory, `test/` is exclusively
+the independent-test-set evaluation's directory -- a subject can have
+either, both, or neither depending on what's configured. Importance-map
+filenames use `_impa_mni` instead of plain `_impa` when `model.mnispace` is
+set (section 5) -- see `utils.mvpa_common.impa_tag`.
+
+`generate_report.py` already detects `_fold{N}_*` files under `model/`
+purely by their presence on disk (see section 7) -- fold-variability panels
+(accuracy/AUC overlays, timecourse bands, an importance-map consistency
+mosaic) render automatically whenever `model.kfold_cv` output exists, with
+no report-side configuration needed.
 
 ## 7. Generating a report (`workflows/generate_report.py`)
 
-Produces a multi-page PDF from `mvpa_generalization_workflow.py`'s output -- accuracy/AUC,
+Produces a multi-page PDF from `mvpa_workflow.py`'s output -- accuracy/AUC,
 confusion-style accuracy/evidence matrices, annotated timecourse decoding,
-and importance maps. One script, two scales, switched with `--subject`:
+and importance maps. One script, two scales, switched with `--subject`.
+`mvpa_workflow.py`'s two output families -- `model.kfold_cv` (under
+`model/`) and `model_conditions.testing` (under `test/`) -- are entirely
+independent and shown throughout as separate **"CV"**/**"Full"** sections; a
+subject/report may have either, both, or neither, and every page below
+renders whichever families actually have data:
 
 ```
 # group report -- aggregates every subject found under <dir>/<desc>/*/ --
@@ -785,71 +858,95 @@ python workflows/generate_report.py --analysis-output-dir ./out --desc haxby_obj
 
 | Flag | Meaning |
 |---|---|
-| `--analysis-output-dir` | Same value used for `mvpa_generalization_workflow.py --analysis-output-dir`. |
-| `--desc`/`--config` | **Exactly one required.** `--desc` names the classifier folder directly; `--config` reads it from the config's own `model.desc` instead (`quick_safe`-sanitized, identical to what the workflow scripts used to name their output folder) -- since it's the same value, the two can't drift apart the way a hand-typed `--desc` can. `--config` also supplies annotation (see below) even when `--desc` is given directly. |
+| `--analysis-output-dir` | Same value used for `mvpa_workflow.py --analysis-output-dir`. |
+| `--desc`/`--config` | **Exactly one required.** `--desc` names the classifier folder directly; `--config` reads it from the config's own `model.desc` instead (`quick_safe`-sanitized, identical to what `mvpa_workflow.py` used to name its output folder) -- since it's the same value, the two can't drift apart the way a hand-typed `--desc` can. `--config` also supplies annotation (see below) even when `--desc` is given directly. |
 | `--subject` | *(optional)* Restrict the report to one subject. Omit to aggregate over every subject folder found under `<dir>/<desc>/`. |
 | `--config` | Supplies `model.desc` (see above, when `--desc` is omitted) and `model_conditions.timecourse_decoding` (conditions + window, and optionally `overlay` -- see section 4) for timecourse annotation either way. Without it (i.e. using `--desc` alone), the timecourse page still renders, just unannotated (and never split by overlay). |
 | `--master-spreadsheet` | *(optional)* Needed alongside `--config` to compute each condition's median trial duration and each subject's TR (both derived from real data, not hardcoded) -- used to convert `window_index` to seconds and mark trial onset/end on the timecourse plot. Without it, the x-axis stays in raw `window_index` units and annotation is skipped. |
 | `--output` | *(optional)* Defaults to `<dir>/<desc>/report_<desc>.pdf` (group) or `<dir>/<desc>/<subject>/report_<subject>.pdf` (single-subject). |
 
 **Fold-variability panels are automatic, not configured.**
-`generate_report.py` detects `_fold{N}_*` files (accuracy/AUC overlays,
-timecourse bands, an importance-map consistency mosaic) purely by their
-presence on disk -- `mvpa_generalization_workflow.py`'s single independent-train/
-independent-test case doesn't produce them, but `mvpa_kfold_workflow.py`
-(section 6) does, so these panels render automatically for its output with
-no report-side changes needed.
+`generate_report.py` detects `_fold{N}_*` files under `model/` (accuracy/AUC
+overlays, timecourse bands, an importance-map consistency mosaic) purely by
+their presence on disk -- they render automatically whenever `model.kfold_cv`
+(section 5) produced them, with no report-side configuration needed. A
+subject with only `model_conditions.testing` configured (no `model.kfold_cv`)
+simply has no fold files, so no fold panels, same as before.
 
-**Group accuracy/AUC panels show mean + per-subject scatter.** For a
-multi-subject report, the accuracy panel plots one bar each for mean
-internal-CV and mean held-out-test accuracy, with every subject's own value
-scattered on top (deterministic beeswarm spread, not random jitter, so the
-figure is reproducible run to run); the AUC panel does the analogous thing
-per category via a boxplot. Single-subject reports keep the original
-per-subject/per-fold bar chart instead, since there's only one point per
-metric.
+**Accuracy/AUC panels show CV and Full side by side, whichever exist.** The
+accuracy panel plots one bar per family present (CV from `model/`, Full from
+`test/`) against a chance-level reference line; for a multi-subject report
+that's the mean across subjects with every subject's own value scattered on
+top (deterministic beeswarm spread, not random jitter, so the figure is
+reproducible run to run), while a single-subject report also overlays that
+subject's own per-fold CV values as black dots. The AUC panel does the
+analogous thing per category -- a boxplot per family for a multi-subject
+report, grouped bars (plus per-fold overlay dots for CV) for a
+single-subject one -- also against a chance-level line. Either panel is
+simply blank when neither family has data for the subjects in scope.
+
+**The confusion-matrices page is a CV/Full grid.** Up to two rows -- "CV"
+(from `model/kfold_accuracy`/`kfold_evidence`) and "Full" (from
+`test/test_accuracy`/`test_evidence`) -- each with two columns, Accuracy and
+Evidence; a row is omitted entirely (not left blank) when that family has no
+files for any subject in scope, and a multi-subject report averages each
+family's matrices across subjects first. Every populated cell is labeled
+with its value to 2 decimal places, colored light-on-dark or dark-on-light
+depending on the cell's own intensity so the numbers stay legible against
+the `viridis` colormap underneath.
 
 **Importance maps are averaged across subjects only when they share a
-common grid.** `model_impa` is whatever space the input BOLD/mask happened
-to be in -- native, MNI, or otherwise -- and by default that space isn't
-asserted in the filename (`model/{subject}_impa.nii.gz`), since it isn't
+common grid.** A subject can have two independent importance-map families:
+"CV" (`kfold_impa` -- the mean importance map across every k-fold fold's
+own fit) and "Full" (`test_impa` -- the one classifier fit on the complete
+training set, whose weights are also what gets evaluated against
+`model_conditions.testing` when that's configured). Either, both, or
+neither may exist depending on what `model.kfold_cv`/`model_conditions.testing`
+were configured. Neither family's space is asserted/known by default (native,
+MNI, or otherwise -- whatever the input BOLD/mask happened to be in;
+`model/{subject}_impa.nii.gz` / `test/{subject}_impa.nii.gz`), since it isn't
 reliably knowable from the file itself. There's no guarantee subjects share
 a common voxel grid in that case, unlike a normalized-space group analysis,
-so the group report shows one per-subject page instead (only within-subject
-fold-to-fold averaging, same subject same grid, happens automatically). A
-subject's per-subject page is plotted against nilearn's bundled MNI152
-template as anatomical background exactly when the config asserts MNI
-space (see below) -- otherwise it's shown background-free, since overlaying
-a template the map isn't actually registered to would be misleading, not
-just decorative.
+so the group report shows per-subject pages instead (one page per family per
+subject; only within-subject fold-to-fold averaging, same subject same
+grid, happens automatically for CV). A subject's per-subject page is
+plotted against nilearn's bundled MNI152 template as anatomical background
+exactly when the config asserts MNI space (see below) -- otherwise it's
+shown background-free, since overlaying a template the map isn't actually
+registered to would be misleading, not just decorative.
 
 Two ways to get a group-mean page in MNI space instead. If your data is
 already in MNI space, set `model.mnispace: true` (section 5) -- the
-workflow scripts then write the importance map directly as
-`model/{subject}_impa_mni.nii.gz`, and `generate_report.py` reads that same
+workflow script then writes each importance map directly as
+`{subject}_impa_mni.nii.gz` (under `model/` and/or `test/`, whichever
+families are configured), and `generate_report.py` reads that same
 `model.mnispace` setting from `--config` to know to look for it, no
 resampling step required. Otherwise, resample each subject's native-space
-`model_impa` into a shared MNI grid after the fact -- via `hcp_resample.py
+`impa` into a shared MNI grid after the fact -- via `hcp_resample.py
 --direction native2mni` (section 8) -- and save the result as
-`model/{subject}_impa_mni.nii.gz` right alongside it. Either way,
-`generate_report.py` detects that exact filename and plots a single
-group-mean page in MNI space instead of per-subject pages. Subjects missing
-`_impa_mni.nii.gz`, or whose map doesn't match the other subjects' grid
+`{subject}_impa_mni.nii.gz` right alongside it. Either way,
+`generate_report.py`'s `resolve_group_impa_mni` looks for `test_impa_mni`
+(Full) first for each subject, falling back to `kfold_impa_mni` (CV) only
+when Full isn't available for that subject -- so a group of subjects with a
+mix of CV-only, Full-only, and both-configured runs can still all
+contribute to one group average, each via whichever family it has.
+Subjects missing both, or whose map doesn't match the other subjects' grid
 shape, are excluded from the average with a printed warning rather than
 failing the whole report; the group page's title records how many subjects
-went into the average. The averaged map is also saved as its own NIfTI file
-(`{desc}_group_mean_impa_mni.nii.gz`) right alongside the PDF -- the plotted
-page is a quick look, the file is the actual data for loading elsewhere
-(a group-level stats tool, a different viewer, a different threshold). It's
-plotted with nilearn's "mosaic" display (many tiled slices across all three
-planes) rather than the compact 3-slice "ortho" view used for per-subject
-pages -- one page per category, since a mosaic needs much more room than
-ortho's single row. `slurm/4_sbatch_generate_report.sh` (section 9) runs
-the `hcp_resample.py` resampling automatically for every subject before
-generating the report (skipped entirely for subjects whose `model_impa` is
-already named `_impa_mni.nii.gz`, i.e. ran with `mnispace: true`) -- manual
-`hcp_resample.py` calls are only needed if you're generating a report
-outside that pipeline.
+went into the average, and the console log separately flags how many were
+included via the CV fallback. The averaged map is also saved as its own
+NIfTI file (`{desc}_group_mean_impa_mni.nii.gz`) right alongside the PDF --
+the plotted page is a quick look, the file is the actual data for loading
+elsewhere (a group-level stats tool, a different viewer, a different
+threshold). It's plotted with nilearn's "mosaic" display (many tiled slices
+across all three planes) rather than the compact 3-slice "ortho" view used
+for per-subject pages -- one page per category, since a mosaic needs much
+more room than ortho's single row. `slurm/4_sbatch_generate_report.sh`
+(section 9) runs the `hcp_resample.py` resampling automatically for every
+subject before generating the report (skipped entirely for subjects whose
+importance map is already named `_impa_mni.nii.gz`, i.e. ran with
+`mnispace: true`) -- manual `hcp_resample.py` calls are only needed if
+you're generating a report outside that pipeline.
 
 The timecourse page always reads the raw per-TR `decoding_results.csv`, not
 `summary_decoding_results.csv` -- the summary only ever kept each group's
@@ -864,8 +961,8 @@ computed independently so the trial-level spread survives too.
 Each panel plots **two** overlapping shaded bands around the mean line
 (same color, different opacity, drawn so both stay legible where they
 overlap), and they answer different questions:
-- **Darker band -- SE across subjects (or folds, for `mvpa_kfold_workflow.py`
-  output)**: how consistent is the *group-level* estimate? Degenerates to a
+- **Darker band -- SE across subjects (or folds, when `model.kfold_cv`
+  output is present)**: how consistent is the *group-level* estimate? Degenerates to a
   zero-width band for a single-subject, no-fold report -- nothing to
   average across when there's only one value.
 - **Lighter band -- trial-to-trial SE**: how consistent is decoding across
@@ -887,13 +984,14 @@ Pipelines is commonly in MNI space and needs to move between the two --
 e.g. bringing an MNI-space preprocessed BOLD run into native space to match
 this pipeline's native masks, or bringing this pipeline's own native-space
 importance map into MNI space for group-level comparison (save the result
-as `model/{subject}_impa_mni.nii.gz` to have `generate_report.py`'s group
-report pick it up automatically -- see section 7).
+as `{subject}_impa_mni.nii.gz`, right alongside the plain `impa` file under
+`model/` or `test/`, to have `generate_report.py`'s group report pick it up
+automatically -- see section 7).
 `hcp_resample.py` is a standalone script for exactly that, independent of
 the classification/reporting scripts (`model_conditions`/`model` don't
 apply here at all -- it takes plain CLI flags, one file at a time, same as
-`mvpa_generalization_workflow.py`/`mvpa_kfold_workflow.py` leave batching
-across subjects to your own SLURM array wrapper).
+`mvpa_workflow.py` leaves batching across subjects to your own SLURM array
+wrapper).
 
 It wraps FSL's `applywarp` -- **requires FSL on `PATH`** (`module load fsl`
 on a cluster; locally, `export FSLDIR=...` and
@@ -980,7 +1078,7 @@ only fires once *every* array task has succeeded):
 |---|---|---|
 | 1. Mask resample | `slurm/1_batch_resample_native_mask.sh` | per-subject/session array job (section 8) |
 | 2. Master spreadsheet | `slurm/2_sbatch_generate_master_spreadsheet.sh` | single job (section 1) |
-| 3. K-fold classifier | `slurm/3_batch_run_mvpa_workflow.sh` | per-subject array job (section 6); also writes each subject's own single-subject report |
+| 3. Classifier/decoding | `slurm/3_batch_run_mvpa_workflow.sh` | per-subject array job (section 6) -- runs whichever of `model.kfold_cv`/`model_conditions.testing`/`model_conditions.timecourse_decoding` are configured, each independently; also writes each subject's own single-subject report |
 | 4. Group report | `slurm/4_sbatch_generate_report.sh` | single job (section 7); resamples every subject's importance map to MNI (section 8) before building the group report |
 
 Every stage script can still be run standalone (e.g. to rerun just one stage

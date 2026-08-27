@@ -44,9 +44,18 @@ class TestStructuralValidation:
 
     def test_missing_required_section(self):
         cfg = _minimal_config()
-        del cfg["model_conditions"]["testing"]
+        del cfg["model_conditions"]["training"]
         errors, _ = validate_config(cfg)
-        assert any("testing" in e for e in errors)
+        assert any("training" in e for e in errors)
+
+    def test_testing_entirely_absent_is_valid(self):
+        # optional -- unlike training, omitting the whole section (not just
+        # leaving it empty) is not an error; mvpa_workflow.py simply skips
+        # the independent test-set evaluation
+        cfg = _minimal_config()
+        del cfg["model_conditions"]["testing"]
+        errors, warnings = validate_config(cfg)
+        assert errors == []
 
     def test_timecourse_decoding_missing_window_is_error(self):
         cfg = _minimal_config()
@@ -55,8 +64,8 @@ class TestStructuralValidation:
         assert any("window" in e for e in errors)
 
     def test_timecourse_decoding_entirely_absent_is_valid(self):
-        # optional -- unlike training/testing, omitting the whole section
-        # (not just leaving it empty) is not an error
+        # optional -- unlike training, omitting the whole section (not just
+        # leaving it empty) is not an error
         cfg = _minimal_config()
         del cfg["model_conditions"]["timecourse_decoding"]
         errors, warnings = validate_config(cfg)

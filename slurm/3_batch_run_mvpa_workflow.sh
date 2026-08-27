@@ -1,29 +1,30 @@
 #!/bin/bash
 #
-#SBATCH --job-name=mvpa_kfold_workflow
+#SBATCH --job-name=mvpa_workflow
 #SBATCH --qos=cpu-normal
 #SBATCH --partition=acpu
 #SBATCH --account=ucb-general
 #SBATCH --time=04:00:00
 #SBATCH --array=1-90
-#SBATCH --output=logs/mvpa_kfold_workflow_%A_%a.out
-#SBATCH --error=logs/mvpa_kfold_workflow_%A_%a.err
+#SBATCH --output=logs/mvpa_workflow_%A_%a.out
+#SBATCH --error=logs/mvpa_workflow_%A_%a.err
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #
-# Per-subject k-fold classifier array job (mvpa_kfold_workflow.py, not
-# mvpa_generalization_workflow.py -- same-task data, split into folds by
-# run). Expects master_spreadsheet.csv to already exist -- generate it first
-# (2_sbatch_generate_master_spreadsheet.sh / 0_submit_mvpa_pipeline.sh). Also
-# writes each subject's own single-subject report right after their
-# classifier run finishes (workflows/generate_report.py --subject).
+# Per-subject classifier array job (mvpa_workflow.py) -- runs whichever of
+# model.kfold_cv / model_conditions.testing / model_conditions.timecourse_decoding
+# are configured, each independently. Expects master_spreadsheet.csv to
+# already exist -- generate it first (2_sbatch_generate_master_spreadsheet.sh
+# / 0_submit_mvpa_pipeline.sh). Also writes each subject's own single-subject
+# report right after their classifier run finishes
+# (workflows/generate_report.py --subject).
 #
 # --time is a rough starting estimate, not a measured one: a k-fold run
 # with model.kfold_cv.strategy="per_run" and model.permutation_test both
 # set pays for every fold *and* every fold's own 1000-permutation test --
-# substantially more than a single mvpa_generalization_workflow.py run.
-# Check actual wall time from the first array task's log and adjust
-# --time/--array count before submitting the rest at scale.
+# substantially more than a training+testing-only run. Check actual wall
+# time from the first array task's log and adjust --time/--array count
+# before submitting the rest at scale.
 #
 # --array count must match your subject count -- check with:
 #   ls -d $BIDS_HCP_ROOT/sub-* | wc -l
@@ -49,9 +50,9 @@ source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
 subject=`ls -d $BIDS_HCP_ROOT/sub-* | rev | cut -d"/" -f1 | rev | cut -d"-" -f2 | sed -n "$SLURM_ARRAY_TASK_ID p"`
 
 # --------------------------------------------
-# gm operation (maintain/suppress/switch/clear) k-fold classifier
+# gm operation (maintain/suppress/switch/clear) classifier
 # --------------------------------------------
-python "$SCRIPTS_DIR/workflows/mvpa_kfold_workflow.py" --subject $subject --config $CONFIG_FILE \
+python "$SCRIPTS_DIR/workflows/mvpa_workflow.py" --subject $subject --config $CONFIG_FILE \
     --master-spreadsheet $MASTER_SPREADSHEET --analysis-output-dir $OUTPUT_DIR
 
 python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR --config $CONFIG_FILE --subject $subject

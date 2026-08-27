@@ -44,17 +44,20 @@ conda activate incenv
 source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
 
 # --------------------------------------------
-# resample each subject's aggregated importance map into MNI space
-# (native2mni), writing <subject>_impa_mni.nii.gz alongside the original --
-# generate_report.py detects that suffix and averages across subjects into
-# one group-mean page instead of one per-subject page each (space not
-# asserted). Loops
-# over every subject directory found under $OUTPUT_DIR (any desc), rather
-# than hardcoding this pipeline's own desc, so it never drifts out of sync
-# with model.desc in the config. MNI_TEMPLATE is used as the --reference grid
-# so every subject's warped map lands on the exact same grid the group
-# average needs (shape-mismatched subjects are otherwise excluded with a
-# warning, not a failure -- see README.md section 7).
+# resample each subject's importance map(s) into MNI space (native2mni),
+# writing <subject>_impa_mni.nii.gz alongside the original -- generate_report.py
+# detects that suffix and averages across subjects into one group-mean page
+# instead of one per-subject page each (space not asserted). model/ (k-fold
+# CV) and test/ (independent test set) are two independent output families --
+# a subject may have either, both, or neither -- so both are resampled
+# whenever present; generate_report.py's resolve_group_impa_mni prefers the
+# test/ (Full) family when both exist for the group average. Loops over
+# every subject directory found under $OUTPUT_DIR (any desc), rather than
+# hardcoding this pipeline's own desc, so it never drifts out of sync with
+# model.desc in the config. MNI_TEMPLATE is used as the --reference grid so
+# every subject's warped map lands on the exact same grid the group average
+# needs (shape-mismatched subjects are otherwise excluded with a warning,
+# not a failure -- see README.md section 7).
 #
 # A subject's own sessions are assumed to share one native/structural
 # registration (the standard, non-longitudinal HCP Pipelines setup), so any
@@ -66,26 +69,32 @@ source "${SCRIPTS_DIR:-.}/slurm/pipeline_vars.sh"
 # --------------------------------------------
 for subject_dir in "$OUTPUT_DIR"/*/*/; do
     subject=$(basename "$subject_dir")
-    impa="${subject_dir}model/${subject}_impa.nii.gz"
-    [ -f "$impa" ] || continue
 
-    session_dir=$(find "$HCPPIPE_ROOT/sub-$subject" -maxdepth 1 -type d -name "ses-*" 2>/dev/null | sort | head -n 1)
-    if [ -z "$session_dir" ]; then
-        echo "  (!) sub-$subject: no session directory found under $HCPPIPE_ROOT -- skipping MNI resample"
-        continue
-    fi
-    session=$(basename "$session_dir" | cut -d"-" -f2)
-    impa_mni="${subject_dir}model/${subject}_impa_mni.nii.gz"
+    session_dir=""
+    for family in model test; do
+        impa="${subject_dir}${family}/${subject}_impa.nii.gz"
+        [ -f "$impa" ] || continue
 
-    echo "  sub-$subject (ses-$session): $impa -> $impa_mni"
-    python "$SCRIPTS_DIR/utils/hcp_resample.py" \
-        --input "$impa" \
-        --output "$impa_mni" \
-        --direction native2mni \
-        --subject "$subject" --session "$session" \
-        --derivatives-root "$HCPPIPE_ROOT" \
-        --reference "$MNI_TEMPLATE" \
-        --interp trilinear
+        if [ -z "$session_dir" ]; then
+            session_dir=$(find "$HCPPIPE_ROOT/sub-$subject" -maxdepth 1 -type d -name "ses-*" 2>/dev/null | sort | head -n 1)
+            if [ -z "$session_dir" ]; then
+                echo "  (!) sub-$subject: no session directory found under $HCPPIPE_ROOT -- skipping MNI resample"
+                break
+            fi
+            session=$(basename "$session_dir" | cut -d"-" -f2)
+        fi
+
+        impa_mni="${subject_dir}${family}/${subject}_impa_mni.nii.gz"
+        echo "  sub-$subject (ses-$session, $family): $impa -> $impa_mni"
+        python "$SCRIPTS_DIR/utils/hcp_resample.py" \
+            --input "$impa" \
+            --output "$impa_mni" \
+            --direction native2mni \
+            --subject "$subject" --session "$session" \
+            --derivatives-root "$HCPPIPE_ROOT" \
+            --reference "$MNI_TEMPLATE" \
+            --interp trilinear
+    done
 done
 
 python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR \

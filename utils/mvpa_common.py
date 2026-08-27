@@ -2,10 +2,11 @@
 """
 Shared utilities for the mvpa_banich toolchain: BIDS filename parsing, the
 onset/duration -> BOLD volume-range math, the model_conditions query DSL, and
-the config-loading/classification/decoding primitives used by both
-mvpa_generalization_workflow.py (independent train/test) and
-mvpa_kfold_workflow.py (same-task, split-by-run k-fold) -- also used directly
-by generate_master_spreadsheet.py and validate_model_config.py.
+the config-loading/classification/decoding primitives used by
+mvpa_workflow.py (independent train/test evaluation, k-fold cross-validation
+within training, and timecourse decoding -- each an independent, optional
+step) -- also used directly by generate_master_spreadsheet.py and
+validate_model_config.py.
 """
 
 import importlib
@@ -246,7 +247,7 @@ def resolve_window_times(window: dict, onset: float, duration: float):
 
 # =====================================================
 # Small shared helpers (no dependency on any script's module-level state --
-# safe to import from mvpa_generalization_workflow.py, generate_report.py, or anywhere else)
+# safe to import from mvpa_workflow.py, generate_report.py, or anywhere else)
 # =====================================================
 
 def quick_safe(name) -> str:
@@ -731,12 +732,32 @@ def model_classification(training_data, training_labels, feature_selection_cfg: 
     return pipe
 
 
+def extract_importance_map(pipe, n_features: int) -> np.ndarray:
+    """Classifier weights reshaped back into whole-brain (unsliced) voxel space --
+    pure function of the fitted pipeline itself, no labeled data needed, so it can
+    produce a model's importance map even when there's no test set to score it
+    against (e.g. a training-only classifier used solely for timecourse decoding)."""
+    clf = pipe.named_steps["classifier"]
+    xfeat = pipe.named_steps["feature_selection"].get_support()
+    n_class = len(clf.classes_)
+
+    # special case where classifier is binary (yes/no) -- only codes one label
+    if n_class == 2:
+        # voxel weights -- volume 0 and volume 1 are mat*-1 of each other
+        impa = np.vstack((clf.coef_, -clf.coef_))
+    else:
+        impa = clf.coef_
+
+    impa_full = np.zeros((n_class, n_features), dtype=impa.dtype)
+    impa_full[:, xfeat] = impa
+    return impa_full
+
+
 def model_performance(pipe, testing_data, testing_labels):
 
     print("Testing model performance...")
 
     clf = pipe.named_steps["classifier"]
-    xfeat = pipe.named_steps["feature_selection"].get_support()
 
     # classes the classifier was actually trained on -- not np.unique(testing_labels),
     # which would drift shape-to-shape if a given fold's held-out data happens to be
@@ -754,14 +775,10 @@ def model_performance(pipe, testing_data, testing_labels):
     # total model accuracy
     ttl_score = accuracy_score(testing_labels, xpred)
 
+    impa_full = extract_importance_map(pipe, n_features)
+
     # special case where classifier is binary (yes/no) -- only codes one label
     if n_class == 2:
-
-        # voxel weights
-        impa = np.vstack((clf.coef_, -clf.coef_))
-        ## important volume 0 and volume 1 are mat*-1 of eachother.. Compute 1 tail ttests always
-        print(impa.shape)
-
         # evidence: sigmoid on decision function → class-1 prob; other is 1-p
         d = pipe.decision_function(testing_data)
         p1 = 1.0 / (1.0 + np.exp(-d))
@@ -769,17 +786,9 @@ def model_performance(pipe, testing_data, testing_labels):
         xevi = np.vstack([p0, p1]).T
 
     else:
-
-        # voxel weights
-        impa = clf.coef_
-
         # evidence: multinomial OV(A)R decision_function → pass through sigmoid per class
         d = pipe.decision_function(testing_data)  # shape: (n, n_class)
         xevi = 1.0 / (1.0 + np.exp(-d))
-
-    # store importance values in original dataformat
-    impa_full = np.zeros((n_class, n_features), dtype=impa.dtype)
-    impa_full[:, xfeat] = impa
 
     # normalized confusion matrix, and evidence matrix
     acc_mx = np.zeros((n_class, n_class))

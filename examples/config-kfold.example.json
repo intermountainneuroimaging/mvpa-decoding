@@ -1,7 +1,7 @@
 {
   "config_version": "1.0",
   "created_by": "AKH",
-  "notes": "MVPA face/place, k-fold (same-task, split by run) -- for mvpa_kfold_workflow.py",
+  "notes": "MVPA face/place, k-fold (same-task, split by run) -- for mvpa_workflow.py's model.kfold_cv step. model_conditions.testing/timecourse_decoding are byte-identical to training (same query, no run restriction) by design: model.kfold_cv resolves fold membership -- and the actual train/held-out run split -- entirely from model_conditions.training on its own, so testing/timecourse_decoding just re-list the same eligible rows for their own steps. Since testing is now independently optional (see README.md section 4), leaving it in also makes mvpa_workflow.py run its separate fit-on-all-training/evaluate-on-all-testing step -- and because testing's query matches the exact same rows training does (no held-out split), that step here just re-scores the classifier on data it was already fit on, not a genuine held-out generalization test. Remove model_conditions.testing if you only want the k-fold (model/) output demonstrated by this example.",
 
   "event_extraction": {
     "bids_root": "examples/sample-data",

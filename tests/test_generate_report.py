@@ -1,6 +1,6 @@
 """generate_report.py: subject-scope discovery + file layout + small CSV
 loaders. Fake directory trees built under tmp_path -- no dependency on real
-mvpa_generalization_workflow.py output."""
+mvpa_workflow.py output."""
 
 import json
 
@@ -24,10 +24,12 @@ from workflows.generate_report import (
 )
 
 
-def _make_subject(tmp_path, desc, subject, with_model_dir=True):
+def _make_subject(tmp_path, desc, subject, with_model_dir=True, with_test_dir=False):
     base = tmp_path / desc / subject
     if with_model_dir:
         (base / "model").mkdir(parents=True)
+    if with_test_dir:
+        (base / "test").mkdir(parents=True, exist_ok=True)
     return base
 
 
@@ -49,9 +51,15 @@ class TestListSubjectDirs:
     def test_no_subject_lists_all_with_model_dir_sorted(self, tmp_path):
         _make_subject(tmp_path, "desc1", "02")
         _make_subject(tmp_path, "desc1", "01")
-        _make_subject(tmp_path, "desc1", "03", with_model_dir=False)  # no model/ -- excluded
+        _make_subject(tmp_path, "desc1", "03", with_model_dir=False)  # neither model/ nor test/ -- excluded
         result = list_subject_dirs(str(tmp_path), "desc1")
         assert result == ["01", "02"]
+
+    def test_test_dir_only_subject_is_included(self, tmp_path):
+        # training + testing configured, no model.kfold_cv -- no model/ dir at all
+        _make_subject(tmp_path, "desc1", "01", with_model_dir=False, with_test_dir=True)
+        result = list_subject_dirs(str(tmp_path), "desc1")
+        assert result == ["01"]
 
     def test_no_subject_dirs_at_all_raises(self, tmp_path):
         with pytest.raises(SystemExit):
@@ -63,23 +71,38 @@ class TestListSubjectDirs:
 # =====================================================
 
 class TestSubjectPaths:
-    def test_paths_are_named_by_subject_under_expected_subdirs(self):
+    def test_kfold_paths_under_model_dir(self):
         paths = subject_paths("/out", "desc1", "01")
-        assert paths["model_total"] == "/out/desc1/01/model/01_model_results_total_scores.csv"
-        assert paths["model_auc"] == "/out/desc1/01/model/01_model_results_auc.csv"
-        assert paths["cv_total"] == "/out/desc1/01/cv/01_cv_results_total_scores.csv"
+        assert paths["kfold_total"] == "/out/desc1/01/model/01_model_results_total_scores.csv"
+        assert paths["kfold_auc"] == "/out/desc1/01/model/01_model_results_auc.csv"
+        assert paths["kfold_accuracy"] == "/out/desc1/01/model/01_model_results_accuracy.csv"
+        assert paths["kfold_evidence"] == "/out/desc1/01/model/01_model_results_evidence.csv"
+        assert paths["kfold_impa"] == "/out/desc1/01/model/01_impa.nii.gz"
+        assert paths["kfold_impa_mni"] == "/out/desc1/01/model/01_impa_mni.nii.gz"
+
+    def test_test_paths_under_test_dir(self):
+        paths = subject_paths("/out", "desc1", "01")
+        assert paths["test_total"] == "/out/desc1/01/test/01_model_results_total_scores.csv"
+        assert paths["test_auc"] == "/out/desc1/01/test/01_model_results_auc.csv"
+        assert paths["test_accuracy"] == "/out/desc1/01/test/01_model_results_accuracy.csv"
+        assert paths["test_evidence"] == "/out/desc1/01/test/01_model_results_evidence.csv"
+        assert paths["test_impa"] == "/out/desc1/01/test/01_impa.nii.gz"
+        assert paths["test_impa_mni"] == "/out/desc1/01/test/01_impa_mni.nii.gz"
+
+    def test_decoding_paths_unaffected_by_kfold_or_test(self):
+        paths = subject_paths("/out", "desc1", "01")
         assert paths["decoding"] == "/out/desc1/01/decoding/01_summary_decoding_results.csv"
         assert paths["decoding_raw"] == "/out/desc1/01/decoding/01_decoding_results.csv"
-        assert paths["model_impa"] == "/out/desc1/01/model/01_impa.nii.gz"
-        assert paths["model_impa_mni"] == "/out/desc1/01/model/01_impa_mni.nii.gz"
 
-    def test_mnispace_true_points_model_impa_at_the_mni_filename(self):
+    def test_mnispace_true_points_both_impa_families_at_the_mni_filename(self):
         paths = subject_paths("/out", "desc1", "01", mnispace=True)
-        assert paths["model_impa"] == "/out/desc1/01/model/01_impa_mni.nii.gz"
-        # coincides with model_impa_mni -- the workflow wrote the MNI-confirmed
-        # file directly, so no separate hcp_resample.py step is needed for
-        # cross-subject group averaging to kick in
-        assert paths["model_impa"] == paths["model_impa_mni"]
+        assert paths["kfold_impa"] == "/out/desc1/01/model/01_impa_mni.nii.gz"
+        assert paths["test_impa"] == "/out/desc1/01/test/01_impa_mni.nii.gz"
+        # coincides with kfold_impa_mni/test_impa_mni -- the workflow wrote the
+        # MNI-confirmed file directly, so no separate hcp_resample.py step is
+        # needed for cross-subject group averaging to kick in
+        assert paths["kfold_impa"] == paths["kfold_impa_mni"]
+        assert paths["test_impa"] == paths["test_impa_mni"]
 
 
 # =====================================================
@@ -100,16 +123,18 @@ class TestFoldFiles:
 
         folds = fold_paths(str(tmp_path), "desc1", "01")
         assert sorted(folds.keys()) == [1, 2]
-        assert folds[1]["model_total"] == str(base / "model" / "01_fold1_model_results_total_scores.csv")
-        assert folds[1]["model_impa"] == str(base / "model" / "01_fold1_impa.nii.gz")
-        assert folds[2]["decoding"] == str(base / "decoding" / "01_fold2_summary_decoding_results.csv")
-        assert folds[2]["decoding_raw"] == str(base / "decoding" / "01_fold2_decoding_results.csv")
+        assert folds[1]["kfold_total"] == str(base / "model" / "01_fold1_model_results_total_scores.csv")
+        assert folds[1]["kfold_impa"] == str(base / "model" / "01_fold1_impa.nii.gz")
+        assert folds[2]["kfold_auc"] == str(base / "model" / "01_fold2_model_results_auc.csv")
+        # no per-fold decoding anymore -- timecourse decoding is never fold-based
+        assert "decoding" not in folds[1]
+        assert "decoding_raw" not in folds[1]
 
     def test_fold_paths_mnispace_true_uses_mni_filename(self, tmp_path):
         base = _make_subject(tmp_path, "desc1", "01")
         (base / "model" / "01_fold1_model_results_total_scores.csv").write_text("0.5")
         folds = fold_paths(str(tmp_path), "desc1", "01", mnispace=True)
-        assert folds[1]["model_impa"] == str(base / "model" / "01_fold1_impa_mni.nii.gz")
+        assert folds[1]["kfold_impa"] == str(base / "model" / "01_fold1_impa_mni.nii.gz")
 
 
 # =====================================================
@@ -124,23 +149,41 @@ class TestResolveGroupImpaMni:
         assert available == {}
         assert missing == ["01", "02"]
 
-    def test_some_subjects_have_mni_map(self, tmp_path):
-        base01 = _make_subject(tmp_path, "desc1", "01")
+    def test_some_subjects_have_full_test_mni_map(self, tmp_path):
+        base01 = _make_subject(tmp_path, "desc1", "01", with_test_dir=True)
         _make_subject(tmp_path, "desc1", "02")
-        (base01 / "model" / "01_impa_mni.nii.gz").write_text("fake")
+        (base01 / "test" / "01_impa_mni.nii.gz").write_text("fake")
 
         available, missing = resolve_group_impa_mni(str(tmp_path), "desc1", ["01", "02"])
-        assert available == {"01": str(base01 / "model" / "01_impa_mni.nii.gz")}
+        assert available == {"01": (str(base01 / "test" / "01_impa_mni.nii.gz"), "Full")}
         assert missing == ["02"]
 
-    def test_all_subjects_have_mni_map(self, tmp_path):
+    def test_all_subjects_have_full_test_mni_map(self, tmp_path):
         for sub in ("01", "02"):
-            base = _make_subject(tmp_path, "desc1", sub)
-            (base / "model" / f"{sub}_impa_mni.nii.gz").write_text("fake")
+            base = _make_subject(tmp_path, "desc1", sub, with_test_dir=True)
+            (base / "test" / f"{sub}_impa_mni.nii.gz").write_text("fake")
 
         available, missing = resolve_group_impa_mni(str(tmp_path), "desc1", ["01", "02"])
         assert sorted(available.keys()) == ["01", "02"]
+        assert all(fam == "Full" for _, fam in available.values())
         assert missing == []
+
+    def test_falls_back_to_kfold_cv_mni_map_when_full_test_absent(self, tmp_path):
+        # subject has no test/ MNI map at all, but does have a kfold model/ one
+        base = _make_subject(tmp_path, "desc1", "01")
+        (base / "model" / "01_impa_mni.nii.gz").write_text("fake")
+
+        available, missing = resolve_group_impa_mni(str(tmp_path), "desc1", ["01"])
+        assert available == {"01": (str(base / "model" / "01_impa_mni.nii.gz"), "CV")}
+        assert missing == []
+
+    def test_prefers_full_test_over_cv_kfold_when_both_present(self, tmp_path):
+        base = _make_subject(tmp_path, "desc1", "01", with_test_dir=True)
+        (base / "model" / "01_impa_mni.nii.gz").write_text("fake-cv")
+        (base / "test" / "01_impa_mni.nii.gz").write_text("fake-full")
+
+        available, missing = resolve_group_impa_mni(str(tmp_path), "desc1", ["01"])
+        assert available == {"01": (str(base / "test" / "01_impa_mni.nii.gz"), "Full")}
 
 
 # =====================================================
@@ -166,9 +209,16 @@ class TestLoaders:
 # =====================================================
 
 class TestInferCategories:
-    def test_reads_categories_from_first_available_auc_csv(self, tmp_path):
+    def test_reads_categories_from_kfold_auc_csv(self, tmp_path):
         base = _make_subject(tmp_path, "desc1", "01")
         pd.DataFrame({"auc": [0.7, 0.8]}, index=["face", "place"]).to_csv(base / "model" / "01_model_results_auc.csv")
+
+        categories = infer_categories(str(tmp_path), "desc1", ["01"])
+        assert categories == ["face", "place"]
+
+    def test_falls_back_to_test_auc_csv_when_no_kfold(self, tmp_path):
+        base = _make_subject(tmp_path, "desc1", "01", with_test_dir=True)
+        pd.DataFrame({"auc": [0.6, 0.9]}, index=["face", "place"]).to_csv(base / "test" / "01_model_results_auc.csv")
 
         categories = infer_categories(str(tmp_path), "desc1", ["01"])
         assert categories == ["face", "place"]

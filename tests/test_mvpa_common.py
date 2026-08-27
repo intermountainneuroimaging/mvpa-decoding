@@ -35,6 +35,7 @@ from utils.mvpa_common import (
     permutation_significance,
     load_images_and_mask,
     impa_tag,
+    extract_importance_map,
 )
 
 CLASSIFIER_NAME = "sklearn.linear_model.LogisticRegression"
@@ -536,6 +537,23 @@ class TestBuildClassifierPipeline:
 # =====================================================
 # model_classification / model_performance (end-to-end, tiny synthetic data)
 # =====================================================
+
+class TestExtractImportanceMap:
+    def test_matches_model_performance_without_needing_labeled_data(self):
+        # extract_importance_map should produce exactly what model_performance
+        # returns as its impa_full, without ever touching testing_data/testing_labels
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2, seed=1)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
+        _, impa_from_model_performance = model_performance(pipe, X, y)
+        impa_standalone = extract_importance_map(pipe, n_features=X.shape[1])
+        np.testing.assert_array_equal(impa_standalone, impa_from_model_performance)
+
+    def test_multiclass_shape(self):
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3, seed=2)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
+        impa = extract_importance_map(pipe, n_features=X.shape[1])
+        assert impa.shape == (3, X.shape[1])
+
 
 class TestModelClassificationAndPerformance:
     def test_binary_end_to_end(self):
