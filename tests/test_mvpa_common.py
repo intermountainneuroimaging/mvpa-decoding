@@ -566,6 +566,9 @@ class TestModelClassificationAndPerformance:
         assert xout["evidence"].shape == (2, 2)
         assert xout["auc"].shape == (2,)
         assert impa_full.shape == (2, X.shape[1])
+        assert xout["whole_voxels"] == X.shape[1]
+        assert xout["selected_voxels"] == int(pipe.named_steps["feature_selection"].get_support().sum())
+        assert xout["feature_percent"] == pytest.approx(100 * xout["selected_voxels"] / xout["whole_voxels"])
 
     def test_multiclass_end_to_end(self):
         X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3, seed=2)
@@ -594,6 +597,9 @@ class TestModelClassificationAndPerformance:
         assert int(pipe.named_steps["feature_selection"].get_support().sum()) == 4
         xout, impa_full = model_performance(pipe, X, y)
         assert xout["total_scores"] > 0.8  # cleanly separable data
+        assert xout["whole_voxels"] == 10
+        assert xout["selected_voxels"] == 4
+        assert xout["feature_percent"] == pytest.approx(40.0)
 
 
 # =====================================================

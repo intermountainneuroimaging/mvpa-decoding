@@ -810,13 +810,23 @@ def model_performance(pipe, testing_data, testing_labels):
         for j in range(n_class)
     ], dtype=float)
 
+    # feature-selection footprint of this particular fit -- same three values
+    # timecourse_decoding() already reports, so a fold's/test-set's own
+    # selected-voxel count is visible next to its accuracy/AUC rather than
+    # only ever showing up for the timecourse page
+    n_selected = int(pipe.named_steps["feature_selection"].get_support().sum())
+
     # record model results
     xout = {
         'total_scores': ttl_score,
         'accuracy': acc_mx,  #acc_mx
         'evidence': evi_mx,  #evi_mx
 
-        'auc': auc
+        'auc': auc,
+
+        'whole_voxels': n_features,
+        'selected_voxels': n_selected,
+        'feature_percent': 100 * n_selected / n_features,
     }
 
     return xout, impa_full

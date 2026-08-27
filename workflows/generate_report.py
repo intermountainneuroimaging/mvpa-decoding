@@ -162,6 +162,9 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: b
         "kfold_auc": os.path.join(base, "model", f"{subject}_model_results_auc.csv"),
         "kfold_accuracy": os.path.join(base, "model", f"{subject}_model_results_accuracy.csv"),
         "kfold_evidence": os.path.join(base, "model", f"{subject}_model_results_evidence.csv"),
+        "kfold_whole_voxels": os.path.join(base, "model", f"{subject}_model_results_whole_voxels.csv"),
+        "kfold_selected_voxels": os.path.join(base, "model", f"{subject}_model_results_selected_voxels.csv"),
+        "kfold_feature_percent": os.path.join(base, "model", f"{subject}_model_results_feature_percent.csv"),
         # filename tag depends on model.mnispace (see impa_tag): "impa_mni" when
         # the input BOLD/mask were confirmed-by-config to already be in MNI
         # space, plain "impa" otherwise (space left unasserted, since it isn't
@@ -181,6 +184,9 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: b
         "test_auc": os.path.join(base, "test", f"{subject}_model_results_auc.csv"),
         "test_accuracy": os.path.join(base, "test", f"{subject}_model_results_accuracy.csv"),
         "test_evidence": os.path.join(base, "test", f"{subject}_model_results_evidence.csv"),
+        "test_whole_voxels": os.path.join(base, "test", f"{subject}_model_results_whole_voxels.csv"),
+        "test_selected_voxels": os.path.join(base, "test", f"{subject}_model_results_selected_voxels.csv"),
+        "test_feature_percent": os.path.join(base, "test", f"{subject}_model_results_feature_percent.csv"),
         "test_impa": os.path.join(base, "test", f"{subject}_{tag}.nii.gz"),
         # see "kfold_impa_mni" above -- same idea, in test/. Presence of either
         # this or "kfold_impa_mni" is how render_importance_pages decides a
@@ -246,8 +252,9 @@ def infer_categories(analysis_output_dir: str, desc: str, subjects: list) -> lis
 def compile_group_summary(analysis_output_dir: str, desc: str, subjects: list) -> pd.DataFrame:
     """One row per (subject, family) with every scalar/vector/matrix metric
     mvpa_workflow.py produced for that family flattened into its own column --
-    total_accuracy, auc_<category>, accuracy_<true>_<pred>, evidence_<true>_<pred>
-    -- so the whole group's numbers live in one spreadsheet instead of scattered
+    total_accuracy, whole_voxels, selected_voxels, feature_percent,
+    auc_<category>, accuracy_<true>_<pred>, evidence_<true>_<pred> -- so the
+    whole group's numbers live in one spreadsheet instead of scattered
     across each subject's own model/test CSVs. A subject missing a family (no
     model.kfold_cv, or no model_conditions.testing) simply contributes no row
     for that family; a subject/category set that differs from the rest just
@@ -260,6 +267,10 @@ def compile_group_summary(analysis_output_dir: str, desc: str, subjects: list) -
             if not os.path.exists(p[total_key]):
                 continue
             row = {"subject": s, "family": family, "total_accuracy": load_scalar_csv(p[total_key])}
+            for metric in ("whole_voxels", "selected_voxels", "feature_percent"):
+                metric_key = f"{prefix}_{metric}"
+                if os.path.exists(p[metric_key]):
+                    row[metric] = load_scalar_csv(p[metric_key])
             if os.path.exists(p[auc_key]):
                 for cat, val in load_labeled_csv(p[auc_key]).iloc[:, 0].items():
                     row[f"auc_{cat}"] = val
@@ -275,6 +286,22 @@ def compile_group_summary(analysis_output_dir: str, desc: str, subjects: list) -
                         row[f"evidence_{true_cat}_{pred_cat}"] = evi.loc[true_cat, pred_cat]
             rows.append(row)
     return pd.DataFrame(rows)
+
+
+def compile_group_decoding(analysis_output_dir: str, desc: str, subjects: list) -> pd.DataFrame:
+    """Every subject's full per-TR timecourse decoding output
+    (decoding_raw -- one row per decoded volume, not the pre-aggregated
+    per-(window_index, regressor_label) summary) concatenated into one
+    table -- each row already carries its own "subject" column (from
+    build_timecourse_instructions), so no extra tagging is needed here.
+    Subjects with no timecourse_decoding output simply contribute nothing."""
+    frames = [
+        pd.read_csv(p["decoding_raw"], dtype={"subject": str})
+        for s in subjects
+        for p in [subject_paths(analysis_output_dir, desc, s)]
+        if os.path.exists(p["decoding_raw"])
+    ]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 # =====================================================
@@ -970,6 +997,12 @@ def main():
         summary_path = os.path.join(os.path.dirname(output_path), f"{desc}_group_summary.csv")
         summary.to_csv(summary_path, index=False)
         print(f"Group summary spreadsheet saved to: {summary_path}")
+
+        decoding = compile_group_decoding(args.analysis_output_dir, desc, subjects)
+        if not decoding.empty:
+            decoding_path = os.path.join(os.path.dirname(output_path), f"{desc}_group_decoding_results.csv")
+            decoding.to_csv(decoding_path, index=False)
+            print(f"Group decoding spreadsheet saved to: {decoding_path}")
 
 
 if __name__ == "__main__":

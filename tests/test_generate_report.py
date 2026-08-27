@@ -17,6 +17,7 @@ from workflows.generate_report import (
     load_labeled_csv,
     infer_categories,
     compile_group_summary,
+    compile_group_decoding,
     summarize_raw_for_timecourse,
     load_annotation_info,
     resolve_desc,
@@ -277,6 +278,66 @@ class TestCompileGroupSummary:
         _make_subject(tmp_path, "desc1", "01")
         summary = compile_group_summary(str(tmp_path), "desc1", ["01"])
         assert summary.empty
+
+    def test_includes_voxel_footprint_columns(self, tmp_path):
+        categories = ["face", "place"]
+        base = _make_subject(tmp_path, "desc1", "01")
+        _write_family_csvs(base, "model", "01", 0.7, [0.8, 0.75], [[0.9, 0.1], [0.2, 0.8]], [[0.85, 0.15], [0.25, 0.75]], categories)
+        np.savetxt(base / "model" / "01_model_results_whole_voxels.csv", [17806], delimiter=",", fmt="%.6f")
+        np.savetxt(base / "model" / "01_model_results_selected_voxels.csv", [42], delimiter=",", fmt="%.6f")
+        np.savetxt(base / "model" / "01_model_results_feature_percent.csv", [0.2359], delimiter=",", fmt="%.6f")
+
+        summary = compile_group_summary(str(tmp_path), "desc1", ["01"])
+        row = summary.iloc[0]
+        assert row["whole_voxels"] == pytest.approx(17806)
+        assert row["selected_voxels"] == pytest.approx(42)
+        assert row["feature_percent"] == pytest.approx(0.2359)
+
+    def test_voxel_footprint_columns_absent_when_files_missing(self, tmp_path):
+        categories = ["face", "place"]
+        base = _make_subject(tmp_path, "desc1", "01")
+        _write_family_csvs(base, "model", "01", 0.7, [0.8, 0.75], [[0.9, 0.1], [0.2, 0.8]], [[0.85, 0.15], [0.25, 0.75]], categories)
+
+        summary = compile_group_summary(str(tmp_path), "desc1", ["01"])
+        assert "whole_voxels" not in summary.columns
+
+
+# =====================================================
+# compile_group_decoding
+# =====================================================
+
+class TestCompileGroupDecoding:
+    def test_concatenates_every_subject_decoding_raw(self, tmp_path):
+        for subject, n_rows in (("01", 2), ("02", 3)):
+            d = tmp_path / "desc1" / subject / "decoding"
+            d.mkdir(parents=True)
+            pd.DataFrame({
+                "subject": [subject] * n_rows,
+                "window_index": list(range(n_rows)),
+                "regressor_label": ["face"] * n_rows,
+                "evidence_face": [0.5] * n_rows,
+            }).to_csv(d / f"{subject}_decoding_results.csv", index=False)
+
+        combined = compile_group_decoding(str(tmp_path), "desc1", ["01", "02"])
+        assert len(combined) == 5
+        assert sorted(combined["subject"].unique()) == ["01", "02"]
+        assert (combined[combined["subject"] == "02"]["window_index"] == [0, 1, 2]).all()
+
+    def test_subject_missing_decoding_output_is_skipped(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")  # no decoding/ dir at all
+        d = tmp_path / "desc1" / "02" / "decoding"
+        d.mkdir(parents=True)
+        pd.DataFrame({"subject": ["02"], "window_index": [0], "evidence_face": [0.5]}).to_csv(
+            d / "02_decoding_results.csv", index=False
+        )
+
+        combined = compile_group_decoding(str(tmp_path), "desc1", ["01", "02"])
+        assert list(combined["subject"]) == ["02"]
+
+    def test_no_subjects_have_decoding_output(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")
+        combined = compile_group_decoding(str(tmp_path), "desc1", ["01"])
+        assert combined.empty
 
 
 # =====================================================
