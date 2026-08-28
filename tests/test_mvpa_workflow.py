@@ -15,6 +15,7 @@ from workflows.mvpa_workflow import (
     validate_kfold_cv_config,
     resolve_kfold_folds,
     run_kfold,
+    boldfile_overlap,
 )
 
 CLASSIFIER_NAME = "sklearn.linear_model.LogisticRegression"
@@ -50,6 +51,28 @@ class TestValidateKfoldCvConfig:
 
     def test_valid_explicit_groups_passes(self):
         validate_kfold_cv_config({"strategy": "explicit_groups", "held_out_runs": [[1], [2]]})  # no exception
+
+
+# =====================================================
+# boldfile_overlap
+# =====================================================
+
+class TestBoldfileOverlap:
+    def test_shared_boldfile_detected(self):
+        a = pd.DataFrame({"boldfile": ["run-1.nii.gz", "run-2.nii.gz"]})
+        b = pd.DataFrame({"boldfile": ["run-2.nii.gz", "run-3.nii.gz"]})
+        assert boldfile_overlap(a, b) == {"run-2.nii.gz"}
+
+    def test_no_overlap_returns_empty_set(self):
+        a = pd.DataFrame({"boldfile": ["run-1.nii.gz"]})
+        b = pd.DataFrame({"boldfile": ["run-2.nii.gz"]})
+        assert boldfile_overlap(a, b) == set()
+
+    def test_same_run_number_different_task_is_not_a_false_positive(self):
+        # same numeric run, but different boldfiles entirely (different task)
+        a = pd.DataFrame({"run": [1], "boldfile": ["task-loc_run-1.nii.gz"]})
+        b = pd.DataFrame({"run": [1], "boldfile": ["task-WMpos_run-1.nii.gz"]})
+        assert boldfile_overlap(a, b) == set()
 
 
 # =====================================================
@@ -131,7 +154,8 @@ def _build_training_fold_data(runs=(1, 2, 3), n_per_run_per_class=5, n_features=
             run_parts.append(np.full(n_per_run_per_class, run))
     training_data = np.vstack(X_parts)
     training_labels = np.concatenate(y_parts)
-    training_df = pd.DataFrame({"run": np.concatenate(run_parts)})
+    runs = np.concatenate(run_parts)
+    training_df = pd.DataFrame({"run": runs, "boldfile": [f"run-{r}.nii.gz" for r in runs]})
     return training_df, training_data, training_labels
 
 
@@ -140,7 +164,7 @@ class TestRunKfold:
         training_df, training_data, training_labels = _build_training_fold_data()
         fold_groups = resolve_kfold_folds({"strategy": "per_run"}, training_df)
 
-        aggregated_impa, xout = run_kfold(
+        aggregated_impa, xout, boldfile_to_pipe = run_kfold(
             kfold_cv_cfg={"strategy": "per_run"},
             fold_groups=fold_groups,
             permutation_test_cfg=None,
@@ -167,6 +191,36 @@ class TestRunKfold:
         # aggregated results
         assert xout["total_scores"] > 0.7  # cleanly separable synthetic data
         assert aggregated_impa.shape == (2, training_data.shape[1])
+
+        # boldfile_to_pipe covers exactly the 3 held-out runs' boldfiles
+        # (per_run -- one run per fold here), each mapped to a distinct
+        # fitted pipe that never trained on that boldfile's own rows
+        assert sorted(boldfile_to_pipe.keys()) == ["run-1.nii.gz", "run-2.nii.gz", "run-3.nii.gz"]
+        assert len({id(p) for p in boldfile_to_pipe.values()}) == 3  # 3 distinct fold classifiers
+
+    def test_boldfile_to_pipe_groups_multi_run_folds_under_one_pipe(self, tmp_path):
+        # group_kfold with n_splits=2 over 4 runs -- each fold holds out 2
+        # runs at once, so their boldfiles should map to the SAME pipe object
+        training_df, training_data, training_labels = _build_training_fold_data(runs=(1, 2, 3, 4))
+        fold_groups = resolve_kfold_folds({"strategy": "group_kfold", "n_splits": 2}, training_df)
+
+        _, _, boldfile_to_pipe = run_kfold(
+            kfold_cv_cfg={"strategy": "group_kfold", "n_splits": 2},
+            fold_groups=fold_groups,
+            permutation_test_cfg=None,
+            masker=FakeMasker(),
+            impa_filename_tag="impa",
+            analysis_output_dir=str(tmp_path), model_descr="test_model", subject_id="01",
+            regressor_categories=["face", "place"],
+            feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,
+            training_df=training_df, training_data=training_data, training_labels=training_labels,
+        )
+
+        assert sorted(boldfile_to_pipe.keys()) == ["run-1.nii.gz", "run-2.nii.gz", "run-3.nii.gz", "run-4.nii.gz"]
+        for group in fold_groups:
+            boldfiles_in_group = [f"run-{r}.nii.gz" for r in group]
+            pipes = {id(boldfile_to_pipe[bf]) for bf in boldfiles_in_group}
+            assert len(pipes) == 1  # every run in the same held-out group shares one pipe
 
     def test_with_permutation_test_writes_per_fold_file(self, tmp_path):
         training_df, training_data, training_labels = _build_training_fold_data(

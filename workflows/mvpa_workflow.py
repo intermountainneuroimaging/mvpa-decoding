@@ -13,12 +13,22 @@ only writes its own output) when its config section is present:
                                evaluated against a genuinely separate test set.
   3. model_conditions.timecourse_decoding -- predicts at every TR across a
                                decode window, using that same complete-training-set
-                               fit (never per-fold).
+                               fit (never per-fold) -- unless step 2's guard below
+                               substitutes a held-out k-fold classifier instead.
 
 The complete-training-set classifier (step 2/3's "full model") is always fit,
 regardless of which of the above are configured, since timecourse decoding
 needs it whether or not a test set exists. See README.md sections 3-6 for the
 config format and "Running mvpa_workflow.py" for what each step does.
+
+Double-dipping guard: a subject whose model_conditions.training shares a
+bold file with testing/timecourse_decoding has its held-out test evaluation
+skipped entirely (no honest substitute classifier exists) and its
+overlapping timecourse rows decoded with their own held-out model.kfold_cv
+classifier instead of the full-training fit (or skipped too, if kfold_cv
+isn't configured) -- see boldfile_overlap() and README.md section 6's
+"Double-dipping guard" for the full explanation, and
+model.allow_train_test_overlap to opt out.
 
 Works for any number of training conditions (2 or more): class lists are
 always derived from what the classifier actually learned (clf.classes_), not
@@ -189,6 +199,21 @@ def resolve_kfold_folds(kfold_cv_cfg: dict, training_df: pd.DataFrame) -> list:
 
 
 # =====================================================
+# Double-dipping guard: training vs. testing/timecourse independence
+# =====================================================
+
+def boldfile_overlap(df_a: pd.DataFrame, df_b: pd.DataFrame) -> set:
+    """Boldfiles shared between two already-labeled dataframes -- a non-empty
+    result means at least one scan contributes rows to both, e.g. training a
+    classifier on part of a run and then evaluating it (test or timecourse
+    decoding) on another part of that same run. Keyed by boldfile rather than
+    run number, since two different tasks can reuse the same run number for
+    genuinely different scans -- boldfile is the only unambiguous "same scan"
+    identifier."""
+    return set(df_a["boldfile"]) & set(df_b["boldfile"])
+
+
+# =====================================================
 # K-fold: per-fold execution + aggregation (training-only)
 # =====================================================
 
@@ -199,15 +224,23 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
     """Repeatedly hold out a group of runs from model_conditions.training: train on
     the rest, evaluate on the held-out group, then aggregate. Per-fold outputs are
     also saved -- for transparency, and so generate_report.py can detect and
-    render fold-variability panels. Returns (aggregated_impa, aggregated_model_xout).
-    fold_groups is resolved by the caller (via resolve_kfold_folds) rather than
-    here, so the trial-pivot-table sanity check can annotate rows with the exact
-    same fold membership this function actually runs on."""
+    render fold-variability panels. Returns (aggregated_impa, aggregated_model_xout,
+    boldfile_to_pipe) -- the third value maps every held-out boldfile (of every
+    fold that actually ran, i.e. wasn't skipped) to that fold's own fitted pipe,
+    which never trained on that boldfile's data. main() uses this to decode a
+    model_conditions.timecourse_decoding row with a genuinely held-out classifier
+    when its boldfile also appears in model_conditions.training, instead of the
+    full-training classifier (which would have trained on it) -- see
+    README.md's double-dipping warning. fold_groups is resolved by the caller
+    (via resolve_kfold_folds) rather than here, so the trial-pivot-table sanity
+    check can annotate rows with the exact same fold membership this function
+    actually runs on."""
 
     print(f"model.kfold_cv: {len(fold_groups)} fold(s), strategy={kfold_cv_cfg.get('strategy')!r}")
 
     folds_manifest = {}
     model_results, model_impas = [], []
+    boldfile_to_pipe = {}
 
     for fold_id, held_out_runs in enumerate(fold_groups, start=1):
         folds_manifest[fold_id] = [int(r) for r in held_out_runs]
@@ -233,6 +266,13 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
 
         xclf = model_classification(fold_train_data, fold_train_labels, feature_selection_cfg, classifier_name, classifier_params)
         xout, impa = model_performance(xclf, fold_test_data, fold_test_labels)
+
+        # keyed by boldfile (not run number) -- two different tasks can reuse
+        # the same run number for genuinely different scans, so boldfile is
+        # the only unambiguous "same scan" identifier for the timecourse
+        # double-dipping substitution this dict exists for
+        for bf in training_df.loc[test_mask, "boldfile"].unique():
+            boldfile_to_pipe[bf] = xclf
 
         output_pattern = os.path.join(
             analysis_output_dir, model_descr, subject_id, "model",
@@ -279,7 +319,7 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
     aggregated_model_xout = average_fold_results(model_results)
     aggregated_impa = np.mean(np.stack(model_impas, axis=0), axis=0)
 
-    return aggregated_impa, aggregated_model_xout
+    return aggregated_impa, aggregated_model_xout, boldfile_to_pipe
 
 
 # =====================================================
@@ -315,6 +355,11 @@ def main(args):
     classifier_name = model_cfg["classifier"]["name"]
     classifier_params = model_cfg["classifier"]["params"]
     permutation_test_cfg = model_cfg.get("permutation_test")
+
+    # optional escape hatch for the double-dipping guard below -- see
+    # README.md's warning. Default False: independence between training and
+    # testing/timecourse is enforced automatically, not opt-in.
+    allow_train_test_overlap = model_cfg.get("allow_train_test_overlap", False)
 
     # optional -- omitting model.kfold_cv entirely skips k-fold cross-validation
     # (no model/ output at all, no extra runtime for that step)
@@ -364,6 +409,83 @@ def main(args):
     else:
         timecourse_instr = None
 
+    # -------------------------------------------------
+    # Double-dipping guard -- a classifier evaluated on data from the same
+    # scan(s) it was (even partly) trained on has inflated apparent
+    # performance, since fMRI noise is autocorrelated within a run. Detected
+    # per subject (boldfile overlap can vary subject to subject even under
+    # the same config, e.g. missing runs) rather than assumed from the
+    # config alone.
+    #   - training/testing overlap: the held-out test evaluation is skipped
+    #     entirely (no test/ output) -- there is no substitute classifier
+    #     that's both "the one full-training fit" and "never trained on the
+    #     overlapping run", so skipping is the only honest option.
+    #   - training/timecourse overlap: if model.kfold_cv is configured, the
+    #     overlapping run(s) are decoded with their own held-out k-fold
+    #     classifier instead of the full-training one (see run_kfold's
+    #     boldfile_to_pipe) -- non-overlapping rows still use the
+    #     full-training classifier as before. If model.kfold_cv isn't
+    #     configured, there's no held-out classifier to substitute, so
+    #     timecourse decoding is skipped entirely.
+    #   - model.allow_train_test_overlap: true disables both of the above,
+    #     restoring the original (leakage-prone) behavior -- see README.md's
+    #     warning before using this.
+    # -------------------------------------------------
+    run_test_evaluation = testing_df is not None
+    use_kfold_for_timecourse = False  # set True below when kfold-substitution should be used
+    skip_timecourse = False
+
+    # structured record of what (if anything) the guard did -- written to
+    # <subject>_double_dipping_report.json below and read back by
+    # generate_report.py to render an in-report warning (see README.md
+    # section 6/7's "Double-dipping guard"). "handling" is one of
+    # "skipped" / "kfold_substitution" / "overwritten"; None means no
+    # overlap was found (no report entry needed for that section).
+    double_dipping_report = {}
+
+    if testing_df is not None:
+        overlap = boldfile_overlap(training_df, testing_df)
+        if overlap:
+            print(f"(!) DOUBLE-DIPPING WARNING: model_conditions.training and model_conditions.testing "
+                  f"share {len(overlap)} bold file(s) for subject {subject_id}: {sorted(overlap)}. "
+                  f"Evaluating a classifier on data from a run it was (even partly) trained on inflates "
+                  f"apparent generalization performance.")
+            if allow_train_test_overlap:
+                print("  -> model.allow_train_test_overlap is set -- evaluating against model_conditions.testing anyway.")
+                handling = "overwritten"
+            else:
+                print("  -> Skipping the held-out test evaluation for this subject (no test/ output). "
+                      "Set model.allow_train_test_overlap: true to evaluate anyway (NOT recommended -- see README.md).")
+                run_test_evaluation = False
+                handling = "skipped"
+            double_dipping_report["test"] = {
+                "overlap_boldfiles": sorted(overlap), "handling": handling,
+            }
+
+    if timecourse_instr is not None:
+        overlap = boldfile_overlap(training_df, timecourse_instr)
+        if overlap:
+            print(f"(!) DOUBLE-DIPPING WARNING: model_conditions.training and model_conditions.timecourse_decoding "
+                  f"share {len(overlap)} bold file(s) for subject {subject_id}: {sorted(overlap)}. "
+                  f"Decoding data from a run the classifier was (even partly) trained on inflates apparent decoding accuracy.")
+            if allow_train_test_overlap:
+                print("  -> model.allow_train_test_overlap is set -- decoding with the full-training classifier anyway.")
+                handling = "overwritten"
+            elif kfold_cv_cfg is not None:
+                print("  -> Decoding the overlapping run(s) with their own held-out k-fold classifier instead of "
+                      "the full-training model; non-overlapping rows still use the full-training model.")
+                use_kfold_for_timecourse = True
+                handling = "kfold_substitution"
+            else:
+                print("  -> model.kfold_cv is not configured, so there is no held-out classifier available for "
+                      "these rows. Skipping timecourse decoding for this subject. Configure model.kfold_cv, or "
+                      "set model.allow_train_test_overlap: true to decode anyway (NOT recommended -- see README.md).")
+                skip_timecourse = True
+                handling = "skipped"
+            double_dipping_report["timecourse"] = {
+                "overlap_boldfiles": sorted(overlap), "handling": handling,
+            }
+
     # resolved once here (rather than inside run_kfold) so the exact same fold
     # membership is available for both the pivot table below and the real
     # per-fold execution -- no risk of the two drifting apart, no duplicate
@@ -401,14 +523,17 @@ def main(args):
     training_df = training_df.loc[training_ids, :]
     training_labels = training_labels.ravel()
 
-    if testing_df is not None:
+    if testing_df is not None and run_test_evaluation:
         testing_data, testing_labels, testing_ids, masker = load_images_and_mask(testing_df, mask_pattern_template)
         testing_df = testing_df.loc[testing_ids, :]
         testing_labels = testing_labels.ravel()
     else:
+        # not loaded at all when the double-dipping guard already decided to
+        # skip the test evaluation -- testing_df itself (if it exists) has
+        # already done its job annotating the trial pivot table above
         testing_data = testing_labels = None
 
-    if timecourse_instr is not None:
+    if timecourse_instr is not None and not skip_timecourse:
         timecourse_data, timecourse_labels, timecourse_ids, masker = load_images_and_mask(timecourse_instr, mask_pattern_template)
         timecourse_instr = timecourse_instr.loc[timecourse_ids, :]
         timecourse_labels = timecourse_labels.ravel()
@@ -433,9 +558,11 @@ def main(args):
     # K-Fold Cross-Validation (optional -- model.kfold_cv)
     # -------------------------------------------------
 
+    kfold_boldfile_to_pipe = {}
+
     if fold_groups is not None:
         print("K-fold cross-validating within model_conditions.training...")
-        aggregated_impa, kfold_xout = run_kfold(
+        aggregated_impa, kfold_xout, kfold_boldfile_to_pipe = run_kfold(
             kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_filename_tag,
             analysis_output_dir, model_descr, subject_id, regressor_categories,
             feature_selection_cfg, classifier_name, classifier_params,
@@ -449,11 +576,24 @@ def main(args):
         output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}_{impa_filename_tag}.nii.gz")
         img.to_filename(output_file)
 
+        if use_kfold_for_timecourse:
+            tc_overlap = boldfile_overlap(training_df, timecourse_instr)
+            uncovered = tc_overlap - set(kfold_boldfile_to_pipe.keys())
+            if uncovered:
+                print(f"  (!) {len(uncovered)} overlapping bold file(s) belong to a fold that was itself "
+                      f"skipped (no held-out or no training rows) -- those timecourse rows will fall back "
+                      f"to the full-training classifier: {sorted(uncovered)}")
+            # how many *distinct* held-out fold classifiers actually decoded
+            # an overlapping row -- e.g. a group_kfold fold spanning several
+            # overlapping runs counts once, not once per run
+            n_folds_used = len({id(kfold_boldfile_to_pipe[bf]) for bf in tc_overlap if bf in kfold_boldfile_to_pipe})
+            double_dipping_report["timecourse"]["n_folds_used"] = n_folds_used
+
     # -------------------------------------------------
     # Test / Generalization (optional -- model_conditions.testing)
     # -------------------------------------------------
 
-    if testing_df is not None:
+    if testing_df is not None and run_test_evaluation:
         print("Evaluating full-training classifier against model_conditions.testing...")
         xout, importance_map = model_performance(xclf_full, testing_data, testing_labels)
 
@@ -482,11 +622,12 @@ def main(args):
     # Time Course Decoding (optional -- model_conditions.timecourse_decoding)
     # -------------------------------------------------
 
-    if timecourse_instr is not None:
+    if timecourse_instr is not None and not skip_timecourse:
         print("Time Course Decoding...")
         raw_decoding, summary_decoding = timecourse_decoding(
             xclf_full, timecourse_data, timecourse_labels, timecourse_instr, regressor_categories,
             feature_selection_cfg, subject_id, model_descr,
+            boldfile_to_pipe=kfold_boldfile_to_pipe if use_kfold_for_timecourse else None,
         )
 
         output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_decoding_results.csv")
@@ -497,6 +638,20 @@ def main(args):
         summary_decoding.to_csv(summary_file, index=False)
 
         print(f"Results saved to: {output_file} (raw) and {summary_file} (summary)")
+
+    # -------------------------------------------------
+    # Double-dipping report (only written if the guard above actually found
+    # something) -- read back by generate_report.py to render an in-report
+    # warning instead of this only ever being visible in the job log.
+    # -------------------------------------------------
+
+    if double_dipping_report:
+        report_file = os.path.join(
+            analysis_output_dir, model_descr, subject_id, f"{subject_id}_double_dipping_report.json"
+        )
+        with open(report_file, "w") as f:
+            json.dump(double_dipping_report, f, indent=2)
+        print(f"Double-dipping report saved to: {report_file}")
 
 
 if __name__ == "__main__":

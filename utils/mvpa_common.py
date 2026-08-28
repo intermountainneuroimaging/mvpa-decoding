@@ -912,20 +912,57 @@ TIMECOURSE_GROUPING = ["window_index", "regressor_label"]
 
 
 def timecourse_decoding(pipe, timecourse_data, timecourse_labels, timecourse_df, regressor_categories,
-                         feature_selection_cfg: dict, subject_id: str, model_descr: str):
+                         feature_selection_cfg: dict, subject_id: str, model_descr: str,
+                         boldfile_to_pipe: dict = None):
     """Predict the trained classifier on every already-recomputed timecourse-decoding
     volume. Returns (raw, summary):
       - raw: one row per volume actually decoded, with its own prediction and
         evidence_<category> columns -- the actual per-TR data, not an average.
       - summary: raw grouped by (window_index, regressor_label) and averaged across
-        every trial sharing that group -- the confusion-style timecourse view."""
+        every trial sharing that group -- the confusion-style timecourse view.
 
-    # pipeline applies feature selection internally -- full (unsliced) data goes in
-    predictions = pipe.predict(timecourse_data)
+    boldfile_to_pipe, if given, maps a specific boldfile to an alternate fitted
+    pipe that should decode that boldfile's rows instead of `pipe` --
+    mvpa_workflow.py uses this to substitute each overlapping run's own
+    held-out k-fold classifier when a run appears in both
+    model_conditions.training and model_conditions.timecourse_decoding, so
+    that run is never decoded by a classifier that was partly trained on it
+    (see README.md's double-dipping warning). Rows whose boldfile isn't in
+    the mapping (or when the mapping is omitted entirely) are decoded with
+    `pipe` as before. Keyed by boldfile rather than run number, since two
+    different tasks can reuse the same run number for genuinely different
+    scans -- boldfile is the only unambiguous "same scan" identifier."""
+
+    n_rows = timecourse_data.shape[0]
+    if boldfile_to_pipe:
+        boldfiles = timecourse_df["boldfile"].to_list()
+        pipe_for_row = [boldfile_to_pipe.get(bf, pipe) for bf in boldfiles]
+    else:
+        pipe_for_row = [pipe] * n_rows
+
+    # same dtype as the (numeric-coded) labels -- not dtype=object, which would
+    # make accuracy_score's type_of_target see "unknown" instead of "binary"/
+    # "multiclass" and reject the binary/multiclass comparison below
+    predictions = np.empty(n_rows, dtype=timecourse_labels.dtype)
+    evidence = np.zeros((n_rows, len(regressor_categories)))
+    selected_voxels = np.zeros(n_rows, dtype=int)
+    whole_voxels = np.zeros(n_rows, dtype=int)
+
+    # dispatch each row to whichever pipe should decode it -- distinct pipe
+    # objects are grouped (strictly by identity, not sklearn equality, which
+    # Pipeline doesn't define anyway) into one batched predict()/
+    # decision_evidence() call apiece, rather than one call per row
+    for this_pipe in {id(p): p for p in pipe_for_row}.values():
+        idx = np.array([i for i, p in enumerate(pipe_for_row) if p is this_pipe])
+        sub_data = timecourse_data[idx]
+        predictions[idx] = this_pipe.predict(sub_data)
+        evidence[idx, :] = decision_evidence(this_pipe, sub_data)
+        n_sel = int(this_pipe.named_steps["feature_selection"].get_support().sum())
+        selected_voxels[idx] = n_sel
+        whole_voxels[idx] = sub_data.shape[1]
+
     global_accuracy = accuracy_score(timecourse_labels, predictions)
     print(f"Global accuracy: {global_accuracy:.4f}")
-
-    evidence = decision_evidence(pipe, timecourse_data)
 
     code_to_label = {i + 1: cat for i, cat in enumerate(regressor_categories)}
 
@@ -935,13 +972,12 @@ def timecourse_decoding(pipe, timecourse_data, timecourse_labels, timecourse_df,
     for i, cat in enumerate(regressor_categories):
         raw[f"evidence_{cat}"] = evidence[:, i]
 
-    n_selected = int(pipe.named_steps["feature_selection"].get_support().sum())
     # only meaningful in "fpr" (p-threshold) mode -- NaN in "k_best" (n_voxels)
     # mode, where selected_voxels already says everything there is to say
     raw["threshold_p"] = feature_selection_cfg.get("feat_p") if feature_selection_cfg.get("n_voxels") is None else np.nan
-    raw["selected_voxels"] = n_selected
-    raw["whole_voxels"] = timecourse_data.shape[1]
-    raw["feature_percent"] = 100 * n_selected / timecourse_data.shape[1]
+    raw["selected_voxels"] = selected_voxels
+    raw["whole_voxels"] = whole_voxels
+    raw["feature_percent"] = 100 * selected_voxels / whole_voxels
 
     evidence_cols = [c for c in raw.columns if c.startswith("evidence")]
     other_cols = [c for c in raw.columns if not c.startswith("evidence")]

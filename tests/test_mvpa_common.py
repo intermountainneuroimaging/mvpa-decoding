@@ -637,6 +637,77 @@ class TestTimecourseDecoding:
         # one summary row per (window_index, regressor_label) actually present
         assert len(summary) == raw.groupby(["window_index", "regressor_label"]).ngroups
 
+    def test_boldfile_to_pipe_dispatches_overlapping_rows_to_substitute_pipe(self):
+        # deliberately not a real fitted classifier -- a deterministic stand-in
+        # so the dispatch assertion doesn't depend on any real model's
+        # probabilistic behavior. predicted_label=99 is impossible for a real
+        # 2-class (1/2) pipe, so its presence unambiguously proves this pipe
+        # (not the fallback) decoded a given row.
+        class FakeSubPipe:
+            def __init__(self, predicted_label, n_selected, n_features):
+                self._predicted_label = predicted_label
+                self.named_steps = {"feature_selection": self}
+                self._n_selected = n_selected
+                self._n_features = n_features
+
+            def get_support(self):
+                return np.array([True] * self._n_selected + [False] * (self._n_features - self._n_selected))
+
+            def predict(self, X):
+                return np.full(X.shape[0], self._predicted_label)
+
+            def predict_proba(self, X):
+                proba = np.zeros((X.shape[0], 2))
+                proba[:, 0] = 1.0
+                return proba
+
+        pipe = self._fitted_pipe_and_categories()
+        categories = ["face", "place"]
+        X, y = _separable_data(n_per_class=2, n_features=10, n_classes=2, seed=4)
+
+        timecourse_df = pd.DataFrame({
+            "subject": ["01"] * 4,
+            "window_index": [0, 1, 0, 1],
+            "regressor_label": [categories[c - 1] for c in y],
+            "boldfile": ["shared_run.nii.gz", "shared_run.nii.gz", "other_run.nii.gz", "other_run.nii.gz"],
+        })
+
+        substitute = FakeSubPipe(predicted_label=99, n_selected=3, n_features=10)
+        boldfile_to_pipe = {"shared_run.nii.gz": substitute}
+
+        raw, _ = timecourse_decoding(
+            pipe, X, y, timecourse_df, categories, feature_selection_cfg={"feat_p": 0.05},
+            subject_id="01", model_descr="test_model", boldfile_to_pipe=boldfile_to_pipe,
+        )
+
+        shared_rows = raw[raw["boldfile"] == "shared_run.nii.gz"]
+        other_rows = raw[raw["boldfile"] == "other_run.nii.gz"]
+
+        assert (shared_rows["predicted_label"] == 99).all()
+        assert shared_rows["selected_voxels"].unique().tolist() == [3]
+        assert shared_rows["whole_voxels"].unique().tolist() == [10]
+
+        # rows on the non-overlapping boldfile still fall back to `pipe`
+        assert (other_rows["predicted_label"] != 99).all()
+
+    def test_no_boldfile_to_pipe_behaves_exactly_as_before(self):
+        # boldfile_to_pipe omitted entirely -- every row decoded by `pipe`,
+        # matching pre-dispatch behavior
+        pipe = self._fitted_pipe_and_categories()
+        categories = ["face", "place"]
+        X, y = _separable_data(n_per_class=4, n_features=10, n_classes=2, seed=4)
+        timecourse_df = pd.DataFrame({
+            "subject": ["01"] * len(y),
+            "window_index": [0, 1, 2, 3] * 2,
+            "regressor_label": [categories[c - 1] for c in y],
+        })
+        raw, _ = timecourse_decoding(
+            pipe, X, y, timecourse_df, categories, feature_selection_cfg={"feat_p": 0.05},
+            subject_id="01", model_descr="test_model",
+        )
+        expected_predictions = pipe.predict(X)
+        np.testing.assert_array_equal(raw["correct"].to_numpy(), expected_predictions == y)
+
 
 class TestSummarizeDecoding:
     def test_averages_correct_and_evidence_within_group(self):
