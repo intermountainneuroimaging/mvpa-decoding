@@ -4,6 +4,9 @@ mvpa_workflow.py output."""
 
 import json
 
+import matplotlib
+matplotlib.use("Agg")
+from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
 import pytest
@@ -23,6 +26,8 @@ from workflows.generate_report import (
     resolve_desc,
     resolve_group_impa_mni,
     resolve_mnispace,
+    load_double_dipping_report,
+    render_double_dipping_page,
 )
 
 
@@ -338,6 +343,58 @@ class TestCompileGroupDecoding:
         _make_subject(tmp_path, "desc1", "01")
         combined = compile_group_decoding(str(tmp_path), "desc1", ["01"])
         assert combined.empty
+
+
+# =====================================================
+# double-dipping report (load_double_dipping_report / render_double_dipping_page)
+# =====================================================
+
+def _write_double_dipping_report(tmp_path, desc, subject, report):
+    base = tmp_path / desc / subject
+    base.mkdir(parents=True, exist_ok=True)
+    (base / f"{subject}_double_dipping_report.json").write_text(json.dumps(report))
+
+
+class TestLoadDoubleDippingReport:
+    def test_returns_empty_dict_when_file_missing(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")
+        assert load_double_dipping_report(str(tmp_path), "desc1", "01") == {}
+
+    def test_returns_parsed_contents_when_present(self, tmp_path):
+        report = {"test": {"overlap_boldfiles": ["run-1.nii.gz"], "handling": "skipped"}}
+        _write_double_dipping_report(tmp_path, "desc1", "01", report)
+        assert load_double_dipping_report(str(tmp_path), "desc1", "01") == report
+
+
+class TestRenderDoubleDippingPage:
+    def test_no_page_when_no_subject_has_a_report(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")
+        pdf_path = tmp_path / "out.pdf"
+        with PdfPages(str(pdf_path)) as pdf:
+            render_double_dipping_page(pdf, str(tmp_path), "desc1", ["01"])
+            assert pdf.get_pagecount() == 0
+
+    def test_page_rendered_when_a_subject_has_a_report(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")
+        _write_double_dipping_report(tmp_path, "desc1", "01", {
+            "test": {"overlap_boldfiles": ["run-1.nii.gz"], "handling": "skipped"},
+            "timecourse": {"overlap_boldfiles": ["run-1.nii.gz"], "handling": "kfold_substitution", "n_folds_used": 3},
+        })
+        pdf_path = tmp_path / "out.pdf"
+        with PdfPages(str(pdf_path)) as pdf:
+            render_double_dipping_page(pdf, str(tmp_path), "desc1", ["01"])
+            assert pdf.get_pagecount() == 1
+
+    def test_only_affected_subjects_produce_a_report_but_page_still_renders(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")
+        _make_subject(tmp_path, "desc1", "02")
+        _write_double_dipping_report(tmp_path, "desc1", "02", {
+            "test": {"overlap_boldfiles": ["run-1.nii.gz", "run-2.nii.gz"], "handling": "overwritten"},
+        })
+        pdf_path = tmp_path / "out.pdf"
+        with PdfPages(str(pdf_path)) as pdf:
+            render_double_dipping_page(pdf, str(tmp_path), "desc1", ["01", "02"])
+            assert pdf.get_pagecount() == 1
 
 
 # =====================================================

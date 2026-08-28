@@ -688,6 +688,25 @@ subject's BOLD loading time in practice, but scales with `n_permutations`
 pays for its own `n_permutations` fits), so drop it for quick iteration and
 turn it on for a result you're about to report.
 
+### `allow_train_test_overlap` (optional): ⚠️ double-dipping guard override
+
+```json
+"model": {
+  ...,
+  "allow_train_test_overlap": true
+}
+```
+
+Defaults to `false` (or simply omit it). `mvpa_workflow.py` automatically
+detects when `model_conditions.training` shares a bold file with `testing`
+or `timecourse_decoding` for a given subject and, by default, skips (or
+substitutes a held-out k-fold classifier for) whichever step would
+otherwise double-dip -- see section 6's "Double-dipping guard" for the full
+explanation. Setting this to `true` disables that protection and restores
+the original behavior. **Only do this if you have a specific, considered
+reason the overlap in your config isn't a methodological problem** -- see
+the warning in section 6 before using it.
+
 ## 6. Running `workflows/mvpa_workflow.py`
 
 `mvpa_workflow.py` replaces two previous, separate scripts
@@ -741,17 +760,20 @@ the script:
    held-out fold, aggregating across folds. Writes per-fold and aggregated
    accuracy/evidence/AUC and importance-map NIfTIs, plus the fold manifest,
    under `<analysis-output-dir>/<desc>/<subject>/model/`.
-5. If `model_conditions.testing` is configured: evaluates the
+5. If `model_conditions.testing` is configured **and the double-dipping
+   guard below doesn't skip it for this subject**: evaluates the
    complete-training-set classifier (from step 3) against `testing`,
    writing accuracy/evidence/AUC and an importance-map NIfTI under
    `<analysis-output-dir>/<desc>/<subject>/test/`.
-6. If `model_conditions.timecourse_decoding` is configured: relabels rows
-   via that section's own conditions, then **recomputes a fresh volume
+6. If `model_conditions.timecourse_decoding` is configured **and the
+   double-dipping guard below doesn't skip it for this subject**: relabels
+   rows via that section's own conditions, then **recomputes a fresh volume
    range per source event** from `model_conditions.timecourse_decoding.window`
    and each event's `onset`/`duration`/`trial_index` (independent of
    whatever `hemodynamic_lag` was used to build `volume_of_interest`
-   originally), predicts with the complete-training-set classifier (from
-   step 3), and writes two files to
+   originally), predicts with the complete-training-set classifier from
+   step 3 (or, per the guard below, each overlapping run's own held-out
+   k-fold classifier), and writes two files to
    `<analysis-output-dir>/<desc>/<subject>/decoding/`:
    - `{subject}_decoding_results.csv` -- **raw**, one row per volume actually
      decoded, with its own `predicted_label` and `evidence_<category>`
@@ -772,6 +794,59 @@ consistently shaped regardless of how many conditions you configure.
 real mask already, so this runs as shown above with no extra setup -- if
 your own dataset doesn't have one yet, point `model.mask.mask_pattern` at a
 real (or throwaway, for testing) mask file first.
+
+### ⚠️ Double-dipping guard: training vs. testing/timecourse independence
+
+**A classifier evaluated on data from a run it was even partly trained on
+has inflated apparent performance.** fMRI noise is autocorrelated within a
+run (thermal drift, motion, physiological signal), so a train/test split
+that isn't clean at the run level lets the classifier partially "recognize"
+the run itself rather than genuinely generalizing -- the textbook
+non-independence/circular-analysis problem. It's an easy trap to fall into
+here specifically because `model_conditions.training`/`testing`/
+`timecourse_decoding` are three independent queries over the same
+`master_spreadsheet.csv`: nothing stops two of them from matching rows out
+of the very same bold file (e.g. reusing the same task/run range, or a
+`kfold_cv.example.json`-style config where `testing` is left
+byte-identical to `training` for convenience).
+
+`mvpa_workflow.py` checks this **per subject** (not assumed from the config
+alone -- boldfile overlap can differ subject to subject, e.g. missing
+runs), by boldfile rather than run number (two different tasks can reuse
+the same run number for genuinely different scans, so boldfile is the only
+unambiguous "same scan" identifier):
+
+- **`training`/`testing` overlap**: the held-out test evaluation is
+  **skipped entirely** for that subject -- no `test/` output. There's no
+  substitute classifier that's both "the one full-training fit" and "never
+  trained on the overlapping run," so skipping is the only honest option.
+- **`training`/`timecourse_decoding` overlap**: if `model.kfold_cv` (section
+  5) is configured, the overlapping run(s) are decoded with **their own
+  held-out k-fold classifier** instead of the full-training one -- the same
+  classifier that never saw that run during its own k-fold evaluation.
+  Non-overlapping rows still use the full-training classifier as usual. If
+  `model.kfold_cv` isn't configured, there's no held-out classifier to
+  substitute, so timecourse decoding is **skipped entirely** for that
+  subject instead.
+
+Either case prints a `(!) DOUBLE-DIPPING WARNING` naming the exact
+overlapping boldfile(s), so it's visible in the job log even when you don't
+notice it in the config.
+
+**`model.allow_train_test_overlap: true`** disables both of the above,
+restoring the original behavior (evaluate/decode with the full-training
+classifier regardless of overlap) -- the warning still prints, but nothing
+is skipped or substituted.
+
+> **⚠️ Only set `model.allow_train_test_overlap: true` if you have a
+> specific, considered reason the overlap in your config is not a
+> methodological problem** (e.g. you are intentionally re-scoring the
+> training fit for a sanity check, not reporting it as a generalization or
+> decoding result). Left at its default (`false`, or simply omitted), the
+> guard above is exactly what protects you from silently publishing
+> inflated accuracy/AUC or decoding numbers due to train/test leakage
+> within a run. When in doubt, leave it unset and fix the overlapping
+> `model_conditions` query instead.
 
 ### Trial pivot table (sanity check)
 
@@ -863,6 +938,17 @@ python workflows/generate_report.py --analysis-output-dir ./out --desc haxby_obj
 | `--config` | Supplies `model.desc` (see above, when `--desc` is omitted) and `model_conditions.timecourse_decoding` (conditions + window, and optionally `overlay` -- see section 4) for timecourse annotation either way. Without it (i.e. using `--desc` alone), the timecourse page still renders, just unannotated (and never split by overlay). |
 | `--master-spreadsheet` | *(optional)* Needed alongside `--config` to compute each condition's median trial duration and each subject's TR (both derived from real data, not hardcoded) -- used to convert `window_index` to seconds and mark trial onset/end on the timecourse plot. Without it, the x-axis stays in raw `window_index` units and annotation is skipped. |
 | `--output` | *(optional)* Defaults to `<dir>/<desc>/report_<desc>.pdf` (group) or `<dir>/<desc>/<subject>/report_<subject>.pdf` (single-subject). |
+
+**A "Data Independence Warning" page appears automatically, right after the
+title page, whenever it has something to say.** If `mvpa_workflow.py`'s
+double-dipping guard (section 6) skipped the held-out test evaluation,
+substituted held-out k-fold classifiers for overlapping timecourse rows, or
+ran anyway because `model.allow_train_test_overlap` was set, that's shown
+here per subject -- reading straight from each subject's
+`{subject}_double_dipping_report.json` (only written when the guard
+actually found something). A report where training/testing/timecourse were
+genuinely independent for every subject gets no such page at all, exactly
+as before this guard existed.
 
 **Fold-variability panels are automatic, not configured.**
 `generate_report.py` detects `_fold{N}_*` files under `model/` (accuracy/AUC
