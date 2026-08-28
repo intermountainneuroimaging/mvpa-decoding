@@ -939,6 +939,17 @@ python workflows/generate_report.py --analysis-output-dir ./out --desc haxby_obj
 | `--master-spreadsheet` | *(optional)* Needed alongside `--config` to compute each condition's median trial duration and each subject's TR (both derived from real data, not hardcoded) -- used to convert `window_index` to seconds and mark trial onset/end on the timecourse plot. Without it, the x-axis stays in raw `window_index` units and annotation is skipped. |
 | `--output` | *(optional)* Defaults to `<dir>/<desc>/report_<desc>.pdf` (group) or `<dir>/<desc>/<subject>/report_<subject>.pdf` (single-subject). |
 
+**A "Data Independence Warning" page appears automatically, right after the
+title page, whenever it has something to say.** If `mvpa_workflow.py`'s
+double-dipping guard (section 6) skipped the held-out test evaluation,
+substituted held-out k-fold classifiers for overlapping timecourse rows, or
+ran anyway because `model.allow_train_test_overlap` was set, that's shown
+here per subject -- reading straight from each subject's
+`{subject}_double_dipping_report.json` (only written when the guard
+actually found something). A report where training/testing/timecourse were
+genuinely independent for every subject gets no such page at all, exactly
+as before this guard existed.
+
 **Fold-variability panels are automatic, not configured.**
 `generate_report.py` detects `_fold{N}_*` files under `model/` (accuracy/AUC
 overlays, timecourse bands, an importance-map consistency mosaic) purely by

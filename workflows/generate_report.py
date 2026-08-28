@@ -201,6 +201,10 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: b
         # complete-training-set classifier's decoding -- never per-fold.
         "decoding": os.path.join(base, "decoding", f"{subject}_summary_decoding_results.csv"),
         "decoding_raw": os.path.join(base, "decoding", f"{subject}_decoding_results.csv"),
+        # written by mvpa_workflow.py's double-dipping guard only when it
+        # actually found training/testing or training/timecourse boldfile
+        # overlap for this subject -- see render_double_dipping_page.
+        "double_dipping_report": os.path.join(base, f"{subject}_double_dipping_report.json"),
     }
 
 
@@ -370,6 +374,32 @@ def load_annotation_info(config_path, master_spreadsheet_path):
 # Report pages
 # =====================================================
 
+def _wrap_lines_to_page(fig, ax, lines: list, fontsize: int, x0: float = 0.05) -> list:
+    """Soft-wrap every line to whatever actually fits on the page -- measured
+    from the real renderer rather than a guessed character count (the axes
+    box is narrower than the full figure, and font substitution/dpi can
+    shift actual glyph width). Needed for any page that might include a full
+    filesystem path or a long comma-joined list with no natural break point
+    (100+ chars on a real cluster run), which would otherwise run off the
+    page edge instead of onto a continuation line."""
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    probe = ax.text(0, 0, "M" * 40, fontsize=fontsize, family="monospace")
+    char_width_px = probe.get_window_extent(renderer=renderer).width / 40
+    probe.remove()
+    axes_width_px = ax.get_window_extent(renderer=renderer).width
+    avail_px = axes_width_px * (1 - x0) - char_width_px * 2  # small right-margin buffer
+    wrap_width = max(20, int(avail_px / char_width_px))
+
+    wrapped_lines = []
+    for line in lines:
+        wrapped_lines.extend(textwrap.wrap(
+            line, width=wrap_width, subsequent_indent="    ",
+            break_long_words=True, break_on_hyphens=False,
+        ) or [line])
+    return wrapped_lines
+
+
 def render_title_page(pdf, desc, subjects, config_path, output_path):
     fig, ax = plt.subplots(figsize=(8.5, 11))
     ax.axis("off")
@@ -385,31 +415,83 @@ def render_title_page(pdf, desc, subjects, config_path, output_path):
     lines.append(f"Config: {config_path or '(not provided -- timecourse annotation skipped)'}")
     lines.append(f"Output: {output_path}")
 
-    # soft-wrap every line to whatever actually fits on the page -- measured
-    # from the real renderer rather than a guessed character count (the axes
-    # box is narrower than the full figure, and font substitution/dpi can
-    # shift actual glyph width), since Config/Output are full filesystem
-    # paths with no natural break points (100+ chars on a real cluster run)
-    # that would otherwise run off the page edge instead of onto a
-    # continuation line.
-    x0, y0 = 0.05, 0.92
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
-    probe = ax.text(0, 0, "M" * 40, fontsize=13, family="monospace")
-    char_width_px = probe.get_window_extent(renderer=renderer).width / 40
-    probe.remove()
-    axes_width_px = ax.get_window_extent(renderer=renderer).width
-    avail_px = axes_width_px * (1 - x0) - char_width_px * 2  # small right-margin buffer
-    wrap_width = max(20, int(avail_px / char_width_px))
+    wrapped_lines = _wrap_lines_to_page(fig, ax, lines, fontsize=13)
+    ax.text(0.05, 0.92, "\n".join(wrapped_lines), fontsize=13, va="top", family="monospace")
+    pdf.savefig(fig)
+    plt.close(fig)
 
-    wrapped_lines = []
-    for line in lines:
-        wrapped_lines.extend(textwrap.wrap(
-            line, width=wrap_width, subsequent_indent="    ",
-            break_long_words=True, break_on_hyphens=False,
-        ) or [line])
 
-    ax.text(x0, y0, "\n".join(wrapped_lines), fontsize=13, va="top", family="monospace")
+def load_double_dipping_report(analysis_output_dir: str, desc: str, subject: str) -> dict:
+    """Contents of <subject>_double_dipping_report.json -- written by
+    mvpa_workflow.py's double-dipping guard (README.md section 6) only when
+    it actually found model_conditions.training/testing or
+    training/timecourse_decoding boldfile overlap for this subject. {} (the
+    common case) means the guard found nothing to report -- training and
+    testing/timecourse were genuinely independent."""
+    path = subject_paths(analysis_output_dir, desc, subject)["double_dipping_report"]
+    if not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+
+def _double_dipping_message(section_label: str, info: dict) -> str:
+    """One human-readable line for a "test" or "timecourse" entry from a
+    double-dipping report. `handling` is one of "kfold_substitution"
+    (decoded on N unique held-out fold(s) instead of the full-training
+    model), "overwritten" (model.allow_train_test_overlap let it proceed
+    anyway), or "skipped" (no safe substitute was available, so nothing was
+    computed/written for that section)."""
+    handling = info["handling"]
+    n = len(info["overlap_boldfiles"])
+    if handling == "kfold_substitution":
+        n_folds = info.get("n_folds_used", "?")
+        return (f"{section_label}: {n} bold file(s) overlapped with model_conditions.training -- "
+                f"decoding computed on {n_folds} unique fold(s) instead of the full-training model.")
+    if handling == "overwritten":
+        return (f"{section_label}: {n} bold file(s) overlapped with model_conditions.training -- "
+                f"user overwrite (model.allow_train_test_overlap) -- data leakage may be present.")
+    if handling == "skipped":
+        return (f"{section_label}: {n} bold file(s) overlapped with model_conditions.training -- "
+                f"skipped entirely, no output produced for this subject.")
+    return f"{section_label}: overlap detected, handling {handling!r} not recognized."
+
+
+def render_double_dipping_page(pdf, analysis_output_dir, desc, subjects):
+    """A dedicated warning page -- rendered only when at least one subject in
+    scope actually has a double-dipping report (mvpa_workflow.py's guard,
+    see README.md section 6's "Double-dipping guard") -- so a well-formed
+    config with genuinely independent training/testing/timecourse produces
+    no page at all, exactly as before this guard existed."""
+    reports = {s: load_double_dipping_report(analysis_output_dir, desc, s) for s in subjects}
+    reports = {s: r for s, r in reports.items() if r}
+    if not reports:
+        return
+
+    fig, ax = plt.subplots(figsize=(8.5, 11))
+    ax.axis("off")
+    lines = [
+        "⚠ Data Independence Warning",
+        "",
+        "model_conditions.training shared bold file(s) with testing and/or",
+        "timecourse_decoding for the subject(s) below -- evaluating or decoding",
+        "on data a classifier was (even partly) trained on inflates apparent",
+        "performance. See README.md section 6, \"Double-dipping guard\".",
+        "",
+    ]
+    for s in subjects:
+        report = reports.get(s)
+        if not report:
+            continue
+        lines.append(f"Subject {s}:")
+        if "test" in report:
+            lines.append("  " + _double_dipping_message("Held-out test evaluation", report["test"]))
+        if "timecourse" in report:
+            lines.append("  " + _double_dipping_message("Timecourse decoding", report["timecourse"]))
+        lines.append("")
+
+    wrapped_lines = _wrap_lines_to_page(fig, ax, lines, fontsize=11)
+    ax.text(0.05, 0.94, "\n".join(wrapped_lines), fontsize=11, va="top", family="monospace", color="darkred")
     pdf.savefig(fig)
     plt.close(fig)
 
@@ -995,6 +1077,7 @@ def main():
     print(f"Report scope: {len(subjects)} subject(s): {subjects}")
     with PdfPages(output_path) as pdf:
         render_title_page(pdf, desc, subjects, args.config, output_path)
+        render_double_dipping_page(pdf, args.analysis_output_dir, desc, subjects)
         render_accuracy_auc_page(pdf, args.analysis_output_dir, desc, subjects, fold_flags, regressor_categories)
         render_confusion_matrices_page(pdf, args.analysis_output_dir, desc, subjects)
         render_timecourse_pages(pdf, args.analysis_output_dir, desc, subjects, window, tr, median_duration,
