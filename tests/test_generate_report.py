@@ -6,6 +6,7 @@ import json
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 import pandas as pd
@@ -22,12 +23,15 @@ from workflows.generate_report import (
     compile_group_summary,
     compile_group_decoding,
     summarize_raw_for_timecourse,
+    resolve_overlay_styles,
     load_annotation_info,
     resolve_desc,
     resolve_group_impa_mni,
     resolve_mnispace,
     load_double_dipping_report,
     render_double_dipping_page,
+    _wrap_suptitle,
+    _row_major_legend_order,
 )
 
 
@@ -465,6 +469,187 @@ class TestSummarizeRawForTimecourse:
         assert len(result) == 1
         assert "1 row(s) matched no overlay condition" in capsys.readouterr().out
 
+# =====================================================
+# resolve_overlay_styles
+# =====================================================
+
+class TestResolveOverlayStyles:
+    def test_explicit_color_and_line_type_indices(self):
+        overlay = {
+            "1A": {"column": "trial_type", "match": "exact", "value": "x", "color": 0, "line_type": 0},
+            "1B": {"column": "trial_type", "match": "exact", "value": "y", "color": 0, "line_type": 1},
+        }
+        styles = resolve_overlay_styles(overlay)
+        assert styles["1A"][0] == styles["1B"][0]  # same color index -> same color
+        assert styles["1A"][1] != styles["1B"][1]  # different line_type index -> different style
+        assert styles["1A"][1] == "-"
+        assert styles["1B"][1] == "--"
+
+    def test_explicit_literal_color_and_line_type_strings(self):
+        overlay = {
+            "a": {"column": "trial_type", "match": "exact", "value": "x", "color": "#1f77b4", "line_type": "dashed"},
+        }
+        styles = resolve_overlay_styles(overlay)
+        assert styles["a"] == ("#1f77b4", "dashed")
+
+    def test_missing_line_type_defaults_to_solid(self):
+        overlay = {"a": {"column": "trial_type", "match": "exact", "value": "x"}}
+        styles = resolve_overlay_styles(overlay)
+        assert styles["a"][1] == "-"
+
+    def test_missing_color_restarts_at_zero_per_line_type(self):
+        # 1A/2A share line_type (default solid), 1B/2B share line_type "--" --
+        # auto-color-assignment should restart at palette index 0 within
+        # each line_type group independently
+        overlay = {
+            "1A": {"column": "trial_type", "match": "exact", "value": "1a", "line_type": 0},
+            "2A": {"column": "trial_type", "match": "exact", "value": "2a", "line_type": 0},
+            "1B": {"column": "trial_type", "match": "exact", "value": "1b", "line_type": 1},
+            "2B": {"column": "trial_type", "match": "exact", "value": "2b", "line_type": 1},
+        }
+        styles = resolve_overlay_styles(overlay)
+        trace_colors = plt.get_cmap("tab10").colors
+        assert styles["1A"][0] == trace_colors[0]
+        assert styles["2A"][0] == trace_colors[1]
+        assert styles["1B"][0] == trace_colors[0]  # restarted, matches 1A
+        assert styles["2B"][0] == trace_colors[1]  # restarted, matches 2A
+        assert styles["1A"][1] == "-"
+        assert styles["1B"][1] == "--"
+
+    def test_explicit_color_mixed_with_auto_color_in_same_line_type(self):
+        # an explicit color doesn't consume/shift the auto-assignment counter
+        # for other color-less entries sharing its line_type
+        overlay = {
+            "explicit": {"column": "trial_type", "match": "exact", "value": "x", "color": 5},
+            "auto1": {"column": "trial_type", "match": "exact", "value": "y"},
+            "auto2": {"column": "trial_type", "match": "exact", "value": "z"},
+        }
+        styles = resolve_overlay_styles(overlay)
+        trace_colors = plt.get_cmap("tab10").colors
+        assert styles["explicit"][0] == trace_colors[5]
+        assert styles["auto1"][0] == trace_colors[0]
+        assert styles["auto2"][0] == trace_colors[1]
+
+    def test_bool_is_not_treated_as_int_index(self):
+        # JSON true/false parse to Python bool, a subclass of int -- must not
+        # be misread as color/line_type index 1/0
+        overlay = {"a": {"column": "trial_type", "match": "exact", "value": "x", "color": True, "line_type": False}}
+        styles = resolve_overlay_styles(overlay)
+        assert styles["a"] == (True, False)
+
+
+# =====================================================
+# _row_major_legend_order
+# =====================================================
+
+def _matplotlib_column_major_read(items, ncol):
+    """Re-derive what matplotlib's own Legend would display, reading `items`
+    column-major with its column-size-balancing (leftmost columns get
+    ceil(n_remaining/columns_remaining), later ones one fewer) -- used here
+    to verify _row_major_legend_order's output round-trips back to the
+    original row-major order, without hardcoding the permutation itself."""
+    n = len(items)
+    col_sizes = []
+    remaining = n
+    for c in range(ncol):
+        size = -(-remaining // (ncol - c))  # ceil
+        col_sizes.append(size)
+        remaining -= size
+    cols = []
+    i = 0
+    for size in col_sizes:
+        cols.append(items[i:i + size])
+        i += size
+    rows = []
+    for row in range(col_sizes[0]):
+        for col in cols:
+            if row < len(col):
+                rows.append(col[row])
+    return rows
+
+
+class TestRowMajorLegendOrder:
+    def test_exact_multiple_of_ncol(self):
+        items = list(range(8))
+        ordered = _row_major_legend_order(items, 4)
+        assert _matplotlib_column_major_read(ordered, 4) == items
+
+    def test_not_a_multiple_of_ncol(self):
+        # 9 items, 4 columns -- the case that actually motivated this fix
+        # (an 8-category overlay + the trial-to-trial SE proxy)
+        items = list(range(9))
+        ordered = _row_major_legend_order(items, 4)
+        assert _matplotlib_column_major_read(ordered, 4) == items
+
+    def test_various_sizes_round_trip(self):
+        for n in range(1, 15):
+            for ncol in range(1, 6):
+                items = [f"item{i}" for i in range(n)]
+                ordered = _row_major_legend_order(items, ncol)
+                assert sorted(ordered) == sorted(items)  # no items lost or duplicated
+                assert _matplotlib_column_major_read(ordered, ncol) == items
+
+    def test_empty_list(self):
+        assert _row_major_legend_order([], 4) == []
+
+    def test_ncol_of_one_is_unchanged(self):
+        items = ["a", "b", "c"]
+        assert _row_major_legend_order(items, 1) == items
+
+
+# =====================================================
+# _wrap_suptitle
+# =====================================================
+
+class TestWrapSuptitle:
+    def test_short_text_unchanged(self):
+        fig, ax = plt.subplots(figsize=(8, 6))
+        try:
+            assert _wrap_suptitle(fig, "short title", 14) == "short title"
+        finally:
+            plt.close(fig)
+
+    def test_long_underscore_joined_desc_wraps_without_overflowing(self):
+        # 6 inches -- the narrowest a real timecourse page ever gets
+        # (figsize=(3 * n_cols, ...) with the minimum realistic n_cols=2)
+        fig, ax = plt.subplots(figsize=(6, 4))
+        try:
+            long_desc = "vvps_category_loc2WM_timecourse_classifier: timecourse decoding"
+            wrapped = _wrap_suptitle(fig, long_desc, 14)
+            lines = wrapped.split("\n")
+            assert len(lines) > 1  # actually wrapped, not left as one line
+
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            probe = fig.text(0, 0, "M" * 40, fontsize=14, fontweight="bold")
+            char_width_px = probe.get_window_extent(renderer=renderer).width / 40
+            probe.remove()
+            for line in lines:
+                assert len(line) * char_width_px <= fig.bbox.width  # fits within the figure
+        finally:
+            plt.close(fig)
+
+    def test_breaks_after_underscores_not_mid_word(self):
+        fig, ax = plt.subplots(figsize=(6, 4))
+        try:
+            wrapped = _wrap_suptitle(fig, "aaaaaaaaaa_bbbbbbbbbb_cccccccccc_dddddddddd", 14)
+            lines = wrapped.split("\n")
+            assert len(lines) > 1  # actually wrapped
+            # every line but the last should end right after an underscore
+            # (a real token boundary), never mid-token
+            for line in lines[:-1]:
+                assert line.endswith("_")
+        finally:
+            plt.close(fig)
+
+    def test_preserves_embedded_newlines(self):
+        fig, ax = plt.subplots(figsize=(8, 6))
+        try:
+            wrapped = _wrap_suptitle(fig, "line one\nline two", 14)
+            assert wrapped == "line one\nline two"
+        finally:
+            plt.close(fig)
+
 
 # =====================================================
 # load_annotation_info: overlay_conditions
@@ -509,6 +694,15 @@ class TestLoadAnnotationInfoOverlay:
 
         assert overlay_conditions == overlay
         assert tr == pytest.approx(2.0)  # synthetic_bold_file's TR
+
+    def test_overlay_conditions_may_carry_color_and_line_type(self, tmp_path, synthetic_bold_file):
+        overlay = {"maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*", "color": 0, "line_type": "--"}}
+        config_path, config = _write_config(tmp_path, {"overlay": overlay})
+        master_path = _write_master_spreadsheet(tmp_path, synthetic_bold_file)
+
+        _, _, _, overlay_conditions = load_annotation_info(config_path, master_path)
+
+        assert overlay_conditions == overlay
 
     def test_empty_overlay_conditions_when_absent(self, tmp_path, synthetic_bold_file):
         config_path, _ = _write_config(tmp_path, {})

@@ -377,13 +377,57 @@ above reads as "decode from stimulus onset, with no lag, through 10 seconds
 past the event's end."
 
 **`overlay`** -- *(optional)* only read by `generate_report.py`, not by
-either workflow script. Same name-to-query shape as `conditions`, but for a
-category that's independent of the classifier's own conditions. Haxby's raw
-events don't carry a secondary factor the way some designs do (e.g. a
-manipulation embedded in `trial_type` alongside the category itself) -- so
-as a syntax illustration, this example overlays each category's evidence
-curve by *which* testing run a trial came from, using `run` (any column
-works, not just ones that look condition-like):
+either workflow script. Same name-to-query shape as `conditions` -- each
+entry both **filters/labels events** (its query, exactly like a `conditions`
+entry) **and controls how that category is drawn** on the timecourse page
+(section 7), via two further optional keys on the same entry:
+
+- **`color`** -- an integer indexes the standard palette (`0`-`9`, wrapping);
+  a string is passed straight through to matplotlib as a literal color
+  (`"#1f77b4"`, `"red"`, ...). Omit it to auto-assign (see below).
+- **`line_type`** -- an integer indexes `solid, dashed, dotted, dashdot`; a
+  string is passed straight through to matplotlib (`"--"`, `"dashed"`, ...).
+  Omit it and that category draws solid.
+
+For example, 8 categories -- 4 conditions crossed with 2 sub-conditions --
+organized so `1A`/`1B` share a color and differ only by line style, same for
+`2A`/`2B`, `3A`/`3B`, `4A`/`4B`:
+
+```json
+"overlay": {
+  "1A": {"column": "trial_type", "match": "exact", "value": "cond1A", "color": 0, "line_type": "-"},
+  "1B": {"column": "trial_type", "match": "exact", "value": "cond1B", "color": 0, "line_type": "--"},
+  "2A": {"column": "trial_type", "match": "exact", "value": "cond2A", "color": 1, "line_type": "-"},
+  "2B": {"column": "trial_type", "match": "exact", "value": "cond2B", "color": 1, "line_type": "--"}
+}
+```
+
+**If `color` is omitted, it auto-assigns from the standard palette,
+restarting at index 0 separately for each resolved `line_type`.** So the
+same 4-color/2-style grouping above can be built with no `color` keys at
+all, as long as same-colored entries are declared in matching order within
+each `line_type`:
+
+```json
+"overlay": {
+  "1A": {"column": "trial_type", "match": "exact", "value": "cond1A", "line_type": "-"},
+  "2A": {"column": "trial_type", "match": "exact", "value": "cond2A", "line_type": "-"},
+  "1B": {"column": "trial_type", "match": "exact", "value": "cond1B", "line_type": "--"},
+  "2B": {"column": "trial_type", "match": "exact", "value": "cond2B", "line_type": "--"}
+}
+```
+(`1A`/`2A` are the first/second color-less `line_type="-"` entries -> palette
+indices 0/1; `1B`/`2B` restart that counter for `line_type="--"` -> indices
+0/1 again -- landing on the same two colors as the explicit version.)
+
+An `overlay` with only one entry per condition, or with no `color`/
+`line_type` on any entry, behaves exactly like a single independent split
+always has: one color per category, all solid. This also covers the earlier,
+simpler use case of splitting by a secondary factor without needing per-trace
+control at all -- e.g. Haxby's raw events don't carry a secondary factor the
+way some designs do, so as a syntax illustration, this overlays each
+category's evidence curve by *which* testing run a trial came from, letting
+color auto-assign:
 
 ```json
 "overlay": {
@@ -392,14 +436,16 @@ works, not just ones that look condition-like):
 }
 ```
 
-When present, the timecourse page (section 7) overlays one colored line per
-overlay category within each existing subplot, instead of a single line --
-see that section for how it changes the plot. Rows matching none of the
-overlay queries are dropped from that plot only (a count is printed);
-everything else about the pipeline -- the classifier, its evidence values,
+When present, the timecourse page (section 7) overlays one line per overlay
+category within each existing subplot, instead of a single line -- see that
+section for how it changes the plot. Rows matching none of the overlay
+queries are dropped from that plot only (a count is printed); everything
+else about the pipeline -- the classifier, its evidence values,
 `decoding_results.csv`/`summary_decoding_results.csv` -- is unaffected,
 since `overlay` is evaluated entirely inside `generate_report.py` against
-data the workflow scripts already wrote.
+data the workflow scripts already wrote (the `color`/`line_type` keys are
+likewise inert everywhere else -- `evaluate_query_node`/`validate_query_node`
+only ever read the query keys they need, so they simply ignore both).
 
 ### Running it
 
@@ -1063,9 +1109,11 @@ overlap), and they answer different questions:
   shown in every scope, band or no band.
 
 Both compose with `model_conditions.timecourse_decoding.overlay` (section 4)
-when it's configured -- each overlay category gets its own color, its own
-two bands, plus a legend explaining both the categories and what the
-lighter band means.
+when it's configured -- each overlay category gets its own two SE bands,
+plus a legend naming the categories and what the lighter band means. Each
+category's actual color/line style come from `resolve_overlay_styles`
+(section 4's `color`/`line_type`, per entry, with sensible auto-assigned
+defaults for whichever is omitted).
 
 ## 8. Resampling MNI <-> native space (`utils/hcp_resample.py`)
 

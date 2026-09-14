@@ -36,6 +36,7 @@ annotations.
 import argparse
 import glob
 import json
+import math
 import os
 import sys
 import textwrap
@@ -317,7 +318,9 @@ def load_annotation_info(config_path, master_spreadsheet_path):
     of which may be None/empty if the optional inputs are missing or insufficient --
     annotation is strictly best-effort and never blocks the rest of the report.
     overlay_conditions is model_conditions.timecourse_decoding.overlay verbatim
-    (empty dict if absent) -- see summarize_raw_with_overlay for how it's used."""
+    (empty dict if absent) -- see summarize_raw_for_timecourse/resolve_overlay_styles
+    for how it's used (filtering/labeling and, via each entry's own optional
+    "color"/"line_type", the timecourse page's per-trace styling)."""
     if not config_path or not master_spreadsheet_path:
         return None, None, {}, {}
     if not os.path.isfile(config_path):
@@ -398,6 +401,76 @@ def _wrap_lines_to_page(fig, ax, lines: list, fontsize: int, x0: float = 0.05) -
             break_long_words=True, break_on_hyphens=False,
         ) or [line])
     return wrapped_lines
+
+
+def _wrap_suptitle(fig, text: str, fontsize: int) -> str:
+    """Soft-wrap a fig.suptitle()-bound string to the actual figure width --
+    measured from the real renderer, the same technique _wrap_lines_to_page
+    uses for a page of body text, just measured against the whole figure
+    (fig.bbox) rather than one axes, since a suptitle spans the full figure
+    width. Without this, a long model.desc (a real classifier name easily
+    runs 40-60+ chars) silently overflows past the figure's right edge
+    instead of wrapping onto a second line, since matplotlib never wraps
+    suptitle text on its own. Preserves embedded "\\n" (each existing line
+    is wrapped independently, not joined into one paragraph)."""
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    probe = fig.text(0, 0, "M" * 40, fontsize=fontsize, fontweight="bold")
+    char_width_px = probe.get_window_extent(renderer=renderer).width / 40
+    probe.remove()
+    avail_px = fig.bbox.width * 0.94  # small margin buffer each side
+    wrap_width = max(20, int(avail_px / char_width_px))
+
+    wrapped_lines = []
+    for line in text.split("\n"):
+        # model.desc is typically one long underscore-joined token with no
+        # spaces at all (e.g. "vvps_category_loc2WM_timecourse_classifier"),
+        # so textwrap sees it as a single unbreakable word and (via
+        # break_long_words) would chop it at an arbitrary character offset
+        # ("timecour"/"se_classifier") -- inserting a space after each "_"
+        # gives textwrap real break points to wrap on, restored afterward
+        wrapped = textwrap.wrap(
+            line.replace("_", "_ "), width=wrap_width, break_long_words=True, break_on_hyphens=False,
+        ) or [line]
+        wrapped_lines.extend(w.replace("_ ", "_") for w in wrapped)
+    return "\n".join(wrapped_lines)
+
+
+def _row_major_legend_order(items: list, ncol: int) -> list:
+    """Matplotlib's multi-column Legend always reads its handles/labels list
+    column-major -- top-to-bottom within a column, then the next column to
+    the right -- so asking for ncol=4 does NOT mean "4 entries left to
+    right, then wrap"; it silently means "split the list into up to 4
+    columns, read down each one first". This permutes `items` (already in
+    the order you actually want to see, left-to-right then top-to-bottom)
+    into whatever order produces that reading once matplotlib re-splits it
+    column-major.
+
+    Mirrors matplotlib's own column-size balancing exactly: the leftmost
+    columns get ceil(n_remaining/columns_remaining) items and later columns
+    get one fewer once the count no longer divides evenly, rather than
+    always-equal-size columns -- get this wrong and the permutation lands
+    one row off for any n that isn't a clean multiple of ncol."""
+    n = len(items)
+    if n == 0 or ncol <= 1:
+        return list(items)
+
+    col_sizes = []
+    remaining = n
+    for c in range(ncol):
+        size = math.ceil(remaining / (ncol - c))
+        col_sizes.append(size)
+        remaining -= size
+    col_offsets = [sum(col_sizes[:c]) for c in range(ncol)]
+
+    ordered = [None] * n
+    for row in range(col_sizes[0]):  # the first column is always the tallest (or tied)
+        for col in range(ncol):
+            desired_idx = row * ncol + col
+            if desired_idx >= n or row >= col_sizes[col]:
+                continue
+            ordered[col_offsets[col] + row] = items[desired_idx]
+    return ordered
 
 
 def render_title_page(pdf, desc, subjects, config_path, output_path):
@@ -618,7 +691,7 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
         auc_title += " (CV vs. held-out-test)"
     ax.set_title(auc_title)
 
-    fig.suptitle(f"{desc}: accuracy & AUC", fontsize=14, fontweight="bold")
+    fig.suptitle(_wrap_suptitle(fig, f"{desc}: accuracy & AUC", 14), fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     pdf.savefig(fig)
     plt.close(fig)
@@ -692,7 +765,7 @@ def render_confusion_matrices_page(pdf, analysis_output_dir, desc, subjects):
                     text_color = "white" if im.norm(val) < 0.6 else "black"
                     ax.text(xi, yi, f"{val:.2f}", ha="center", va="center", color=text_color, fontsize=8)
 
-    fig.suptitle(f"{desc}: confusion-style matrices ({title_suffix})", fontsize=14, fontweight="bold")
+    fig.suptitle(_wrap_suptitle(fig, f"{desc}: confusion-style matrices ({title_suffix})", 14), fontsize=14, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.94])
     pdf.savefig(fig)
     plt.close(fig)
@@ -708,7 +781,10 @@ def summarize_raw_for_timecourse(raw_df: pd.DataFrame, overlay_conditions: dict 
     the mean (mvpa_common.summarize_decoding() has no equivalent). When
     overlay_conditions is given, rows are additionally tagged via label_rows
     (dropping unmatched rows, count printed) and grouped by overlay_label as
-    an extra key."""
+    an extra key. Each overlay entry may carry "color"/"line_type" alongside
+    its query fields (label_rows/evaluate_query_node only ever read the query
+    keys they need, so these are ignored here and picked up separately by
+    resolve_overlay_styles for the actual plot styling)."""
     df = raw_df
     group_cols = ["window_index", "regressor_label"]
     if overlay_conditions:
@@ -725,12 +801,75 @@ def summarize_raw_for_timecourse(raw_df: pd.DataFrame, overlay_conditions: dict 
     return pd.concat([means, ses], axis=1).reset_index()
 
 
+# cycled for an overlay category's line_type when it's given as an integer
+# index, or when no line_type is specified at all and this category needed
+# one anyway; matplotlib also accepts any of these (or "solid"/"dashed"/
+# "dotted"/"dashdot") as a literal explicit "line_type" string
+OVERLAY_LINESTYLES = ["-", "--", ":", "-."]
+
+
+def resolve_overlay_styles(overlay_conditions: dict) -> dict:
+    """{category_name: (color, line_type)} for every entry in
+    model_conditions.timecourse_decoding.overlay, resolving each entry's own
+    optional "color"/"line_type" (set explicitly to fully control the plot)
+    against sensible defaults for whichever one is omitted:
+
+      - line_type: an int indexes OVERLAY_LINESTYLES; a string (e.g. "--" or
+        "dashed") is passed straight through to matplotlib; omitted defaults
+        to solid ("-").
+      - color: an int indexes the standard tab10 palette; a string (e.g.
+        "#1f77b4" or "red") is passed straight through to matplotlib;
+        omitted auto-assigns from that same palette, cycling separately
+        *within* each resolved line_type -- restarting at palette index 0
+        for the first color-less entry of each line_type -- so e.g. two
+        conditions sharing line_type="dashed" but no explicit color still
+        land on different colors, while still lining up with same-numbered
+        solid/dashed pairs that *do* share a color (see README.md section 4).
+
+    Entries that never appear in the data still get resolved (harmless --
+    render_timecourse_pages only ever looks up categories actually present)."""
+    trace_colors = plt.get_cmap("tab10").colors
+
+    line_types = {}
+    for name, entry in overlay_conditions.items():
+        lt = entry.get("line_type")
+        if lt is None:
+            line_types[name] = "-"
+        elif isinstance(lt, int) and not isinstance(lt, bool):
+            line_types[name] = OVERLAY_LINESTYLES[lt % len(OVERLAY_LINESTYLES)]
+        else:
+            line_types[name] = lt
+
+    auto_color_counters = {}  # resolved line_type -> next auto-assigned palette index
+    colors = {}
+    for name, entry in overlay_conditions.items():
+        c = entry.get("color")
+        if c is None:
+            lt = line_types[name]
+            idx = auto_color_counters.get(lt, 0)
+            colors[name] = trace_colors[idx % len(trace_colors)]
+            auto_color_counters[lt] = idx + 1
+        elif isinstance(c, int) and not isinstance(c, bool):
+            colors[name] = trace_colors[c % len(trace_colors)]
+        else:
+            colors[name] = c
+
+    return {name: (colors[name], line_types[name]) for name in overlay_conditions}
+
+
 def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr, median_duration,
                              overlay_conditions=None):
     """Timecourse decoding always comes from the complete-training-set
     classifier (mvpa_workflow.py never runs it per-fold), so there's exactly
     one decoding_raw file per subject regardless of whether model.kfold_cv
-    is also configured -- no fold-level variability source anymore."""
+    is also configured -- no fold-level variability source anymore.
+
+    overlay_conditions both filters/labels rows (as always) and, via each
+    entry's own optional "color"/"line_type", controls exactly how its trace
+    is drawn -- see resolve_overlay_styles. Omit both and a category falls
+    back to auto-assigned styling; omit overlay_conditions entirely and
+    every true-condition subplot is a single solid black line, as before
+    overlay existed at all."""
     overlay_conditions = overlay_conditions or {}
     frames = []
 
@@ -759,28 +898,40 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr
     # regressor_categories that produced categories above), but append it
     # rather than silently dropping it if it ever does
     true_conditions += sorted(present_true_conditions - set(categories))
-    overlay_categories = sorted(combined["overlay_label"].unique()) if overlay_conditions else [None]
+    # config declaration order (dict order, same as json.load preserves),
+    # not alphabetical -- so the legend/plot order matches how the config
+    # itself groups things (e.g. all 4 operations' "_pos" and "_neg" entries
+    # declared adjacent to each other), filtered to categories that actually
+    # have data (an overlay entry can legitimately match zero rows)
+    present_overlay_categories = set(combined["overlay_label"].unique()) if overlay_conditions else set()
+    overlay_categories = [c for c in overlay_conditions if c in present_overlay_categories] if overlay_conditions else [None]
+    overlay_styles = resolve_overlay_styles(overlay_conditions) if overlay_conditions else {}
 
     n_rows, n_cols = len(true_conditions), len(categories)
     if n_rows == 0 or n_cols == 0:
         print("(!) decoding_results.csv has no evidence_* columns or regressor_label values -- skipping timecourse page")
         return
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2.5 * n_rows), sharex=True, sharey=True, squeeze=False)
+    # constrained layout (not tight_layout -- the two conflict) is what
+    # actually reserves room for the suptitle *and* the "outside" legend
+    # below, growing the axes area to fit however many rows the legend ends
+    # up needing instead of overlapping either -- see the fig.legend call
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2.5 * n_rows + 1.2), sharex=True, sharey=True,
+                              squeeze=False, layout="constrained")
     # zero-width for a single-subject report -- nothing to average across when
     # there's only one subject's own decoding
     variability_label = "darker band: +/- SE across subjects; lighter band: +/- trial-to-trial SE"
     x_is_seconds = tr is not None
     x_label = "Time from window start (s)" if x_is_seconds else "window_index"
-    overlay_colors = plt.get_cmap("tab10").colors
 
     for i, true_cond in enumerate(true_conditions):
         subset = combined[combined["regressor_label"] == true_cond]
         for j, cat in enumerate(categories):
             ax = axes[i][j]
-            for k, overlay_cat in enumerate(overlay_categories):
+            for overlay_cat in overlay_categories:
                 line = subset if overlay_cat is None else subset[subset["overlay_label"] == overlay_cat]
-                color = "black" if overlay_cat is None else overlay_colors[k % len(overlay_colors)]
+                color, linestyle = overlay_styles.get(overlay_cat, ("black", "-"))
+
                 agg = (
                     line.groupby("window_index").agg(
                         mean=(f"evidence_{cat}", "mean"),
@@ -801,7 +952,7 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr
                                  alpha=0.12, color=color, zorder=1)
                 ax.fill_between(x, agg["mean"] - agg["se"], agg["mean"] + agg["se"],
                                  alpha=0.25, color=color, zorder=2)
-                ax.plot(x, agg["mean"], color=color, linewidth=1.5, zorder=3, **plot_kwargs)
+                ax.plot(x, agg["mean"], color=color, linestyle=linestyle, linewidth=1.5, zorder=3, **plot_kwargs)
 
             if window is not None and x_is_seconds:
                 dur = median_duration.get(true_cond)
@@ -823,14 +974,39 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr
             if i == n_rows - 1:
                 ax.set_xlabel(x_label, fontsize=9)
 
+    legend_ncol = 4
     handles, labels = axes[0][0].get_legend_handles_labels()
     trial_se_proxy = Patch(facecolor="black", alpha=0.12)
     handles = handles + [trial_se_proxy]
     labels = labels + ["trial-to-trial SE"]
-    fig.legend(handles, labels, loc="outside upper right", fontsize=8, title="overlay" if overlay_conditions else None)
 
-    fig.suptitle(f"{desc}: timecourse decoding\n({variability_label})", fontsize=14, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    # A ragged final row (fewer than legend_ncol entries) would otherwise
+    # render flush-left with empty space to its right -- pad it to a full
+    # row with invisible entries split as evenly as possible on either side,
+    # so it reads centered under the full rows above instead. Padding stays
+    # a single fig.legend() call (rather than a second, separately-anchored
+    # legend for just the ragged row) specifically because layout="constrained"
+    # only ever reserves bottom margin for legends placed via its one
+    # recognized "outside ..." call -- a second manually-positioned legend
+    # doesn't get any space reserved for it and is clipped by the figure edge.
+    remainder = len(labels) % legend_ncol
+    if remainder:
+        pad_total = legend_ncol - remainder
+        left_pad, right_pad = pad_total // 2, pad_total - pad_total // 2
+        blank = Patch(facecolor="none", edgecolor="none")
+        handles = handles[:-remainder] + [blank] * left_pad + handles[-remainder:] + [blank] * right_pad
+        labels = labels[:-remainder] + [""] * left_pad + labels[-remainder:] + [""] * right_pad
+
+    # handles/labels are now in the order we want read left-to-right,
+    # top-to-bottom (config declaration order, then the SE proxy last, with
+    # the padding above centering whatever ended up in the final row) --
+    # permute for matplotlib's column-major fill so it actually reads that
+    # way instead of down each column first (see _row_major_legend_order)
+    handles, labels = zip(*_row_major_legend_order(list(zip(handles, labels)), legend_ncol))
+    fig.legend(handles, labels, loc="outside lower center", ncol=legend_ncol, fontsize=8,
+               title="overlay" if overlay_conditions else None)
+
+    fig.suptitle(_wrap_suptitle(fig, f"{desc}: timecourse decoding\n({variability_label})", 14), fontsize=14, fontweight="bold")
     pdf.savefig(fig)
     plt.close(fig)
 
