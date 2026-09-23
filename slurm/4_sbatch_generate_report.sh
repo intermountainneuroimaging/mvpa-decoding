@@ -32,13 +32,17 @@
 # plain SBATCH directives (no variable substitution happens in them), so
 # they resolve relative to wherever `sbatch` was invoked from regardless.
 #
-# Optional second arg (`$2`): comma-separated subject IDs (e.g. "1,2,3"),
-# forwarded to generate_report.py's --subjects to restrict the group report
+# Optional second arg (`$2`): either a comma-separated subject ID list
+# (e.g. "001,004,010") or a path to a text file listing them (one per line
+# and/or comma-separated) -- forwarded as-is to generate_report.py's
+# --subjects, which detects which form it got, to restrict the group report
 # to just those subjects' already-computed results, instead of every
-# subject folder found under $OUTPUT_DIR. Does not affect which subjects'
-# importance maps get resampled to MNI below -- that loop still covers
-# everyone under $OUTPUT_DIR regardless, since it's harmless/idempotent to
-# resample a subject the report itself won't end up using.
+# subject folder found under $OUTPUT_DIR. IDs must match the subject folder
+# names exactly as mvpa_workflow.py wrote them (e.g. zero-padded "001", not
+# "1", if that's what's actually under $OUTPUT_DIR). Does not affect which
+# subjects' importance maps get resampled to MNI below -- that loop still
+# covers everyone under $OUTPUT_DIR regardless, since it's harmless/idempotent
+# to resample a subject the report itself won't end up using.
 #
 # --time is a rough starting estimate (MNI resampling + PDF/plot rendering
 # across every subject's output, no measured runtime yet) -- check the first
@@ -55,7 +59,7 @@ conda activate incenv
 
 CONFIG_FILE="$1"
 if [ -z "$CONFIG_FILE" ]; then
-    echo "Usage: sbatch $(basename "$0") <config.json> [subject1,subject2,...]" >&2
+    echo "Usage: sbatch $(basename "$0") <config.json> [subject1,subject2,... | subject-list.txt]" >&2
     exit 1
 fi
 if [ ! -f "$CONFIG_FILE" ]; then

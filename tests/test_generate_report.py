@@ -14,6 +14,7 @@ import pytest
 
 from workflows.generate_report import (
     list_subject_dirs,
+    parse_subjects_arg,
     subject_paths,
     has_fold_files,
     fold_paths,
@@ -98,6 +99,41 @@ class TestListSubjectDirs:
         _make_subject(tmp_path, "desc1", "02")
         result = list_subject_dirs(str(tmp_path), "desc1", subject="01", subjects=["01", "02"])
         assert result == ["01"]
+
+
+# =====================================================
+# parse_subjects_arg
+# =====================================================
+
+class TestParseSubjectsArg:
+    def test_literal_comma_separated_string(self):
+        assert parse_subjects_arg("001,004,010") == ["001", "004", "010"]
+
+    def test_literal_string_ignores_surrounding_whitespace(self):
+        assert parse_subjects_arg(" 001 , 004 ,010 ") == ["001", "004", "010"]
+
+    def test_file_one_id_per_line(self, tmp_path):
+        path = tmp_path / "subjects.txt"
+        path.write_text("001\n004\n010\n")
+        assert parse_subjects_arg(str(path)) == ["001", "004", "010"]
+
+    def test_file_comma_separated_single_line(self, tmp_path):
+        path = tmp_path / "subjects.txt"
+        path.write_text("001,004,010")
+        assert parse_subjects_arg(str(path)) == ["001", "004", "010"]
+
+    def test_file_blank_lines_ignored(self, tmp_path):
+        path = tmp_path / "subjects.txt"
+        path.write_text("001\n\n004\n\n\n010\n")
+        assert parse_subjects_arg(str(path)) == ["001", "004", "010"]
+
+    def test_nonexistent_path_treated_as_literal_single_id(self, tmp_path):
+        # a typo'd file path that doesn't exist isn't silently swallowed --
+        # it's treated as one literal subject ID, which list_subject_dirs
+        # will then correctly reject as "not found" rather than this
+        # function raising a confusing file-not-found error of its own
+        missing = str(tmp_path / "does_not_exist.txt")
+        assert parse_subjects_arg(missing) == [missing]
 
 
 # =====================================================

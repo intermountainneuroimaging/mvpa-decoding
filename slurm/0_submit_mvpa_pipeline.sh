@@ -23,11 +23,15 @@
 # construction, not by four people remembering to edit the same file.
 #
 # An optional second argument restricts stage 4's group report to just the
-# given comma-separated subjects (e.g. "1,2,3"), forwarded as
-# generate_report.py's --subjects. Stages 1-3 are unaffected and still
-# process every subject they auto-discover under bids_hcp_root/hcppipe_root
-# -- this only narrows which of those subjects' already-computed results
-# stage 4 aggregates into the group PDF.
+# given subjects -- either a comma-separated list (e.g. "001,004,010") or a
+# path to a text file listing them -- forwarded as-is to generate_report.py's
+# --subjects, which detects which form it got. A relative file path is
+# resolved against the directory this script was invoked from (before the
+# `cd` below), so it works the same regardless of where sbatch's own working
+# directory ends up. Stages 1-3 are unaffected and still process every
+# subject they auto-discover under bids_hcp_root/hcppipe_root -- this only
+# narrows which of those subjects' already-computed results stage 4
+# aggregates into the group PDF.
 #
 # This script resolves its own real location (reliable here because it's
 # invoked directly via `bash`, never through sbatch, which would otherwise
@@ -63,8 +67,14 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-# optional -- forwarded to stage 4 only (see header comment above)
+# optional -- forwarded to stage 4 only (see header comment above). If it's
+# a file, resolve it to an absolute path now, while still in the caller's
+# own working directory -- the `cd` below changes directory before this
+# reaches sbatch, which would otherwise break a relative file path.
 SUBJECT_LIST="$2"
+if [ -n "$SUBJECT_LIST" ] && [ -f "$SUBJECT_LIST" ]; then
+    SUBJECT_LIST="$(cd "$(dirname "$SUBJECT_LIST")" && pwd)/$(basename "$SUBJECT_LIST")"
+fi
 
 SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(dirname "$SLURM_DIR")"

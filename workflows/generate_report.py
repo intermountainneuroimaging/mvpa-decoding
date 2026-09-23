@@ -38,6 +38,7 @@ import glob
 import json
 import math
 import os
+import re
 import sys
 import textwrap
 from collections import Counter
@@ -79,9 +80,10 @@ def parse_args():
     parser.add_argument("--subject", default=None, help="Restrict the report to one subject (single-subject report). Omit for a group report across all subjects found.")
     parser.add_argument(
         "--subjects", default=None,
-        help="Restrict a group report to just these comma-separated subjects (e.g. \"1,2,3\"), instead of "
-             "every subject folder found under analysis-output-dir/desc. Still a group report (unlike "
-             "--subject, singular) -- ignored if --subject is also given."
+        help="Restrict a group report to just these subjects, instead of every subject folder found under "
+             "analysis-output-dir/desc. Either a comma-separated list (e.g. \"1,2,3\") or a path to a text "
+             "file listing subject IDs (one per line and/or comma-separated -- whichever's convenient to "
+             "generate). Still a group report (unlike --subject, singular) -- ignored if --subject is also given."
     )
     parser.add_argument(
         "--config", default=None,
@@ -141,6 +143,15 @@ def _subject_has_results(base: str, subject: str) -> bool:
     in which case they're not a "result" for report purposes."""
     subj_base = os.path.join(base, subject)
     return os.path.isdir(os.path.join(subj_base, "model")) or os.path.isdir(os.path.join(subj_base, "test"))
+
+
+def parse_subjects_arg(value: str) -> list:
+    """--subjects accepts either a literal comma-separated list ("1,2,3") or
+    a path to a text file listing subject IDs -- one per line, comma-separated
+    on one line, or a mix of both (whichever's more convenient to generate),
+    with blank lines and surrounding whitespace ignored either way."""
+    text = open(value).read() if os.path.isfile(value) else value
+    return [s.strip() for s in re.split(r"[,\n]", text) if s.strip()]
 
 
 def list_subject_dirs(analysis_output_dir: str, desc: str, subject: str = None, subjects: list = None) -> list:
@@ -1387,7 +1398,7 @@ def main():
     args = parse_args()
     desc = resolve_desc(args.desc, args.config)
 
-    subjects_arg = [s.strip() for s in args.subjects.split(",") if s.strip()] if args.subjects else None
+    subjects_arg = parse_subjects_arg(args.subjects) if args.subjects else None
     subjects = list_subject_dirs(args.analysis_output_dir, desc, args.subject, subjects_arg)
     fold_flags = {s: has_fold_files(args.analysis_output_dir, desc, s) for s in subjects}
     regressor_categories = infer_categories(args.analysis_output_dir, desc, subjects)
