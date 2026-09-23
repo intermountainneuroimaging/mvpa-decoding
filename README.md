@@ -564,7 +564,7 @@ about *which rows* to use (that's `model_conditions`'s job):
 | `mask.mask_pattern` | *(optional)* The full path to the mask NIfTI -- absolute, or relative to wherever the workflow script is run from (same convention `bids_root`/`derivatives_root` use); never resolved against either of those or any other root. Include `{subject}`/`{session}` placeholders (filled in from whichever row is being loaded) for one native-space mask per subject, as in the example above -- or omit them entirely for a single shared mask used for every subject, e.g. one MNI-space group mask (a template with no placeholders just formats to itself, so every subject resolves to the same literal path). Can still contain glob wildcards either way -- resolved the same way as bold-file lookups. Omit `mask` (or `mask_pattern`) entirely and every voxel is used instead -- a warning is printed, since a real analysis almost always wants a real mask (huge feature count otherwise, including background/non-brain voxels). A *configured* `mask_pattern` that matches no file is still a hard error, not a fallback -- only leaving it unset falls back. |
 | `mnispace` | *(optional, default `false`)* Set `true` when the BOLD/mask this subject's model is fit on are already registered to MNI space -- there's no way to detect this automatically from the file itself, so it's an explicit claim you make. Controls two things at once (see [section 7](#7-generate_reportpy)): the importance-map filename (`{subject}_impa_mni.nii.gz` instead of plain `{subject}_impa.nii.gz`), and whether `generate_report.py` plots it against nilearn's bundled MNI152 template as anatomical background. Setting this `true` also means every subject's importance map already carries the exact filename `generate_report.py`'s cross-subject group averaging looks for -- no separate `hcp_resample.py --direction native2mni` step needed. Leave `false` (or omit) for native-space or otherwise-unregistered data. |
 | `featureSelection.feat_p` | ANOVA p-value threshold -- voxels with `p < feat_p` are kept, widened automatically until at least 5 voxels are selected. Ignored when `n_voxels` is set. |
-| `featureSelection.n_voxels` | *(optional)* Select exactly this many voxels by ANOVA F-score instead, regardless of significance (sklearn's `SelectKBest` equivalent) -- takes priority over `feat_p` when both are present. Useful for keeping feature count fixed across subjects/folds whose signal strength (and thus a p-value threshold's actual voxel count) varies. `model_results_auc.csv`-adjacent output files still record whichever mode was actually used: `threshold_p` is `NaN` in this mode, since there's no threshold, but `selected_voxels` (identical to `n_voxels` here) is populated either way. |
+| `featureSelection.n_voxels` | *(optional)* Select exactly this many voxels by ANOVA F-score instead, regardless of significance (sklearn's `SelectKBest` equivalent) -- takes priority over `feat_p` when both are present. Useful for keeping feature count fixed across subjects/folds whose signal strength (and thus a p-value threshold's actual voxel count) varies. `model_results_metadata.csv` still records whichever mode was actually used: `selected_voxels` (identical to `n_voxels` here) is populated either way. |
 | `classifier` | Any importable scikit-learn-style estimator: `name` is a dotted import path, `params` are passed straight through as kwargs. |
 | `kfold_cv` | *(optional)* Cross-validates entirely within `model_conditions.training` -- see below. Omitting it entirely skips k-fold cross-validation: no `model/` output at all, no extra runtime for that step. |
 
@@ -603,9 +603,14 @@ training_df)`:
 | `"explicit_groups"` | User-defined -- requires `"held_out_runs"`. See below. |
 
 Whichever strategy is used, the resolved fold membership is always written
-to `model/{subject}_kfold_folds.json` (`{fold_id: [held-out run ids]}`) --
-so an automatic split is just as inspectable after the fact as an explicit
-one.
+to `model/{subject}_kfold_folds.json` -- `{fold_id: {"training": [acquisition
+names], "testing": [acquisition names]}}`, e.g. `{"1": {"training":
+["sub-1_ses-A1_task-loc_run-02_bold", ...], "testing":
+["sub-1_ses-A1_task-loc_run-01_bold"]}}` -- full acquisition names (subject/
+session/task/run, parsed from each row's own `boldfile`), not just bare run
+numbers, since a run number alone is ambiguous across tasks that reuse it
+(see `boldfile_overlap`). So an automatic split is just as inspectable after
+the fact as an explicit one.
 
 #### `strategy: "explicit_groups"` and `held_out_runs`
 
@@ -764,10 +769,10 @@ split, not a naive shuffle done outside the fit structure. Writes
 `test/{subject}_permutation_test.csv` for `model_conditions.testing`
 (`metric,real_score,p_value,n_permutations` either way).
 
-`accuracy`'s `real_score` matches the corresponding `model_results_total_scores.csv`
-exactly (same split, same fixed feature-selection threshold, same classifier
-config -- `model/{subject}_fold{N}_model_results_total_scores.csv` for a
-kfold fold, `test/{subject}_model_results_total_scores.csv` for the
+`accuracy`'s `real_score` matches the corresponding `model_results_metadata.csv`'s
+`total_scores` value exactly (same split, same fixed feature-selection threshold,
+same classifier config -- `model/{subject}_fold{N}_model_results_metadata.csv`
+for a kfold fold, `test/{subject}_model_results_metadata.csv` for the
 independent test set). `roc_auc_ovr`'s `real_score` will be *close to* the
 mean of the corresponding `model_results_auc.csv`'s per-category values --
 both are one-vs-rest AUC built from the same normalized-probability evidence
@@ -970,8 +975,13 @@ listing -- under `<analysis-output-dir>/<model.desc>/<subject>/`:
 <subject>_trial_pivot.csv                     -- sanity check, pre-model_conditions
 
 model.kfold_cv configured -- k-fold CV entirely within model_conditions.training:
-  model/<subject>_kfold_folds.json                    -- {fold_id: [held-out run ids]}
-  model/<subject>_fold{N}_model_results_{metric}.csv  -- per-fold held-out metrics
+  model/<subject>_kfold_folds.json                    -- {fold_id: {"training": [acquisition
+                                                          names], "testing": [acquisition names]}}
+  model/<subject>_fold{N}_model_results_{metric}.csv  -- per-fold held-out metrics ({metric}:
+                                                          accuracy/evidence/auc, one file each, plus
+                                                          "metadata" -- total_scores/whole_voxels/
+                                                          selected_voxels/feature_percent together
+                                                          in one small file, see save_model_results)
   model/<subject>_fold{N}_impa[_mni].nii.gz           -- per-fold importance map
   model/<subject>_fold{N}_permutation_test.csv        -- per-fold significance (optional)
   model/<subject>_model_results_{metric}.csv          -- aggregated across folds

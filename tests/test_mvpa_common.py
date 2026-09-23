@@ -422,13 +422,37 @@ class TestSaveModelResults:
         assert df["auc"].tolist() == [0.7, 0.8]
         assert list(df.index) == categories
 
-    def test_other_shape_saved_unlabeled(self, tmp_path):
+    def test_scalar_metrics_collected_into_one_metadata_file(self, tmp_path):
+        # total_scores/whole_voxels/selected_voxels/feature_percent are all
+        # plain scalars -- collected together into one metadata.csv instead
+        # of one near-empty file apiece
         categories = ["face", "place"]
-        results = {"total_scores": 0.75}  # scalar -> not (C,C) or (C,) -- unlabeled path
+        results = {
+            "total_scores": 0.75,
+            "whole_voxels": 5000,
+            "selected_voxels": 250,
+            "feature_percent": 5.0,
+            "accuracy": np.array([[0.9, 0.1], [0.2, 0.8]]),  # non-scalar, stays its own file
+        }
         pattern = str(tmp_path / "{metric}.csv")
         save_model_results(pattern, results, categories)
-        loaded = np.loadtxt(tmp_path / "total_scores.csv", delimiter=",")
-        assert float(loaded) == pytest.approx(0.75)
+
+        assert not (tmp_path / "total_scores.csv").exists()
+        assert not (tmp_path / "whole_voxels.csv").exists()
+        assert (tmp_path / "accuracy.csv").exists()
+
+        metadata = pd.read_csv(tmp_path / "metadata.csv", index_col=0)["value"]
+        assert metadata["total_scores"] == pytest.approx(0.75)
+        assert metadata["whole_voxels"] == pytest.approx(5000)
+        assert metadata["selected_voxels"] == pytest.approx(250)
+        assert metadata["feature_percent"] == pytest.approx(5.0)
+
+    def test_no_scalar_metrics_writes_no_metadata_file(self, tmp_path):
+        categories = ["face", "place"]
+        results = {"accuracy": np.array([[0.9, 0.1], [0.2, 0.8]])}
+        pattern = str(tmp_path / "{metric}.csv")
+        save_model_results(pattern, results, categories)
+        assert not (tmp_path / "metadata.csv").exists()
 
 
 # =====================================================

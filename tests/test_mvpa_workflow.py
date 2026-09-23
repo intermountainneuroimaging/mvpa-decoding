@@ -16,6 +16,7 @@ from workflows.mvpa_workflow import (
     resolve_kfold_folds,
     run_kfold,
     boldfile_overlap,
+    _acquisition_name,
 )
 
 CLASSIFIER_NAME = "sklearn.linear_model.LogisticRegression"
@@ -73,6 +74,32 @@ class TestBoldfileOverlap:
         a = pd.DataFrame({"run": [1], "boldfile": ["task-loc_run-1.nii.gz"]})
         b = pd.DataFrame({"run": [1], "boldfile": ["task-WMpos_run-1.nii.gz"]})
         assert boldfile_overlap(a, b) == set()
+
+
+# =====================================================
+# _acquisition_name
+# =====================================================
+
+class TestAcquisitionName:
+    def test_full_bids_path_keeps_only_sub_ses_task_run(self):
+        boldfile = (
+            "sub-1/ses-A1/func/sub-1_ses-A1_task-loc_dir-pa_run-01_"
+            "space-MNI152NLin6Asym_desc-preproc_bold.nii.gz"
+        )
+        # dir/space/desc deliberately dropped -- constant across every
+        # acquisition in a given analysis, so they'd only add noise here
+        assert _acquisition_name(boldfile) == "sub-1_ses-A1_task-loc_run-01_bold"
+
+    def test_missing_entities_are_simply_omitted(self):
+        # no ses/task in this boldfile -- entities not present just don't
+        # appear, rather than raising or inserting a placeholder
+        assert _acquisition_name("sub-1_run-02.nii.gz") == "sub-1_run-02_bold"
+
+    def test_entity_order_is_always_sub_ses_task_run(self):
+        # order in the source filename shouldn't matter -- output order is
+        # always sub/ses/task/run
+        boldfile = "task-loc_ses-A1_run-01_sub-1.nii.gz"
+        assert _acquisition_name(boldfile) == "sub-1_ses-A1_task-loc_run-01_bold"
 
 
 # =====================================================
@@ -188,14 +215,16 @@ class TestRunKfold:
 
         base = tmp_path / "test_model" / "01"
 
-        # manifest logs all 3 folds
+        # manifest logs all 3 folds, each as full acquisition names (not bare
+        # run numbers) split into training/testing
         manifest = json.loads((base / "model" / "01_kfold_folds.json").read_text())
         assert sorted(int(k) for k in manifest.keys()) == [1, 2, 3]
-        assert manifest["1"] == [1]
+        assert manifest["1"]["testing"] == ["run-1_bold"]
+        assert manifest["1"]["training"] == ["run-2_bold", "run-3_bold"]
 
         # per-fold outputs exist for every fold
         for fold_id in (1, 2, 3):
-            assert (base / "model" / f"01_fold{fold_id}_model_results_total_scores.csv").exists()
+            assert (base / "model" / f"01_fold{fold_id}_model_results_metadata.csv").exists()
             assert (base / "model" / f"01_fold{fold_id}_impa.nii.gz").exists()
 
         # aggregated results

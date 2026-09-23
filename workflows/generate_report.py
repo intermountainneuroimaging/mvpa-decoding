@@ -160,13 +160,13 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: b
         # K-fold cross-validation, entirely within model_conditions.training
         # (mvpa_workflow.py's run_kfold) -- aggregated across folds. model/ is
         # exclusively this family's directory.
-        "kfold_total": os.path.join(base, "model", f"{subject}_model_results_total_scores.csv"),
+        # "metadata" is total_scores/whole_voxels/selected_voxels/feature_percent
+        # (every plain-scalar metric save_model_results wrote) collected into one
+        # small CSV instead of 4 near-empty single-line files -- see load_metadata_csv.
+        "kfold_metadata": os.path.join(base, "model", f"{subject}_model_results_metadata.csv"),
         "kfold_auc": os.path.join(base, "model", f"{subject}_model_results_auc.csv"),
         "kfold_accuracy": os.path.join(base, "model", f"{subject}_model_results_accuracy.csv"),
         "kfold_evidence": os.path.join(base, "model", f"{subject}_model_results_evidence.csv"),
-        "kfold_whole_voxels": os.path.join(base, "model", f"{subject}_model_results_whole_voxels.csv"),
-        "kfold_selected_voxels": os.path.join(base, "model", f"{subject}_model_results_selected_voxels.csv"),
-        "kfold_feature_percent": os.path.join(base, "model", f"{subject}_model_results_feature_percent.csv"),
         # filename tag depends on model.mnispace (see impa_tag): "impa_mni" when
         # the input BOLD/mask were confirmed-by-config to already be in MNI
         # space, plain "impa" otherwise (space left unasserted, since it isn't
@@ -187,13 +187,10 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: b
         # set, evaluated against model_conditions.testing (mvpa_workflow.py).
         # test/ is exclusively this family's directory -- same filenames as
         # the kfold family above, just under a different directory.
-        "test_total": os.path.join(base, "test", f"{subject}_model_results_total_scores.csv"),
+        "test_metadata": os.path.join(base, "test", f"{subject}_model_results_metadata.csv"),
         "test_auc": os.path.join(base, "test", f"{subject}_model_results_auc.csv"),
         "test_accuracy": os.path.join(base, "test", f"{subject}_model_results_accuracy.csv"),
         "test_evidence": os.path.join(base, "test", f"{subject}_model_results_evidence.csv"),
-        "test_whole_voxels": os.path.join(base, "test", f"{subject}_model_results_whole_voxels.csv"),
-        "test_selected_voxels": os.path.join(base, "test", f"{subject}_model_results_selected_voxels.csv"),
-        "test_feature_percent": os.path.join(base, "test", f"{subject}_model_results_feature_percent.csv"),
         "test_impa": os.path.join(base, "test", f"{subject}_{tag}.nii.gz"),
         # see "kfold_impa_mni" above -- same idea, in test/. Presence of either
         # this or "kfold_impa_mni" is how render_importance_pages decides a
@@ -217,21 +214,21 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: b
 
 def has_fold_files(analysis_output_dir: str, desc: str, subject: str) -> bool:
     base = os.path.join(analysis_output_dir, desc, subject)
-    return len(glob.glob(os.path.join(base, "model", f"{subject}_fold*_model_results_total_scores.csv"))) > 0
+    return len(glob.glob(os.path.join(base, "model", f"{subject}_fold*_model_results_metadata.csv"))) > 0
 
 
 def fold_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: bool = False) -> dict:
-    """{fold_id: {kfold_total/kfold_auc/kfold_impa}} for every k-fold fold found
+    """{fold_id: {kfold_metadata/kfold_auc/kfold_impa}} for every k-fold fold found
     for this subject (empty dict if model.kfold_cv wasn't configured/run). Always
     under model/ -- k-fold is the only fold-based family; there's no such thing
     as a "test fold" since the independent test-set evaluation is a single fit."""
     base = os.path.join(analysis_output_dir, desc, subject)
-    totals = sorted(glob.glob(os.path.join(base, "model", f"{subject}_fold*_model_results_total_scores.csv")))
-    fold_ids = [int(os.path.basename(p).split("_fold")[1].split("_")[0]) for p in totals]
+    metadata_files = sorted(glob.glob(os.path.join(base, "model", f"{subject}_fold*_model_results_metadata.csv")))
+    fold_ids = [int(os.path.basename(p).split("_fold")[1].split("_")[0]) for p in metadata_files]
     tag = impa_tag(mnispace)
     return {
         fid: {
-            "kfold_total": os.path.join(base, "model", f"{subject}_fold{fid}_model_results_total_scores.csv"),
+            "kfold_metadata": os.path.join(base, "model", f"{subject}_fold{fid}_model_results_metadata.csv"),
             "kfold_auc": os.path.join(base, "model", f"{subject}_fold{fid}_model_results_auc.csv"),
             "kfold_impa": os.path.join(base, "model", f"{subject}_fold{fid}_{tag}.nii.gz"),
         }
@@ -239,8 +236,11 @@ def fold_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: bool
     }
 
 
-def load_scalar_csv(path: str) -> float:
-    return float(np.loadtxt(path))
+def load_metadata_csv(path: str) -> dict:
+    """{metric_name: value} from a *_model_results_metadata.csv (total_scores/
+    whole_voxels/selected_voxels/feature_percent, or whichever plain-scalar
+    metrics save_model_results was given) -- see save_model_results."""
+    return pd.read_csv(path, index_col=0)["value"].to_dict()
 
 
 def load_labeled_csv(path: str) -> pd.DataFrame:
@@ -274,14 +274,14 @@ def compile_group_summary(analysis_output_dir: str, desc: str, subjects: list) -
     for s in subjects:
         p = subject_paths(analysis_output_dir, desc, s)
         for family, prefix in (("CV", "kfold"), ("held-out-test", "test")):
-            total_key, auc_key, acc_key, evi_key = f"{prefix}_total", f"{prefix}_auc", f"{prefix}_accuracy", f"{prefix}_evidence"
-            if not os.path.exists(p[total_key]):
+            metadata_key, auc_key, acc_key, evi_key = f"{prefix}_metadata", f"{prefix}_auc", f"{prefix}_accuracy", f"{prefix}_evidence"
+            if not os.path.exists(p[metadata_key]):
                 continue
-            row = {"subject": s, "family": family, "total_accuracy": load_scalar_csv(p[total_key])}
+            metadata = load_metadata_csv(p[metadata_key])
+            row = {"subject": s, "family": family, "total_accuracy": metadata.get("total_scores")}
             for metric in ("whole_voxels", "selected_voxels", "feature_percent"):
-                metric_key = f"{prefix}_{metric}"
-                if os.path.exists(p[metric_key]):
-                    row[metric] = load_scalar_csv(p[metric_key])
+                if metric in metadata:
+                    row[metric] = metadata[metric]
             if os.path.exists(p[auc_key]):
                 for cat, val in load_labeled_csv(p[auc_key]).iloc[:, 0].items():
                     row[f"auc_{cat}"] = val
@@ -610,10 +610,10 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
     kfold_auc_by_subject, test_auc_by_subject = {}, {}
     for s in subjects:
         p = subject_paths(analysis_output_dir, desc, s)
-        if os.path.exists(p["kfold_total"]):
-            kfold_totals[s] = load_scalar_csv(p["kfold_total"])
-        if os.path.exists(p["test_total"]):
-            test_totals[s] = load_scalar_csv(p["test_total"])
+        if os.path.exists(p["kfold_metadata"]):
+            kfold_totals[s] = load_metadata_csv(p["kfold_metadata"])["total_scores"]
+        if os.path.exists(p["test_metadata"]):
+            test_totals[s] = load_metadata_csv(p["test_metadata"])["total_scores"]
         if os.path.exists(p["kfold_auc"]):
             kfold_auc_by_subject[s] = load_labeled_csv(p["kfold_auc"]).iloc[:, 0]
         if os.path.exists(p["test_auc"]):
@@ -656,7 +656,8 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
 
         if kfold_totals:
             folds = fold_paths(analysis_output_dir, desc, s)
-            fold_vals = [load_scalar_csv(f["kfold_total"]) for f in folds.values() if os.path.exists(f["kfold_total"])]
+            fold_vals = [load_metadata_csv(f["kfold_metadata"])["total_scores"]
+                         for f in folds.values() if os.path.exists(f["kfold_metadata"])]
             if fold_vals:
                 cv_x = [name for name, _, _ in families].index("CV")
                 ax.scatter([cv_x] * len(fold_vals), fold_vals, color="black", zorder=3, s=20, label="per-fold")

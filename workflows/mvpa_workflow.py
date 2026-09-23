@@ -38,7 +38,8 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     <subject>_trial_pivot.csv                     -- sanity check, pre-model_conditions
 
   model.kfold_cv configured -- k-fold CV entirely within model_conditions.training:
-    model/<subject>_kfold_folds.json                    -- {fold_id: [held-out run ids]}
+    model/<subject>_kfold_folds.json                    -- {fold_id: {"training": [acquisition
+                                                            names], "testing": [acquisition names]}}
     model/<subject>_fold{N}_model_results_{metric}.csv  -- per-fold held-out metrics
     model/<subject>_fold{N}_impa[_mni].nii.gz           -- per-fold importance map
     model/<subject>_fold{N}_permutation_test.csv        -- per-fold significance (optional)
@@ -87,7 +88,7 @@ from utils.mvpa_common import (
     load_images_and_mask, build_timecourse_instructions,
     model_classification, model_performance, permutation_significance,
     timecourse_decoding, save_model_results, average_fold_results, impa_tag,
-    build_cv_raw_results,
+    build_cv_raw_results, parse_bids_entities,
 )
 
 KFOLD_STRATEGIES = ("per_run", "group_kfold", "explicit_groups")
@@ -222,6 +223,19 @@ def boldfile_overlap(df_a: pd.DataFrame, df_b: pd.DataFrame) -> set:
 # K-fold: per-fold execution + aggregation (training-only)
 # =====================================================
 
+def _acquisition_name(boldfile: str) -> str:
+    """A short, preprocessing/space-independent acquisition label parsed from
+    boldfile's own BIDS entities -- e.g. "sub-1_ses-A1_task-loc_run-01_bold"
+    -- deliberately excluding dir/space/desc (constant across every
+    acquisition in a given analysis, so they'd only add noise here). Used to
+    label kfold_folds.json's per-fold training/testing acquisition lists,
+    since a run number alone is ambiguous across tasks that reuse it (see
+    boldfile_overlap)."""
+    entities = parse_bids_entities(boldfile)
+    parts = [f"{key}-{entities[key]}" for key in ("sub", "ses", "task", "run") if key in entities]
+    return "_".join(parts) + "_bold"
+
+
 def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_filename_tag,
               analysis_output_dir, model_descr, subject_id, regressor_categories,
               feature_selection_cfg, classifier_name, classifier_params,
@@ -248,10 +262,17 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
     boldfile_to_pipe = {}
 
     for fold_id, held_out_runs in enumerate(fold_groups, start=1):
-        folds_manifest[fold_id] = [int(r) for r in held_out_runs]
-
         train_mask = (~training_df["run"].isin(held_out_runs)).to_numpy()
         test_mask = training_df["run"].isin(held_out_runs).to_numpy()
+
+        # full acquisition names (not just run numbers) for both sides of
+        # this fold's split -- a run number alone doesn't say which task/
+        # session it belongs to, so this is what actually lets someone
+        # confirm exactly what went into training vs. was held out
+        folds_manifest[fold_id] = {
+            "training": sorted({_acquisition_name(bf) for bf in training_df.loc[train_mask, "boldfile"]}),
+            "testing": sorted({_acquisition_name(bf) for bf in training_df.loc[test_mask, "boldfile"]}),
+        }
 
         if not test_mask.any():
             print(f"  (!) fold {fold_id} (held-out runs {held_out_runs}): no held-out rows -- skipping")

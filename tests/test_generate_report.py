@@ -17,7 +17,7 @@ from workflows.generate_report import (
     subject_paths,
     has_fold_files,
     fold_paths,
-    load_scalar_csv,
+    load_metadata_csv,
     load_labeled_csv,
     infer_categories,
     compile_group_summary,
@@ -89,7 +89,7 @@ class TestListSubjectDirs:
 class TestSubjectPaths:
     def test_kfold_paths_under_model_dir(self):
         paths = subject_paths("/out", "desc1", "01")
-        assert paths["kfold_total"] == "/out/desc1/01/model/01_model_results_total_scores.csv"
+        assert paths["kfold_metadata"] == "/out/desc1/01/model/01_model_results_metadata.csv"
         assert paths["kfold_auc"] == "/out/desc1/01/model/01_model_results_auc.csv"
         assert paths["kfold_accuracy"] == "/out/desc1/01/model/01_model_results_accuracy.csv"
         assert paths["kfold_evidence"] == "/out/desc1/01/model/01_model_results_evidence.csv"
@@ -99,7 +99,7 @@ class TestSubjectPaths:
 
     def test_test_paths_under_test_dir(self):
         paths = subject_paths("/out", "desc1", "01")
-        assert paths["test_total"] == "/out/desc1/01/test/01_model_results_total_scores.csv"
+        assert paths["test_metadata"] == "/out/desc1/01/test/01_model_results_metadata.csv"
         assert paths["test_auc"] == "/out/desc1/01/test/01_model_results_auc.csv"
         assert paths["test_accuracy"] == "/out/desc1/01/test/01_model_results_accuracy.csv"
         assert paths["test_evidence"] == "/out/desc1/01/test/01_model_results_evidence.csv"
@@ -134,13 +134,13 @@ class TestFoldFiles:
     def test_has_fold_files_true_and_fold_paths_covers_each_fold(self, tmp_path):
         base = _make_subject(tmp_path, "desc1", "01")
         for fid in (1, 2):
-            (base / "model" / f"01_fold{fid}_model_results_total_scores.csv").write_text("0.5")
+            (base / "model" / f"01_fold{fid}_model_results_metadata.csv").write_text("0.5")
 
         assert has_fold_files(str(tmp_path), "desc1", "01") is True
 
         folds = fold_paths(str(tmp_path), "desc1", "01")
         assert sorted(folds.keys()) == [1, 2]
-        assert folds[1]["kfold_total"] == str(base / "model" / "01_fold1_model_results_total_scores.csv")
+        assert folds[1]["kfold_metadata"] == str(base / "model" / "01_fold1_model_results_metadata.csv")
         assert folds[1]["kfold_impa"] == str(base / "model" / "01_fold1_impa.nii.gz")
         assert folds[2]["kfold_auc"] == str(base / "model" / "01_fold2_model_results_auc.csv")
         # no per-fold decoding anymore -- timecourse decoding is never fold-based
@@ -149,7 +149,7 @@ class TestFoldFiles:
 
     def test_fold_paths_mnispace_true_uses_mni_filename(self, tmp_path):
         base = _make_subject(tmp_path, "desc1", "01")
-        (base / "model" / "01_fold1_model_results_total_scores.csv").write_text("0.5")
+        (base / "model" / "01_fold1_model_results_metadata.csv").write_text("0.5")
         folds = fold_paths(str(tmp_path), "desc1", "01", mnispace=True)
         assert folds[1]["kfold_impa"] == str(base / "model" / "01_fold1_impa_mni.nii.gz")
 
@@ -204,14 +204,16 @@ class TestResolveGroupImpaMni:
 
 
 # =====================================================
-# load_scalar_csv / load_labeled_csv
+# load_metadata_csv / load_labeled_csv
 # =====================================================
 
 class TestLoaders:
-    def test_load_scalar_csv(self, tmp_path):
-        path = tmp_path / "total_scores.csv"
-        np.savetxt(path, [0.75], delimiter=",", fmt="%.6f")
-        assert load_scalar_csv(str(path)) == pytest.approx(0.75)
+    def test_load_metadata_csv(self, tmp_path):
+        path = tmp_path / "metadata.csv"
+        pd.DataFrame({"value": {"total_scores": 0.75, "whole_voxels": 5000}}).to_csv(path)
+        metadata = load_metadata_csv(str(path))
+        assert metadata["total_scores"] == pytest.approx(0.75)
+        assert metadata["whole_voxels"] == pytest.approx(5000)
 
     def test_load_labeled_csv_indexed_by_category(self, tmp_path):
         path = tmp_path / "auc.csv"
@@ -250,10 +252,10 @@ class TestInferCategories:
 # compile_group_summary
 # =====================================================
 
-def _write_family_csvs(base, subdir, subject, total, auc, acc, evi, categories):
+def _write_family_csvs(base, subdir, subject, total, auc, acc, evi, categories, **extra_metadata):
     d = base / subdir
     d.mkdir(parents=True, exist_ok=True)
-    np.savetxt(d / f"{subject}_model_results_total_scores.csv", [total], delimiter=",", fmt="%.6f")
+    pd.DataFrame({"value": {"total_scores": total, **extra_metadata}}).to_csv(d / f"{subject}_model_results_metadata.csv")
     pd.DataFrame({"auc": auc}, index=categories).to_csv(d / f"{subject}_model_results_auc.csv")
     pd.DataFrame(acc, index=categories, columns=categories).to_csv(d / f"{subject}_model_results_accuracy.csv")
     pd.DataFrame(evi, index=categories, columns=categories).to_csv(d / f"{subject}_model_results_evidence.csv")
@@ -297,10 +299,8 @@ class TestCompileGroupSummary:
     def test_includes_voxel_footprint_columns(self, tmp_path):
         categories = ["face", "place"]
         base = _make_subject(tmp_path, "desc1", "01")
-        _write_family_csvs(base, "model", "01", 0.7, [0.8, 0.75], [[0.9, 0.1], [0.2, 0.8]], [[0.85, 0.15], [0.25, 0.75]], categories)
-        np.savetxt(base / "model" / "01_model_results_whole_voxels.csv", [17806], delimiter=",", fmt="%.6f")
-        np.savetxt(base / "model" / "01_model_results_selected_voxels.csv", [42], delimiter=",", fmt="%.6f")
-        np.savetxt(base / "model" / "01_model_results_feature_percent.csv", [0.2359], delimiter=",", fmt="%.6f")
+        _write_family_csvs(base, "model", "01", 0.7, [0.8, 0.75], [[0.9, 0.1], [0.2, 0.8]], [[0.85, 0.15], [0.25, 0.75]], categories,
+                            whole_voxels=17806, selected_voxels=42, feature_percent=0.2359)
 
         summary = compile_group_summary(str(tmp_path), "desc1", ["01"])
         row = summary.iloc[0]

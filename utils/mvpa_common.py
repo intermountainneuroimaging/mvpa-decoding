@@ -592,7 +592,12 @@ def build_timecourse_instructions(labeled_df: pd.DataFrame, window: dict) -> pd.
 
 def save_model_results(output_pattern, results, categories):
     """
-    Save a dict of model outputs to disk, one file per metric.
+    Save a dict of model outputs to disk, one file per metric -- except
+    plain scalar metrics (a single number, not one per category), which are
+    all collected together into one "metadata" file instead of one
+    single-line file apiece (total_scores/whole_voxels/selected_voxels/
+    feature_percent were previously 4 near-empty files per subject/fold,
+    each holding exactly one number).
 
     Parameters
     ----------
@@ -605,18 +610,22 @@ def save_model_results(output_pattern, results, categories):
     results : dict[str, array-like]
         Mapping from metric name -> value to save. Supported value shapes:
 
-        1) Square matrix (C, C)
+        1) Scalar (a plain number, or a 0-d/length-1 array)
+           - Every scalar metric in `results` is collected into one row per
+             metric ("value" column, indexed by metric name) and saved
+             together as output_pattern.format(metric="metadata").
+
+        2) Square matrix (C, C)
            - Interpreted as a class-by-class matrix (e.g., confusion matrix,
              importance matrix).
-           - Saved as a CSV with row/column labels from `categories`.
+           - Saved as its own CSV with row/column labels from `categories`.
 
-        2) Column vector (C,) or (C, 1)
+        3) Column vector (C,) or (C, 1)
            - Interpreted as one value per category/class.
-           - Saved as a single-column CSV indexed by `categories`.
+           - Saved as its own single-column CSV indexed by `categories`.
 
-        3) Anything else (e.g., (S, E), (n_features,), scalar)
-           - Saved via np.savetxt as numeric CSV (no labels).
-           - Scalars are promoted to 1D.
+        4) Anything else (e.g., (S, E), (n_features,))
+           - Saved via np.savetxt as its own numeric CSV (no labels).
 
     categories : sequence of str
         Category/class labels in the same order used by the model outputs.
@@ -630,35 +639,42 @@ def save_model_results(output_pattern, results, categories):
     categories = list(categories)
     C = len(categories)
 
+    scalar_metrics = {}
+
     for metric, x in results.items():
+        x = np.asarray(x)
+
+        # Case 1: plain scalar -- collected, not written per-metric (see below)
+        if x.ndim == 0:
+            scalar_metrics[metric] = float(x)
+            continue
 
         # Build output path for this metric and ensure parent directory exists
         output_file = output_pattern.format(metric=metric)
         Path(os.path.dirname(output_file)).mkdir(parents=True, exist_ok=True)
 
-        # Coerce to numpy array (without forcing extra dims yet)
-        x = np.asarray(x)
-
-        # Promote scalars to shape (1,) so savetxt works
-        if x.ndim == 0:
-            x = np.atleast_1d(x)
-
-        # Case 1: category-by-category matrix
+        # Case 2: category-by-category matrix
         if x.shape == (C, C):
             df = pd.DataFrame(x, index=categories, columns=categories)
             df.to_csv(output_file, index=True)
 
-        # Case 2: one value per category (accept (C,) or (C,1))
+        # Case 3: one value per category (accept (C,) or (C,1))
         elif x.shape == (C,) or x.shape == (C, 1):
             x_vec = x.reshape(C)  # ensures 1D length-C
             df = pd.DataFrame({metric: x_vec}, index=categories)
             df.to_csv(output_file, index=True)
 
-        # Case 3: everything else (no labels)
+        # Case 4: everything else (no labels)
         else:
             np.savetxt(output_file, x, delimiter=",", fmt="%.6f")
 
         print(f"[{metric}] saved -> {output_file} (shape={x.shape})")
+
+    if scalar_metrics:
+        output_file = output_pattern.format(metric="metadata")
+        Path(os.path.dirname(output_file)).mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"value": scalar_metrics}).to_csv(output_file, index=True)
+        print(f"[metadata] saved -> {output_file} ({list(scalar_metrics)})")
 
 
 def average_fold_results(fold_results: list) -> dict:
