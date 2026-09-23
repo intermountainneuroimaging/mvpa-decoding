@@ -22,6 +22,13 @@
 # unchanged, to every stage it submits -- so all four jobs agree on it by
 # construction, not by four people remembering to edit the same file.
 #
+# An optional second argument restricts stage 4's group report to just the
+# given comma-separated subjects (e.g. "1,2,3"), forwarded as
+# generate_report.py's --subjects. Stages 1-3 are unaffected and still
+# process every subject they auto-discover under bids_hcp_root/hcppipe_root
+# -- this only narrows which of those subjects' already-computed results
+# stage 4 aggregates into the group PDF.
+#
 # This script resolves its own real location (reliable here because it's
 # invoked directly via `bash`, never through sbatch, which would otherwise
 # obscure the original file path) purely for its own use -- `cd`ing to the
@@ -42,18 +49,22 @@
 # Run from any directory:
 #
 #   bash /any/path/to/slurm/0_submit_mvpa_pipeline.sh configs/my-study.json
+#   bash /any/path/to/slurm/0_submit_mvpa_pipeline.sh configs/my-study.json 1,2,3
 
 set -eo pipefail
 
 CONFIG_FILE="$1"
 if [ -z "$CONFIG_FILE" ]; then
-    echo "Usage: bash $0 <config.json>" >&2
+    echo "Usage: bash $0 <config.json> [subject1,subject2,...]" >&2
     exit 1
 fi
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Config file not found: $CONFIG_FILE" >&2
     exit 1
 fi
+
+# optional -- forwarded to stage 4 only (see header comment above)
+SUBJECT_LIST="$2"
 
 SLURM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(dirname "$SLURM_DIR")"
@@ -73,5 +84,5 @@ echo "Submitted master_spreadsheet job: $spreadsheet_jobid (depends on $resample
 kfold_jobid=$(sbatch --parsable --dependency=afterok:$spreadsheet_jobid "$SCRIPTS_DIR/slurm/3_batch_run_mvpa_workflow.sh" "$CONFIG_FILE")
 echo "Submitted k-fold classifier array job: $kfold_jobid (depends on $spreadsheet_jobid)"
 
-report_jobid=$(sbatch --parsable --dependency=afterok:$kfold_jobid "$SCRIPTS_DIR/slurm/4_sbatch_generate_report.sh" "$CONFIG_FILE")
+report_jobid=$(sbatch --parsable --dependency=afterok:$kfold_jobid "$SCRIPTS_DIR/slurm/4_sbatch_generate_report.sh" "$CONFIG_FILE" "$SUBJECT_LIST")
 echo "Submitted group report job: $report_jobid (depends on $kfold_jobid)"

@@ -81,6 +81,24 @@ class TestListSubjectDirs:
         with pytest.raises(SystemExit):
             list_subject_dirs(str(tmp_path), "missing_desc")
 
+    def test_explicit_subjects_list_restricts_to_just_those(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")
+        _make_subject(tmp_path, "desc1", "02")
+        _make_subject(tmp_path, "desc1", "03")
+        result = list_subject_dirs(str(tmp_path), "desc1", subjects=["01", "03"])
+        assert result == ["01", "03"]
+
+    def test_explicit_subjects_list_with_missing_subject_raises(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")
+        with pytest.raises(SystemExit):
+            list_subject_dirs(str(tmp_path), "desc1", subjects=["01", "99"])
+
+    def test_singular_subject_takes_priority_over_subjects_list(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")
+        _make_subject(tmp_path, "desc1", "02")
+        result = list_subject_dirs(str(tmp_path), "desc1", subject="01", subjects=["01", "02"])
+        assert result == ["01"]
+
 
 # =====================================================
 # subject_paths

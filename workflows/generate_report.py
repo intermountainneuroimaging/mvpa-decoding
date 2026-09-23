@@ -78,6 +78,12 @@ def parse_args():
     )
     parser.add_argument("--subject", default=None, help="Restrict the report to one subject (single-subject report). Omit for a group report across all subjects found.")
     parser.add_argument(
+        "--subjects", default=None,
+        help="Restrict a group report to just these comma-separated subjects (e.g. \"1,2,3\"), instead of "
+             "every subject folder found under analysis-output-dir/desc. Still a group report (unlike "
+             "--subject, singular) -- ignored if --subject is also given."
+    )
+    parser.add_argument(
         "--config", default=None,
         help="mvpa config JSON. Supplies model.desc (see --desc) when --desc is omitted, and "
              "timecourse_decoding conditions/window/overlay for annotation either way. Optional only if "
@@ -137,20 +143,31 @@ def _subject_has_results(base: str, subject: str) -> bool:
     return os.path.isdir(os.path.join(subj_base, "model")) or os.path.isdir(os.path.join(subj_base, "test"))
 
 
-def list_subject_dirs(analysis_output_dir: str, desc: str, subject: str = None) -> list:
+def list_subject_dirs(analysis_output_dir: str, desc: str, subject: str = None, subjects: list = None) -> list:
+    """`subject` (singular) takes priority -- a single-subject report, exactly
+    as before `subjects` existed. Otherwise `subjects` (plural), if given,
+    restricts a *group* report to just that explicit list (each one checked
+    for results, same as `subject` is) instead of auto-discovering every
+    subject folder under analysis_output_dir/desc."""
     base = os.path.join(analysis_output_dir, desc)
     if subject:
         if not _subject_has_results(base, subject):
             raise SystemExit(f"No results found for subject {subject!r} at {os.path.join(base, subject)}")
         return [subject]
 
-    subjects = sorted(
+    if subjects:
+        missing = [s for s in subjects if not _subject_has_results(base, s)]
+        if missing:
+            raise SystemExit(f"No results found for subject(s) {missing!r} under {base}")
+        return list(subjects)
+
+    found = sorted(
         name for name in os.listdir(base)
         if _subject_has_results(base, name)
     ) if os.path.isdir(base) else []
-    if not subjects:
+    if not found:
         raise SystemExit(f"No subject result folders found under {base}")
-    return subjects
+    return found
 
 
 def subject_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: bool = False) -> dict:
@@ -1370,7 +1387,8 @@ def main():
     args = parse_args()
     desc = resolve_desc(args.desc, args.config)
 
-    subjects = list_subject_dirs(args.analysis_output_dir, desc, args.subject)
+    subjects_arg = [s.strip() for s in args.subjects.split(",") if s.strip()] if args.subjects else None
+    subjects = list_subject_dirs(args.analysis_output_dir, desc, args.subject, subjects_arg)
     fold_flags = {s: has_fold_files(args.analysis_output_dir, desc, s) for s in subjects}
     regressor_categories = infer_categories(args.analysis_output_dir, desc, subjects)
     window, tr, median_duration, overlay_conditions = load_annotation_info(args.config, args.master_spreadsheet)

@@ -32,6 +32,14 @@
 # plain SBATCH directives (no variable substitution happens in them), so
 # they resolve relative to wherever `sbatch` was invoked from regardless.
 #
+# Optional second arg (`$2`): comma-separated subject IDs (e.g. "1,2,3"),
+# forwarded to generate_report.py's --subjects to restrict the group report
+# to just those subjects' already-computed results, instead of every
+# subject folder found under $OUTPUT_DIR. Does not affect which subjects'
+# importance maps get resampled to MNI below -- that loop still covers
+# everyone under $OUTPUT_DIR regardless, since it's harmless/idempotent to
+# resample a subject the report itself won't end up using.
+#
 # --time is a rough starting estimate (MNI resampling + PDF/plot rendering
 # across every subject's output, no measured runtime yet) -- check the first
 # run's actual wall time and adjust before relying on it.
@@ -47,13 +55,16 @@ conda activate incenv
 
 CONFIG_FILE="$1"
 if [ -z "$CONFIG_FILE" ]; then
-    echo "Usage: sbatch $(basename "$0") <config.json>" >&2
+    echo "Usage: sbatch $(basename "$0") <config.json> [subject1,subject2,...]" >&2
     exit 1
 fi
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "Config file not found: $CONFIG_FILE" >&2
     exit 1
 fi
+
+# optional -- see header comment above
+SUBJECT_LIST="$2"
 export CONFIG_FILE
 
 # pipeline.scripts_dir, read directly rather than relying on an exported
@@ -142,5 +153,10 @@ else
     done
 fi
 
-python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR \
-    --config $CONFIG_FILE --master-spreadsheet $MASTER_SPREADSHEET
+if [ -n "$SUBJECT_LIST" ]; then
+    python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR \
+        --config $CONFIG_FILE --master-spreadsheet $MASTER_SPREADSHEET --subjects "$SUBJECT_LIST"
+else
+    python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR \
+        --config $CONFIG_FILE --master-spreadsheet $MASTER_SPREADSHEET
+fi
