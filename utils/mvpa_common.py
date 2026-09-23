@@ -832,6 +832,41 @@ def model_performance(pipe, testing_data, testing_labels):
     return xout, impa_full
 
 
+def build_cv_raw_results(pipe, data, labels, held_out_df: pd.DataFrame, regressor_categories: list,
+                          feature_selection_cfg: dict, model_descr: str, fold_id: int) -> pd.DataFrame:
+    """One row per held-out sample in a single cross-validation fold -- same
+    raw-table style as timecourse_decoding()'s output (predicted_label,
+    correct, evidence_<category>, feature-selection footprint), just without
+    a window_index (this is one prediction per trial-sample, not a decode
+    window). held_out_df carries that sample's own metadata as-is (task,
+    trial_type, run, boldfile, etc., whatever training_df/master_spreadsheet
+    provided), row-aligned with data/labels, so a user can see exactly which
+    run contributed each held-out row for a given fold. run_kfold
+    concatenates this across every fold into a per-subject cross-validation
+    raw results table (model/<subject>_cv_results.csv)."""
+    predictions = pipe.predict(data)
+    evidence = decision_evidence(pipe, data)
+    n_sel = int(pipe.named_steps["feature_selection"].get_support().sum())
+    n_features = data.shape[1]
+    code_to_label = {i + 1: cat for i, cat in enumerate(regressor_categories)}
+
+    raw = held_out_df.reset_index(drop=True).copy()
+    raw.insert(1, "model_descr", model_descr)
+    raw.insert(2, "fold", fold_id)
+    raw["correct"] = predictions == labels
+    raw["predicted_label"] = [code_to_label.get(p, p) for p in predictions]
+    for i, cat in enumerate(regressor_categories):
+        raw[f"evidence_{cat}"] = evidence[:, i]
+    raw["threshold_p"] = feature_selection_cfg.get("feat_p") if feature_selection_cfg.get("n_voxels") is None else np.nan
+    raw["selected_voxels"] = n_sel
+    raw["whole_voxels"] = n_features
+    raw["feature_percent"] = 100 * n_sel / n_features
+
+    evidence_cols = [c for c in raw.columns if c.startswith("evidence")]
+    other_cols = [c for c in raw.columns if not c.startswith("evidence")]
+    return raw[other_cols + evidence_cols]
+
+
 def _partial_roc_auc_ovr(estimator, X, y):
     """One-vs-rest macro-average AUC, tolerant of a y that doesn't contain
     every class the estimator was fit on -- e.g. model_conditions.testing

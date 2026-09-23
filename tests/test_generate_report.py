@@ -22,6 +22,7 @@ from workflows.generate_report import (
     infer_categories,
     compile_group_summary,
     compile_group_decoding,
+    compile_group_cv_results,
     summarize_raw_for_timecourse,
     resolve_overlay_styles,
     load_annotation_info,
@@ -90,6 +91,7 @@ class TestSubjectPaths:
         assert paths["kfold_evidence"] == "/out/desc1/01/model/01_model_results_evidence.csv"
         assert paths["kfold_impa"] == "/out/desc1/01/model/01_impa.nii.gz"
         assert paths["kfold_impa_mni"] == "/out/desc1/01/model/01_impa_mni.nii.gz"
+        assert paths["kfold_cv_raw"] == "/out/desc1/01/model/01_cv_results.csv"
 
     def test_test_paths_under_test_dir(self):
         paths = subject_paths("/out", "desc1", "01")
@@ -346,6 +348,47 @@ class TestCompileGroupDecoding:
     def test_no_subjects_have_decoding_output(self, tmp_path):
         _make_subject(tmp_path, "desc1", "01")
         combined = compile_group_decoding(str(tmp_path), "desc1", ["01"])
+        assert combined.empty
+
+
+# =====================================================
+# compile_group_cv_results
+# =====================================================
+
+class TestCompileGroupCvResults:
+    def test_concatenates_every_subject_cv_raw(self, tmp_path):
+        for subject, n_rows in (("01", 2), ("02", 3)):
+            d = tmp_path / "desc1" / subject / "model"
+            d.mkdir(parents=True)
+            pd.DataFrame({
+                "subject": [subject] * n_rows,
+                "fold": list(range(1, n_rows + 1)),
+                "task": ["WM"] * n_rows,
+                "trial_type": ["maintain"] * n_rows,
+                "run": list(range(1, n_rows + 1)),
+                "predicted_label": ["face"] * n_rows,
+                "correct": [True] * n_rows,
+            }).to_csv(d / f"{subject}_cv_results.csv", index=False)
+
+        combined = compile_group_cv_results(str(tmp_path), "desc1", ["01", "02"])
+        assert len(combined) == 5
+        assert sorted(combined["subject"].unique()) == ["01", "02"]
+        assert set(combined.columns) >= {"task", "trial_type", "run", "fold"}
+
+    def test_subject_missing_cv_output_is_skipped(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")  # model/ exists but no cv_results.csv
+        d = tmp_path / "desc1" / "02" / "model"
+        d.mkdir(parents=True)
+        pd.DataFrame({"subject": ["02"], "fold": [1], "run": [1]}).to_csv(
+            d / "02_cv_results.csv", index=False
+        )
+
+        combined = compile_group_cv_results(str(tmp_path), "desc1", ["01", "02"])
+        assert list(combined["subject"]) == ["02"]
+
+    def test_no_subjects_have_cv_output(self, tmp_path):
+        _make_subject(tmp_path, "desc1", "01")
+        combined = compile_group_cv_results(str(tmp_path), "desc1", ["01"])
         assert combined.empty
 
 

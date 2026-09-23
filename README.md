@@ -640,6 +640,26 @@ fold's own train/held-out split within `training` --
 `model/{subject}_fold{N}_permutation_test.csv`. Folds aren't combined into
 one pooled p-value; interpret them fold-by-fold.
 
+#### Cross-validation hold-out sample detail: `model/{subject}_cv_results.csv`
+
+In addition to the per-fold/aggregated accuracy summaries above, every fold
+also writes its held-out samples out at the trial level -- **one row per
+held-out sample, across all folds** -- to `model/{subject}_cv_results.csv`,
+in the same raw-table style as `decoding_results.csv` (see section 7):
+`subject`, `model_descr`, `fold`, plus every column already carried by that
+row's `model_conditions.training` match (`task`, `trial_type`, `run`,
+`boldfile`, `trial_index`, `regressor_label`, ...), then `predicted_label`,
+`correct`, `evidence_<category>`, and that fold's own feature-selection
+footprint (`threshold_p`/`selected_voxels`/`whole_voxels`/`feature_percent`).
+Since every row is scored by whichever fold held its own run out, `fold`
+plus `run` together document exactly which run was held out (and evaluated)
+in each fold -- e.g. with `"per_run"`, fold 1's rows are all the run-1 rows,
+fold 2's are all the run-2 rows, and so on. `generate_report.py`'s group
+report concatenates every subject's file into
+`{desc}_group_cv_results.csv` (see section 7), so you can load the whole
+group's hold-out predictions in your own software without touching this
+pipeline's internals.
+
 <details>
 <summary>Historical note: the retired automatic internal-CV heuristic</summary>
 
@@ -925,6 +945,10 @@ model.kfold_cv configured -- k-fold CV entirely within model_conditions.training
   model/<subject>_fold{N}_permutation_test.csv        -- per-fold significance (optional)
   model/<subject>_model_results_{metric}.csv          -- aggregated across folds
   model/<subject>_impa[_mni].nii.gz                   -- aggregated importance map
+  model/<subject>_cv_results.csv                      -- raw, one row per held-out sample
+                                                          across all folds (task, trial_type,
+                                                          run, fold, predicted_label, correct,
+                                                          evidence_<category>)
 
 model_conditions.testing configured -- one fit on all of training, evaluated
 against all of testing:
@@ -1114,6 +1138,25 @@ plus a legend naming the categories and what the lighter band means. Each
 category's actual color/line style come from `resolve_overlay_styles`
 (section 4's `color`/`line_type`, per entry, with sensible auto-assigned
 defaults for whichever is omitted).
+
+**A group report (no `--subject`) also writes its own spreadsheets**
+alongside the PDF, in the same folder as `--output`, so the underlying
+per-trial data is available to load in your own software rather than only
+ever viewed through the PDF's plots:
+- `{desc}_group_summary.csv` -- one row per (subject, family), every
+  scalar/vector/matrix metric flattened into its own column.
+- `{desc}_group_decoding_results.csv` -- every subject's raw
+  `decoding_results.csv` (timecourse decoding, one row per decoded TR)
+  concatenated together.
+- `{desc}_group_cv_results.csv` -- every subject's raw `model/{subject}_cv_results.csv`
+  (cross-validation hold-out sample detail, section 5) concatenated
+  together -- one row per held-out sample across every subject's folds,
+  carrying `task`/`trial_type`/`run`/`fold`/`predicted_label`/`correct`/
+  `evidence_<category>`.
+
+Each is only written if at least one subject in scope actually has that
+output (e.g. `{desc}_group_cv_results.csv` is skipped entirely if no
+subject ran with `model.kfold_cv` configured).
 
 ## 8. Resampling MNI <-> native space (`utils/hcp_resample.py`)
 

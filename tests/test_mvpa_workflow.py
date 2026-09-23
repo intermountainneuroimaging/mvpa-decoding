@@ -142,9 +142,12 @@ def _build_training_fold_data(runs=(1, 2, 3), n_per_run_per_class=5, n_features=
     LogisticRegression) -- 2 classes, coded 1/2 like apply_regressor_codes
     would produce. Unlike the old mvpa_kfold_workflow.py fixture, there's no
     separate testing_df/timecourse data -- k-fold now holds out runs entirely
-    within this one training set."""
+    within this one training set. task/trial_type columns included so
+    run_kfold's cross-validation raw results (build_cv_raw_results) has
+    something real to carry through."""
     rng = np.random.default_rng(seed)
-    X_parts, y_parts, run_parts = [], [], []
+    X_parts, y_parts, run_parts, trial_type_parts = [], [], [], []
+    trial_type_by_cls = {1: "maintain", 2: "suppress"}
     for run in runs:
         for cls in (1, 2):
             block = rng.normal(loc=0.0, scale=1.0, size=(n_per_run_per_class, n_features))
@@ -152,10 +155,17 @@ def _build_training_fold_data(runs=(1, 2, 3), n_per_run_per_class=5, n_features=
             X_parts.append(block)
             y_parts.append(np.full(n_per_run_per_class, cls))
             run_parts.append(np.full(n_per_run_per_class, run))
+            trial_type_parts.extend([trial_type_by_cls[cls]] * n_per_run_per_class)
     training_data = np.vstack(X_parts)
     training_labels = np.concatenate(y_parts)
     runs = np.concatenate(run_parts)
-    training_df = pd.DataFrame({"run": runs, "boldfile": [f"run-{r}.nii.gz" for r in runs]})
+    training_df = pd.DataFrame({
+        "subject": "01",
+        "task": "WM",
+        "trial_type": trial_type_parts,
+        "run": runs,
+        "boldfile": [f"run-{r}.nii.gz" for r in runs],
+    })
     return training_df, training_data, training_labels
 
 
@@ -197,6 +207,20 @@ class TestRunKfold:
         # fitted pipe that never trained on that boldfile's own rows
         assert sorted(boldfile_to_pipe.keys()) == ["run-1.nii.gz", "run-2.nii.gz", "run-3.nii.gz"]
         assert len({id(p) for p in boldfile_to_pipe.values()}) == 3  # 3 distinct fold classifiers
+
+        # cross-validation raw results: one row per held-out sample across
+        # all 3 folds (leave-one-run-out means every row is held out exactly
+        # once), carrying task/trial_type/run straight through from
+        # training_df, plus fold/predicted_label/correct/evidence
+        cv_raw = pd.read_csv(base / "model" / "01_cv_results.csv")
+        assert len(cv_raw) == len(training_labels)
+        for col in ("task", "trial_type", "run", "boldfile", "fold", "predicted_label",
+                    "correct", "evidence_face", "evidence_place"):
+            assert col in cv_raw.columns
+        assert sorted(cv_raw["fold"].unique().tolist()) == [1, 2, 3]
+        # every held-out row's own run matches the fold that held it out
+        # (per_run: fold N holds out run N)
+        assert (cv_raw["fold"] == cv_raw["run"]).all()
 
     def test_boldfile_to_pipe_groups_multi_run_folds_under_one_pipe(self, tmp_path):
         # group_kfold with n_splits=2 over 4 runs -- each fold holds out 2

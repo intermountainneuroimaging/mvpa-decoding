@@ -44,6 +44,10 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     model/<subject>_fold{N}_permutation_test.csv        -- per-fold significance (optional)
     model/<subject>_model_results_{metric}.csv          -- aggregated across folds
     model/<subject>_impa[_mni].nii.gz                   -- aggregated importance map
+    model/<subject>_cv_results.csv                      -- raw, one row per held-out
+                                                            sample across all folds (task,
+                                                            trial_type, run, predicted_label,
+                                                            correct, evidence_<category>, ...)
 
   model_conditions.testing configured -- one fit on all of training, evaluated
   against all of testing:
@@ -83,6 +87,7 @@ from utils.mvpa_common import (
     load_images_and_mask, build_timecourse_instructions,
     model_classification, model_performance, permutation_significance,
     timecourse_decoding, save_model_results, average_fold_results, impa_tag,
+    build_cv_raw_results,
 )
 
 KFOLD_STRATEGIES = ("per_run", "group_kfold", "explicit_groups")
@@ -239,7 +244,7 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
     print(f"model.kfold_cv: {len(fold_groups)} fold(s), strategy={kfold_cv_cfg.get('strategy')!r}")
 
     folds_manifest = {}
-    model_results, model_impas = [], []
+    model_results, model_impas, cv_raw_frames = [], [], []
     boldfile_to_pipe = {}
 
     for fold_id, held_out_runs in enumerate(fold_groups, start=1):
@@ -266,6 +271,16 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
 
         xclf = model_classification(fold_train_data, fold_train_labels, feature_selection_cfg, classifier_name, classifier_params)
         xout, impa = model_performance(xclf, fold_test_data, fold_test_labels)
+
+        # per-held-out-sample detail (task/trial_type/run/boldfile plus
+        # predicted_label/correct/evidence) -- documents exactly which run
+        # was held out for this fold and how each of its samples was
+        # classified; concatenated across folds and saved once below
+        held_out_df = training_df.loc[test_mask]
+        cv_raw_frames.append(build_cv_raw_results(
+            xclf, fold_test_data, fold_test_labels, held_out_df, regressor_categories,
+            feature_selection_cfg, model_descr, fold_id,
+        ))
 
         # keyed by boldfile (not run number) -- two different tasks can reuse
         # the same run number for genuinely different scans, so boldfile is
@@ -315,6 +330,12 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
     with open(manifest_file, "w") as f:
         json.dump(folds_manifest, f, indent=2)
     print(f"Fold manifest saved to: {manifest_file}")
+
+    cv_raw_file = os.path.join(
+        analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}_cv_results.csv"
+    )
+    pd.concat(cv_raw_frames, ignore_index=True).to_csv(cv_raw_file, index=False)
+    print(f"Cross-validation hold-out sample results saved to: {cv_raw_file}")
 
     aggregated_model_xout = average_fold_results(model_results)
     aggregated_impa = np.mean(np.stack(model_impas, axis=0), axis=0)

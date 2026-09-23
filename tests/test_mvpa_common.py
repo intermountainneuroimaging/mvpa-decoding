@@ -36,6 +36,7 @@ from utils.mvpa_common import (
     load_images_and_mask,
     impa_tag,
     extract_importance_map,
+    build_cv_raw_results,
 )
 
 CLASSIFIER_NAME = "sklearn.linear_model.LogisticRegression"
@@ -707,6 +708,54 @@ class TestTimecourseDecoding:
         )
         expected_predictions = pipe.predict(X)
         np.testing.assert_array_equal(raw["correct"].to_numpy(), expected_predictions == y)
+
+
+class TestBuildCvRawResults:
+    def _fitted_pipe(self):
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2, seed=3)
+        return model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS)
+
+    def test_raw_columns_and_row_count(self):
+        pipe = self._fitted_pipe()
+        X, y = _separable_data(n_per_class=4, n_features=10, n_classes=2, seed=4)
+        categories = ["face", "place"]
+        held_out_df = pd.DataFrame({
+            "subject": ["01"] * len(y),
+            "task": ["WM"] * len(y),
+            "trial_type": ["maintain"] * len(y),
+            "run": [1, 1, 2, 2, 1, 1, 2, 2],
+            "boldfile": ["run-1.nii.gz", "run-1.nii.gz", "run-2.nii.gz", "run-2.nii.gz"] * 2,
+        })
+
+        raw = build_cv_raw_results(
+            pipe, X, y, held_out_df, categories, feature_selection_cfg={"feat_p": 0.05},
+            model_descr="test_model", fold_id=1,
+        )
+
+        assert len(raw) == len(y)
+        assert list(raw.columns[:3]) == ["subject", "model_descr", "fold"]
+        for col in ("task", "trial_type", "run", "boldfile", "predicted_label", "correct",
+                    "evidence_face", "evidence_place", "threshold_p", "selected_voxels",
+                    "whole_voxels", "feature_percent"):
+            assert col in raw.columns
+        assert raw["model_descr"].unique().tolist() == ["test_model"]
+        assert raw["fold"].unique().tolist() == [1]
+
+    def test_correct_and_predicted_label_match_pipe_predictions(self):
+        pipe = self._fitted_pipe()
+        X, y = _separable_data(n_per_class=5, n_features=10, n_classes=2, seed=5)
+        categories = ["face", "place"]
+        held_out_df = pd.DataFrame({"run": [1] * len(y), "boldfile": ["run-1.nii.gz"] * len(y)})
+
+        raw = build_cv_raw_results(
+            pipe, X, y, held_out_df, categories, feature_selection_cfg={"feat_p": 0.05},
+            model_descr="test_model", fold_id=2,
+        )
+
+        expected_predictions = pipe.predict(X)
+        np.testing.assert_array_equal(raw["correct"].to_numpy(), expected_predictions == y)
+        expected_labels = [categories[p - 1] for p in expected_predictions]
+        assert raw["predicted_label"].tolist() == expected_labels
 
 
 class TestSummarizeDecoding:

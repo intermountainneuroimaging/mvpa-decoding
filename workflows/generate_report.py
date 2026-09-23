@@ -177,6 +177,11 @@ def subject_paths(analysis_output_dir: str, desc: str, subject: str, mnispace: b
         # separately resampled the plain "impa" file via `hcp_resample.py
         # --direction native2mni --output .../model/{subject}_impa_mni.nii.gz`.
         "kfold_impa_mni": os.path.join(base, "model", f"{subject}_impa_mni.nii.gz"),
+        # raw, one row per held-out sample across all k-fold folds (task,
+        # trial_type, run, predicted_label, correct, evidence_<category>) --
+        # see build_cv_raw_results/run_kfold. Absent if model.kfold_cv wasn't
+        # configured.
+        "kfold_cv_raw": os.path.join(base, "model", f"{subject}_cv_results.csv"),
         # Independent test set: one classifier fit on the complete training
         # set, evaluated against model_conditions.testing (mvpa_workflow.py).
         # test/ is exclusively this family's directory -- same filenames as
@@ -305,6 +310,23 @@ def compile_group_decoding(analysis_output_dir: str, desc: str, subjects: list) 
         for s in subjects
         for p in [subject_paths(analysis_output_dir, desc, s)]
         if os.path.exists(p["decoding_raw"])
+    ]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def compile_group_cv_results(analysis_output_dir: str, desc: str, subjects: list) -> pd.DataFrame:
+    """Every subject's full cross-validation hold-out sample detail
+    (kfold_cv_raw -- one row per held-out sample across all k-fold folds,
+    carrying its own task/trial_type/run/boldfile plus predicted_label/
+    correct/evidence_<category>) concatenated into one table -- each row
+    already carries its own "subject" column (from training_df/master_
+    spreadsheet), so no extra tagging is needed here. Subjects with no
+    model.kfold_cv output simply contribute nothing."""
+    frames = [
+        pd.read_csv(p["kfold_cv_raw"], dtype={"subject": str})
+        for s in subjects
+        for p in [subject_paths(analysis_output_dir, desc, s)]
+        if os.path.exists(p["kfold_cv_raw"])
     ]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -1274,6 +1296,12 @@ def main():
             decoding_path = os.path.join(os.path.dirname(output_path), f"{desc}_group_decoding_results.csv")
             decoding.to_csv(decoding_path, index=False)
             print(f"Group decoding spreadsheet saved to: {decoding_path}")
+
+        cv_results = compile_group_cv_results(args.analysis_output_dir, desc, subjects)
+        if not cv_results.empty:
+            cv_results_path = os.path.join(os.path.dirname(output_path), f"{desc}_group_cv_results.csv")
+            cv_results.to_csv(cv_results_path, index=False)
+            print(f"Group cross-validation spreadsheet saved to: {cv_results_path}")
 
 
 if __name__ == "__main__":
