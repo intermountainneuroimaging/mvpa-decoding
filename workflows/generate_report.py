@@ -48,6 +48,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 import nibabel as nib
 import numpy as np
@@ -879,6 +880,86 @@ def resolve_overlay_styles(overlay_conditions: dict) -> dict:
     return {name: (colors[name], line_types[name]) for name in overlay_conditions}
 
 
+def resolve_overlay_groups(overlay_conditions: dict) -> dict:
+    """{category_name: group value or None} for every entry in
+    model_conditions.timecourse_decoding.overlay, reading each entry's own
+    optional "group" key -- a plain label (any JSON scalar) used to gather
+    that category together with every other category sharing the same
+    "group" value into its own contiguous block of rows (one row per true
+    condition, all showing only that group's categories), each block capped
+    with its own legend -- see resolve_timecourse_groups. Unlike
+    color/line_type there's no auto-assigned default: a category with
+    "group" unset stays ungrouped (None), and render_timecourse_pages only
+    switches into grouped mode at all when at least one category in scope
+    has it set."""
+    return {name: entry.get("group") for name, entry in overlay_conditions.items()}
+
+
+def resolve_timecourse_groups(true_conditions: list, overlay_categories: list, overlay_groups: dict) -> list:
+    """One (group_value, row_specs) block per distinct "group" value declared
+    on overlay_categories, in first-seen (config declaration) order --
+    row_specs is [(true_condition, overlay_categories_for_this_group), ...],
+    one row per true condition (existing order), all sharing this block's
+    group value so they render as one contiguous set of rows followed by one
+    legend, before the next group's rows start -- e.g. splitting an
+    operation x valence overlay into a "pos" block and a "neg" block, each
+    showing all true conditions for that valence together. Every
+    overlay_categories entry must already have a resolved (non-None) group
+    value -- the caller (render_timecourse_pages) is responsible for
+    deciding whether grouped mode applies at all and for giving any unset
+    entries a fallback value."""
+    group_values = list(dict.fromkeys(overlay_groups[c] for c in overlay_categories))
+    return [
+        (group_val, [
+            (true_cond, [c for c in overlay_categories if overlay_groups[c] == group_val])
+            for true_cond in true_conditions
+        ])
+        for group_val in group_values
+    ]
+
+
+def _build_overlay_legend(cats: list, overlay_styles: dict, ncol: int, overlay_conditions: dict) -> tuple:
+    """(handles, labels) for one overlay legend covering exactly `cats` --
+    always ending with a "trial-to-trial SE" proxy patch, ragged-row-centered
+    and row-major ordered for an `ncol`-column layout (see
+    _row_major_legend_order). Shared by both today's single whole-page
+    legend (one block, cats=every overlay category) and each "group" block's
+    own legend (cats=just that block's categories) -- either way this is the
+    complete self-contained legend for whatever it's covering."""
+    if overlay_conditions and cats and cats != [None]:
+        handles = [
+            Line2D([0], [0], color=overlay_styles.get(c, ("black", "-"))[0],
+                   linestyle=overlay_styles.get(c, ("black", "-"))[1], linewidth=1.5)
+            for c in cats
+        ]
+        labels = list(cats)
+    else:
+        handles, labels = [], []
+    trial_se_proxy = Patch(facecolor="black", alpha=0.12)
+    handles = handles + [trial_se_proxy]
+    labels = labels + ["trial-to-trial SE"]
+
+    # A ragged final row (fewer than ncol entries) would otherwise render
+    # flush-left with empty space to its right -- pad it to a full row with
+    # invisible entries split as evenly as possible on either side, so it
+    # reads centered instead.
+    remainder = len(labels) % ncol
+    if remainder:
+        pad_total = ncol - remainder
+        left_pad, right_pad = pad_total // 2, pad_total - pad_total // 2
+        blank = Patch(facecolor="none", edgecolor="none")
+        handles = handles[:-remainder] + [blank] * left_pad + handles[-remainder:] + [blank] * right_pad
+        labels = labels[:-remainder] + [""] * left_pad + labels[-remainder:] + [""] * right_pad
+
+    # handles/labels are now in the order we want read left-to-right,
+    # top-to-bottom (config declaration order, then the SE proxy last, with
+    # the padding above centering whatever ended up in the final row) --
+    # permute for matplotlib's column-major fill so it actually reads that
+    # way instead of down each column first (see _row_major_legend_order)
+    handles, labels = zip(*_row_major_legend_order(list(zip(handles, labels)), ncol))
+    return list(handles), list(labels)
+
+
 def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr, median_duration,
                              overlay_conditions=None):
     """Timecourse decoding always comes from the complete-training-set
@@ -891,7 +972,18 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr
     is drawn -- see resolve_overlay_styles. Omit both and a category falls
     back to auto-assigned styling; omit overlay_conditions entirely and
     every true-condition subplot is a single solid black line, as before
-    overlay existed at all."""
+    overlay existed at all.
+
+    An entry's optional "group" key splits the grid further: once any
+    overlay category in scope has "group" set, categories sharing the same
+    "group" value are gathered into their own contiguous block of rows (one
+    row per true condition, in first-seen config order across blocks), each
+    block capped with its own legend before the next block starts -- e.g. an
+    operation x valence overlay can put maintain/suppress/switch/clear
+    (still colored per resolve_overlay_styles) into a "pos" block and a
+    "neg" block, each block showing every true condition for that valence
+    together with its own legend, instead of one legend for the whole page.
+    See resolve_timecourse_groups."""
     overlay_conditions = overlay_conditions or {}
     frames = []
 
@@ -928,29 +1020,80 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr
     present_overlay_categories = set(combined["overlay_label"].unique()) if overlay_conditions else set()
     overlay_categories = [c for c in overlay_conditions if c in present_overlay_categories] if overlay_conditions else [None]
     overlay_styles = resolve_overlay_styles(overlay_conditions) if overlay_conditions else {}
+    overlay_groups = resolve_overlay_groups(overlay_conditions) if overlay_conditions else {}
 
-    n_rows, n_cols = len(true_conditions), len(categories)
-    if n_rows == 0 or n_cols == 0:
+    # grouped mode only kicks in once at least one in-scope overlay category
+    # actually has "group" set -- otherwise every true_condition stays a
+    # single block with every overlay category layered together (one legend
+    # for the whole page), exactly as before "group" existed
+    if overlay_conditions and any(overlay_groups.get(c) is not None for c in overlay_categories):
+        missing_group = [c for c in overlay_categories if overlay_groups.get(c) is None]
+        if missing_group:
+            print(f"  (!) overlay {missing_group} has no \"group\" set while other overlay entries do -- "
+                  f"giving each its own group block")
+            for c in missing_group:
+                overlay_groups[c] = c
+        blocks = resolve_timecourse_groups(true_conditions, overlay_categories, overlay_groups)
+    else:
+        blocks = [(None, [(true_cond, overlay_categories) for true_cond in true_conditions])]
+
+    n_cols = len(categories)
+    if not any(row_specs for _, row_specs in blocks) or n_cols == 0:
         print("(!) decoding_results.csv has no evidence_* columns or regressor_label values -- skipping timecourse page")
         return
 
-    # constrained layout (not tight_layout -- the two conflict) is what
-    # actually reserves room for the suptitle *and* the "outside" legend
-    # below, growing the axes area to fit however many rows the legend ends
-    # up needing instead of overlapping either -- see the fig.legend call
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 2.5 * n_rows + 1.2), sharex=True, sharey=True,
-                              squeeze=False, layout="constrained")
+    legend_ncol = 4
+    # one flat list of grid rows, alternating a block's data rows (one per
+    # true condition) with a single legend row right after it -- this is
+    # what turns "group" into a genuinely separate legend per block instead
+    # of one legend for the whole page
+    grid_rows = []
+    for group_val, row_specs in blocks:
+        for k, (true_cond, cats) in enumerate(row_specs):
+            grid_rows.append({"kind": "data", "true_cond": true_cond, "group": group_val,
+                               "cats": cats, "is_first_in_block": k == 0})
+        grid_rows.append({"kind": "legend", "group": group_val, "cats": cats})
+
+    data_row_indices = [i for i, r in enumerate(grid_rows) if r["kind"] == "data"]
+    last_data_row = data_row_indices[-1]
+
+    # data rows all get equal height; a legend row's height scales with how
+    # many lines of legend_ncol-wide entries its own block actually needs
+    # (trial-to-trial SE proxy always adds one more entry to every block's
+    # legend, even a block with just one overlay category, so it reads as a
+    # complete, self-contained legend on its own)
+    def _legend_height(n_cats):
+        n_lines = -(-(n_cats + 1) // legend_ncol)  # ceil
+        return 0.22 + 0.2 * n_lines
+
+    height_ratios = [1.0 if r["kind"] == "data" else _legend_height(len(r["cats"])) for r in grid_rows]
+    unit_height = 2.3
+    fig = plt.figure(figsize=(3 * n_cols, unit_height * sum(height_ratios) + 0.8), layout="constrained")
+    gs = fig.add_gridspec(nrows=len(grid_rows), ncols=n_cols, height_ratios=height_ratios)
+
     # zero-width for a single-subject report -- nothing to average across when
     # there's only one subject's own decoding
     variability_label = "darker band: +/- SE across subjects; lighter band: +/- trial-to-trial SE"
     x_is_seconds = tr is not None
     x_label = "Time from window start (s)" if x_is_seconds else "window_index"
 
-    for i, true_cond in enumerate(true_conditions):
+    first_ax = None
+    for i, row in enumerate(grid_rows):
+        if row["kind"] == "legend":
+            legend_ax = fig.add_subplot(gs[i, :])
+            legend_ax.axis("off")
+            handles, labels = _build_overlay_legend(row["cats"], overlay_styles, legend_ncol, overlay_conditions)
+            title = None if not overlay_conditions else ("overlay" if row["group"] is None else f"overlay ({row['group']})")
+            legend_ax.legend(handles, labels, loc="center", ncol=legend_ncol, fontsize=8, title=title)
+            continue
+
+        true_cond, group_val, cats = row["true_cond"], row["group"], row["cats"]
         subset = combined[combined["regressor_label"] == true_cond]
         for j, cat in enumerate(categories):
-            ax = axes[i][j]
-            for overlay_cat in overlay_categories:
+            ax = fig.add_subplot(gs[i, j], sharex=first_ax, sharey=first_ax)
+            if first_ax is None:
+                first_ax = ax
+            for overlay_cat in cats:
                 line = subset if overlay_cat is None else subset[subset["overlay_label"] == overlay_cat]
                 color, linestyle = overlay_styles.get(overlay_cat, ("black", "-"))
 
@@ -966,7 +1109,6 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr
                     .sort_values("window_index")
                 )
                 x = agg["window_index"] * tr if x_is_seconds else agg["window_index"]
-                plot_kwargs = {"label": overlay_cat} if overlay_cat is not None else {}
                 # lighter/wider trial-to-trial band drawn first (behind), then the
                 # more opaque subject/fold-level band on top, then the mean line --
                 # keeps both regions individually legible even where they overlap
@@ -974,7 +1116,7 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr
                                  alpha=0.12, color=color, zorder=1)
                 ax.fill_between(x, agg["mean"] - agg["se"], agg["mean"] + agg["se"],
                                  alpha=0.25, color=color, zorder=2)
-                ax.plot(x, agg["mean"], color=color, linestyle=linestyle, linewidth=1.5, zorder=3, **plot_kwargs)
+                ax.plot(x, agg["mean"], color=color, linestyle=linestyle, linewidth=1.5, zorder=3)
 
             if window is not None and x_is_seconds:
                 dur = median_duration.get(true_cond)
@@ -984,49 +1126,18 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr
                     end_mark = dur - window_start_offset
                     ax.axvline(onset_mark, color="gray", linestyle="--", linewidth=0.75)
                     ax.axvline(end_mark, color="gray", linestyle=":", linewidth=0.75)
-                    if i == 0:
+                    if row["is_first_in_block"]:
                         ylim = ax.get_ylim()
                         ax.text(onset_mark, ylim[1], "onset", fontsize=7, ha="center", va="bottom")
                         ax.text(end_mark, ylim[1], "event end", fontsize=7, ha="center", va="bottom")
 
-            if i == 0:
+            if row["is_first_in_block"]:
                 ax.set_title(f"evidence: {cat}", fontsize=10)
             if j == 0:
-                ax.set_ylabel(f"true: {true_cond}", fontsize=10)
-            if i == n_rows - 1:
+                row_label = f"true: {true_cond}" if group_val is None else f"true: {true_cond}\n({group_val})"
+                ax.set_ylabel(row_label, fontsize=10)
+            if i == last_data_row:
                 ax.set_xlabel(x_label, fontsize=9)
-
-    legend_ncol = 4
-    handles, labels = axes[0][0].get_legend_handles_labels()
-    trial_se_proxy = Patch(facecolor="black", alpha=0.12)
-    handles = handles + [trial_se_proxy]
-    labels = labels + ["trial-to-trial SE"]
-
-    # A ragged final row (fewer than legend_ncol entries) would otherwise
-    # render flush-left with empty space to its right -- pad it to a full
-    # row with invisible entries split as evenly as possible on either side,
-    # so it reads centered under the full rows above instead. Padding stays
-    # a single fig.legend() call (rather than a second, separately-anchored
-    # legend for just the ragged row) specifically because layout="constrained"
-    # only ever reserves bottom margin for legends placed via its one
-    # recognized "outside ..." call -- a second manually-positioned legend
-    # doesn't get any space reserved for it and is clipped by the figure edge.
-    remainder = len(labels) % legend_ncol
-    if remainder:
-        pad_total = legend_ncol - remainder
-        left_pad, right_pad = pad_total // 2, pad_total - pad_total // 2
-        blank = Patch(facecolor="none", edgecolor="none")
-        handles = handles[:-remainder] + [blank] * left_pad + handles[-remainder:] + [blank] * right_pad
-        labels = labels[:-remainder] + [""] * left_pad + labels[-remainder:] + [""] * right_pad
-
-    # handles/labels are now in the order we want read left-to-right,
-    # top-to-bottom (config declaration order, then the SE proxy last, with
-    # the padding above centering whatever ended up in the final row) --
-    # permute for matplotlib's column-major fill so it actually reads that
-    # way instead of down each column first (see _row_major_legend_order)
-    handles, labels = zip(*_row_major_legend_order(list(zip(handles, labels)), legend_ncol))
-    fig.legend(handles, labels, loc="outside lower center", ncol=legend_ncol, fontsize=8,
-               title="overlay" if overlay_conditions else None)
 
     fig.suptitle(_wrap_suptitle(fig, f"{desc}: timecourse decoding\n({variability_label})", 14), fontsize=14, fontweight="bold")
     pdf.savefig(fig)

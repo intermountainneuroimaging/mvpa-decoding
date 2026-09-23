@@ -25,6 +25,10 @@ from workflows.generate_report import (
     compile_group_cv_results,
     summarize_raw_for_timecourse,
     resolve_overlay_styles,
+    resolve_overlay_groups,
+    resolve_timecourse_groups,
+    render_timecourse_pages,
+    _build_overlay_legend,
     load_annotation_info,
     resolve_desc,
     resolve_group_impa_mni,
@@ -579,6 +583,172 @@ class TestResolveOverlayStyles:
         overlay = {"a": {"column": "trial_type", "match": "exact", "value": "x", "color": True, "line_type": False}}
         styles = resolve_overlay_styles(overlay)
         assert styles["a"] == (True, False)
+
+
+# =====================================================
+# resolve_overlay_groups / resolve_timecourse_groups
+# =====================================================
+
+class TestResolveOverlayGroups:
+    def test_reads_group_key_per_entry(self):
+        overlay = {
+            "maintain_pos": {"column": "trial_type", "match": "exact", "value": "x", "group": "pos"},
+            "maintain_neg": {"column": "trial_type", "match": "exact", "value": "y", "group": "neg"},
+        }
+        assert resolve_overlay_groups(overlay) == {"maintain_pos": "pos", "maintain_neg": "neg"}
+
+    def test_missing_group_key_is_none(self):
+        overlay = {"a": {"column": "trial_type", "match": "exact", "value": "x"}}
+        assert resolve_overlay_groups(overlay) == {"a": None}
+
+
+class TestResolveTimecourseGroups:
+    def test_splits_into_one_block_per_group_value(self):
+        true_conditions = ["face", "place"]
+        overlay_categories = ["maintain_pos", "maintain_neg", "suppress_pos", "suppress_neg"]
+        overlay_groups = {"maintain_pos": "pos", "suppress_pos": "pos", "maintain_neg": "neg", "suppress_neg": "neg"}
+
+        blocks = resolve_timecourse_groups(true_conditions, overlay_categories, overlay_groups)
+
+        assert len(blocks) == 2  # one block per group value
+        pos_val, pos_rows = blocks[0]
+        neg_val, neg_rows = blocks[1]
+        assert pos_val == "pos"
+        assert pos_rows == [("face", ["maintain_pos", "suppress_pos"]), ("place", ["maintain_pos", "suppress_pos"])]
+        assert neg_val == "neg"
+        assert neg_rows == [("face", ["maintain_neg", "suppress_neg"]), ("place", ["maintain_neg", "suppress_neg"])]
+
+    def test_group_value_order_is_first_seen_in_overlay_categories(self):
+        # "neg" declared before "pos" in overlay_categories -- blocks should
+        # follow that order, not alphabetical
+        true_conditions = ["face"]
+        overlay_categories = ["maintain_neg", "maintain_pos"]
+        overlay_groups = {"maintain_neg": "neg", "maintain_pos": "pos"}
+
+        blocks = resolve_timecourse_groups(true_conditions, overlay_categories, overlay_groups)
+
+        assert [group_val for group_val, _ in blocks] == ["neg", "pos"]
+
+    def test_single_group_value_produces_one_block_with_every_true_condition(self):
+        # every overlay category shares the same group value -- degenerates
+        # to today's single-block/single-legend behavior, just still routed
+        # through this function
+        true_conditions = ["face", "place"]
+        overlay_categories = ["maintain", "suppress"]
+        overlay_groups = {"maintain": "all", "suppress": "all"}
+
+        blocks = resolve_timecourse_groups(true_conditions, overlay_categories, overlay_groups)
+
+        assert len(blocks) == 1
+        group_val, rows = blocks[0]
+        assert group_val == "all"
+        assert rows == [("face", ["maintain", "suppress"]), ("place", ["maintain", "suppress"])]
+
+
+# =====================================================
+# _build_overlay_legend
+# =====================================================
+
+class TestBuildOverlayLegend:
+    def test_no_overlay_conditions_gives_only_se_proxy(self):
+        handles, labels = _build_overlay_legend([None], overlay_styles={}, ncol=4, overlay_conditions={})
+        # padded to a full ncol=4 row with blank entries around the one real label
+        assert [l for l in labels if l] == ["trial-to-trial SE"]
+        assert len(labels) == 4
+        assert len(handles) == 4
+
+    def test_covers_only_the_given_cats(self):
+        overlay = {"a": {}, "b": {}, "c": {}}
+        styles = {"a": ("C0", "-"), "b": ("C1", "-"), "c": ("C2", "-")}
+        handles, labels = _build_overlay_legend(["a", "b"], styles, ncol=4, overlay_conditions=overlay)
+        # "c" excluded -- this legend is scoped to just its own block/cats
+        assert "c" not in labels
+        assert "a" in labels and "b" in labels
+        assert "trial-to-trial SE" in labels
+
+    def test_pads_ragged_row_to_full_ncol_width(self):
+        overlay = {"a": {}}
+        styles = {"a": ("C0", "-")}
+        # 1 category + SE proxy = 2 labels, ncol=4 -> padded to 4 with blanks
+        handles, labels = _build_overlay_legend(["a"], styles, ncol=4, overlay_conditions=overlay)
+        assert len(labels) == 4
+        assert len(handles) == 4
+
+
+# =====================================================
+# render_timecourse_pages -- "group" grid + per-block legends
+# =====================================================
+
+def _write_decoding_raw(tmp_path, desc, subject, rows):
+    d = tmp_path / desc / subject / "decoding"
+    d.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_csv(d / f"{subject}_decoding_results.csv", index=False)
+
+
+def _synthetic_timecourse_rows(overlay_trial_types, n_windows=3):
+    """rows for 2 true conditions (face/place) x given overlay trial_types x
+    n_windows, with plausible evidence_face/evidence_place values -- enough
+    for render_timecourse_pages to actually build a grid."""
+    rows = []
+    for true_cond in ("face", "place"):
+        for trial_type in overlay_trial_types:
+            for w in range(n_windows):
+                rows.append({
+                    "subject": "01", "model_descr": "m", "window_index": w,
+                    "regressor_label": true_cond, "trial_type": trial_type,
+                    "evidence_face": 0.6 if true_cond == "face" else 0.4,
+                    "evidence_place": 0.4 if true_cond == "face" else 0.6,
+                })
+    return rows
+
+
+class TestRenderTimecoursePagesGroups:
+    def test_no_group_key_keeps_single_block_single_legend(self, tmp_path):
+        overlay = {
+            "maintain": {"column": "trial_type", "match": "exact", "value": "maintain"},
+            "suppress": {"column": "trial_type", "match": "exact", "value": "suppress"},
+        }
+        _write_decoding_raw(tmp_path, "desc1", "01", _synthetic_timecourse_rows(["maintain", "suppress"]))
+        pdf_path = tmp_path / "out.pdf"
+        with PdfPages(str(pdf_path)) as pdf:
+            render_timecourse_pages(pdf, str(tmp_path), "desc1", ["01"], window=None, tr=None,
+                                     median_duration={}, overlay_conditions=overlay)
+            assert pdf.get_pagecount() == 1
+
+    def test_group_key_splits_into_separate_blocks_with_own_legends(self, tmp_path):
+        overlay = {
+            "maintain_pos": {"column": "trial_type", "match": "exact", "value": "maintain_pos", "group": "pos", "color": 0},
+            "maintain_neg": {"column": "trial_type", "match": "exact", "value": "maintain_neg", "group": "neg", "color": 0},
+        }
+        _write_decoding_raw(tmp_path, "desc1", "01", _synthetic_timecourse_rows(["maintain_pos", "maintain_neg"]))
+        pdf_path = tmp_path / "out.pdf"
+        with PdfPages(str(pdf_path)) as pdf:
+            render_timecourse_pages(pdf, str(tmp_path), "desc1", ["01"], window=None, tr=None,
+                                     median_duration={}, overlay_conditions=overlay)
+            assert pdf.get_pagecount() == 1
+        # the actual 2-block (pos/neg) x 2-true-condition grid shape, and
+        # that each block gets its own legend, is verified directly via
+        # TestResolveTimecourseGroups + TestBuildOverlayLegend above (the
+        # render closes its own figure via plt.close(), so it can't be
+        # inspected from here) -- this just confirms grouped mode renders
+        # without crashing end to end
+
+    def test_missing_group_on_some_entries_falls_back_without_crashing(self, tmp_path, capsys):
+        # "suppress" has no "group" set while "maintain_pos"/"maintain_neg" do --
+        # should warn and still render rather than raising
+        overlay = {
+            "maintain_pos": {"column": "trial_type", "match": "exact", "value": "maintain_pos", "group": "pos"},
+            "maintain_neg": {"column": "trial_type", "match": "exact", "value": "maintain_neg", "group": "neg"},
+            "suppress": {"column": "trial_type", "match": "exact", "value": "suppress"},
+        }
+        _write_decoding_raw(tmp_path, "desc1", "01",
+                             _synthetic_timecourse_rows(["maintain_pos", "maintain_neg", "suppress"]))
+        pdf_path = tmp_path / "out.pdf"
+        with PdfPages(str(pdf_path)) as pdf:
+            render_timecourse_pages(pdf, str(tmp_path), "desc1", ["01"], window=None, tr=None,
+                                     median_duration={}, overlay_conditions=overlay)
+            assert pdf.get_pagecount() == 1
+        assert "group" in capsys.readouterr().out.lower()
 
 
 # =====================================================

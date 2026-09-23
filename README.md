@@ -388,6 +388,16 @@ entry) **and controls how that category is drawn** on the timecourse page
 - **`line_type`** -- an integer indexes `solid, dashed, dotted, dashdot`; a
   string is passed straight through to matplotlib (`"--"`, `"dashed"`, ...).
   Omit it and that category draws solid.
+- **`group`** -- *(optional)* any label (string, number, ...); gathers that
+  category together with every other category sharing the same `group`
+  value into its own contiguous block of rows (one row per true condition),
+  capped with its own legend right after it, before the next group's block
+  starts. Once *any* overlay entry sets `group`, the single shared legend at
+  the bottom of the page is replaced by one legend per distinct `group`
+  value (first-seen, i.e. config declaration order) -- `color`/`line_type`
+  still apply within a block exactly as above. Omit `group` entirely (the
+  default) and every category stays in one block with one legend for the
+  whole page, as before `group` existed.
 
 For example, 8 categories -- 4 conditions crossed with 2 sub-conditions --
 organized so `1A`/`1B` share a color and differ only by line style, same for
@@ -420,6 +430,27 @@ each `line_type`:
 indices 0/1; `1B`/`2B` restart that counter for `line_type="--"` -> indices
 0/1 again -- landing on the same two colors as the explicit version.)
 
+**The same 4-condition/2-sub-condition split can instead go on separate
+blocks, each with its own legend** rather than separate line styles sharing
+one legend -- swap `line_type` for `group`:
+
+```json
+"overlay": {
+  "1A": {"column": "trial_type", "match": "exact", "value": "cond1A", "color": 0, "group": "A"},
+  "1B": {"column": "trial_type", "match": "exact", "value": "cond1B", "color": 0, "group": "B"},
+  "2A": {"column": "trial_type", "match": "exact", "value": "cond2A", "color": 1, "group": "A"},
+  "2B": {"column": "trial_type", "match": "exact", "value": "cond2B", "color": 1, "group": "B"}
+}
+```
+For 2 true conditions this produces two blocks, each a 2-row x (number of
+true conditions' evidence categories) grid: group "A"'s block (both true
+conditions, showing only `1A`/`2A`) with its own legend right below it,
+then group "B"'s block (both true conditions, showing only `1B`/`2B`) with
+its own legend -- one report, not two separate ones, and `1A`/`2A` still
+share a color with `1B`/`2B` across the two blocks. `color`/`line_type`/
+`group` are independent and can combine on the same entry (e.g. still dash
+*within* a group's block for a third factor).
+
 An `overlay` with only one entry per condition, or with no `color`/
 `line_type` on any entry, behaves exactly like a single independent split
 always has: one color per category, all solid. This also covers the earlier,
@@ -443,9 +474,9 @@ queries are dropped from that plot only (a count is printed); everything
 else about the pipeline -- the classifier, its evidence values,
 `decoding_results.csv`/`summary_decoding_results.csv` -- is unaffected,
 since `overlay` is evaluated entirely inside `generate_report.py` against
-data the workflow scripts already wrote (the `color`/`line_type` keys are
-likewise inert everywhere else -- `evaluate_query_node`/`validate_query_node`
-only ever read the query keys they need, so they simply ignore both).
+data the workflow scripts already wrote (the `color`/`line_type`/`group` keys
+are likewise inert everywhere else -- `evaluate_query_node`/`validate_query_node`
+only ever read the query keys they need, so they simply ignore all three).
 
 ### Running it
 
@@ -1137,7 +1168,13 @@ when it's configured -- each overlay category gets its own two SE bands,
 plus a legend naming the categories and what the lighter band means. Each
 category's actual color/line style come from `resolve_overlay_styles`
 (section 4's `color`/`line_type`, per entry, with sensible auto-assigned
-defaults for whichever is omitted).
+defaults for whichever is omitted). If any overlay entry also sets `group`,
+categories sharing a `group` value are gathered into their own contiguous
+block of rows, each block capped with its own legend right after it
+(`resolve_timecourse_groups`) -- e.g. an operation x valence overlay can put
+each valence in its own block with its own legend, all in one report,
+rather than one shared legend for the whole page or a separate config/report
+run per valence.
 
 **A group report (no `--subject`) also writes its own spreadsheets**
 alongside the PDF, in the same folder as `--output`, so the underlying
