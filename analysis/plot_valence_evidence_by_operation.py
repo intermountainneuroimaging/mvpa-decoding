@@ -3,13 +3,20 @@
 """
 Clearvale-specific analysis (not part of the general report pipeline):
 positive- vs. negative-valence classifier evidence, per operation, with a
-maintain-baseline-subtracted view and 3-TR-bin significance testing.
+maintain-baseline-subtracted view and binned significance testing.
 
-Reads each subject's own decoding_results.csv (raw, one row per decoded TR --
-see mvpa_workflow.py/generate_report.py) and, for each operation category
-(regressor_label -- e.g. maintain/suppress/switch/clear) plots the
-classifier's *self*-evidence (evidence_<that row's own true category>) over
-time, split into WMpos ("pos", red) vs. WMneg ("neg", blue) trials:
+This is a thin, project-specific configuration of the reusable building
+blocks in analysis/decoding_results_toolkit.py -- to point this same
+approach at a different filter/condition/window/stat combination (a
+different operation set, a different valence coding, two-tailed instead of
+one-tailed, a non-parametric test, wider or narrower bins, ...), either
+edit the constants below or write a new short script against the toolkit
+directly; the toolkit itself never needs to change.
+
+For each operation category (regressor_label -- e.g. maintain/suppress/
+switch/clear) plots the classifier's *self*-evidence (evidence_<that row's
+own true category>) over time, split into WMpos ("pos", red) vs. WMneg
+("neg", blue) trials:
 
   1. Raw evidence, one page per operation, 3 panels: face-only, place-only,
      and collapsed across stimulus (the average of the face-only and
@@ -24,10 +31,11 @@ time, split into WMpos ("pos", red) vs. WMneg ("neg", blue) trials:
      once maintain's baseline pattern is removed?
   3. A significance table: for every operation (raw) and every
      suppress/switch/clear (baseline-subtracted), the timecourse is binned
-     into non-overlapping 3-TR chunks; for each chunk, this subject's own
-     mean pos-evidence minus mean neg-evidence is a paired difference score,
-     tested one-tailed (H1: pos > neg) via a one-sample t-test on those
-     per-subject difference scores across the group.
+     into non-overlapping TR chunks (--bin-size, default 3); for each chunk,
+     this subject's own mean pos-evidence minus mean neg-evidence is a
+     paired difference score, tested one-tailed (H1: pos > neg, by default)
+     via a one-sample t-test on those per-subject difference scores across
+     the group -- see --method to swap in a different test.
 
 Stimulus category (face/place) is read from trial_type (".*face.*" /
 ".*place.*", the same convention model_conditions.timecourse_decoding.overlay
@@ -35,10 +43,6 @@ entries already use elsewhere in this repo); valence from task (exact
 "WMpos"/"WMneg"). Both are parsed directly from decoding_results.csv, not
 from the config -- this script only needs --analysis-output-dir and
 --desc/--config to find that file, not the full model_conditions.
-
-Deliberately a separate, standalone script rather than a change to
-generate_report.py -- this is a one-off analysis for a specific write-up,
-not a general reporting feature.
 
 Usage:
     python analysis/plot_valence_evidence_by_operation.py \\
@@ -50,25 +54,28 @@ import argparse
 import os
 import sys
 
-import numpy as np
-import pandas as pd
-from scipy import stats
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
-from workflows.generate_report import resolve_desc, list_subject_dirs, parse_subjects_arg, subject_paths
+from workflows.generate_report import resolve_desc, list_subject_dirs, parse_subjects_arg
+from analysis.decoding_results_toolkit import (
+    load_decoding_results, select_evidence_value, derive_label,
+    aggregate_by_subject_window, average_across_groups, subtract_baseline,
+    bin_by_size, compare_conditions_by_bin, plot_conditions, STAT_METHODS,
+)
 
-BIN_SIZE_DEFAULT = 3
+# -- the only project-specific knobs; everything downstream is generic
+# (analysis/decoding_results_toolkit.py) --
+VALENCE_MAPPING = {"pos": "WMpos", "neg": "WMneg"}  # task -> condition label (exact match)
+STIMULUS_MAPPING = {"face": "face", "place": "place"}  # trial_type -> group label (regex)
 VALENCE_COLORS = {"pos": "red", "neg": "blue"}
-VALENCE_TASK_MAP = {"WMpos": "pos", "WMneg": "neg"}
+BASELINE_OPERATION = "maintain"
+BIN_SIZE_DEFAULT = 3
 
-
-# =====================================================
-# CLI
-# =====================================================
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -83,141 +90,33 @@ def parse_args():
     )
     parser.add_argument("--bin-size", type=int, default=BIN_SIZE_DEFAULT, help=f"TRs per non-overlapping significance-test bin (default {BIN_SIZE_DEFAULT}).")
     parser.add_argument(
+        "--method", default="ttest_1samp_diff", choices=list(STAT_METHODS),
+        help="Per-bin stat test on the (pos - neg) difference score (default ttest_1samp_diff)."
+    )
+    parser.add_argument(
         "--alternative", default="greater", choices=["greater", "less", "two-sided"],
-        help="One-tailed direction for the per-bin t-test on (pos - neg) difference scores against 0 "
-             "-- \"greater\" (default) tests pos > neg."
+        help="One-tailed direction for the per-bin test -- \"greater\" (default) tests pos > neg."
     )
     parser.add_argument("--output-dir", required=True, help="Where to write the PDF + stats CSVs.")
     return parser.parse_args()
 
 
-# =====================================================
-# Data loading + derived columns
-# =====================================================
-
-def load_group_raw(analysis_output_dir: str, desc: str, subjects: list) -> pd.DataFrame:
-    """Every subject's own decoding_results.csv concatenated -- same file
-    generate_report.py's compile_group_decoding reads, just loaded directly
-    here so this script has no other dependency on generate_report.py's own
-    CLI/report-building code."""
-    frames = []
-    for s in subjects:
-        p = subject_paths(analysis_output_dir, desc, s)
-        if not os.path.exists(p["decoding_raw"]):
-            print(f"  (!) {s}: no decoding_results.csv found -- skipping")
-            continue
-        frames.append(pd.read_csv(p["decoding_raw"], dtype={"subject": str}))
-    if not frames:
-        raise SystemExit("No decoding_results.csv found for any subject in scope.")
-    return pd.concat(frames, ignore_index=True)
-
-
-def add_derived_columns(raw: pd.DataFrame) -> pd.DataFrame:
-    """valence (pos/neg, from task), stimulus (face/place, from trial_type),
-    and self_evidence (evidence_<this row's own regressor_label> -- how much
-    the classifier believed this trial was its own true category) -- rows
-    where valence or stimulus can't be resolved are dropped (counts
-    printed), since they can't participate in either comparison."""
-    df = raw.copy()
-
-    df["valence"] = df["task"].map(VALENCE_TASK_MAP)
-    unresolved_valence = df["valence"].isna().sum()
-    if unresolved_valence:
-        print(f"  (!) {unresolved_valence} row(s) had a task value other than WMpos/WMneg -- dropped")
-    df = df[df["valence"].notna()]
-
-    is_face = df["trial_type"].str.contains("face", case=False, na=False)
-    is_place = df["trial_type"].str.contains("place", case=False, na=False)
-    df["stimulus"] = np.select([is_face, is_place], ["face", "place"], default=None)
-    unresolved_stimulus = (df["stimulus"].isna()).sum()
-    if unresolved_stimulus:
-        print(f"  (!) {unresolved_stimulus} row(s) had no face/place in trial_type -- dropped")
-    df = df[df["stimulus"].notna()]
-
-    evidence_cols = [c for c in df.columns if c.startswith("evidence_")]
-    categories = [c.replace("evidence_", "") for c in evidence_cols]
-    cat_to_col_idx = {c: i for i, c in enumerate(categories)}
-    unknown_op = ~df["regressor_label"].isin(cat_to_col_idx)
-    if unknown_op.any():
-        print(f"  (!) {int(unknown_op.sum())} row(s) had a regressor_label with no matching evidence_ column -- dropped")
-    df = df[~unknown_op]
-
-    evidence_matrix = df[evidence_cols].to_numpy()
-    row_idx = df["regressor_label"].map(cat_to_col_idx).to_numpy()
-    df = df.copy()
-    df["self_evidence"] = evidence_matrix[np.arange(len(df)), row_idx]
-
-    return df
-
-
-# =====================================================
-# Aggregation
-# =====================================================
-
-def per_subject_window_means(df: pd.DataFrame, operation: str) -> dict:
-    """For one operation, returns {"face": wide_df, "place": wide_df,
-    "collapsed": wide_df} -- each wide_df is subject x window_index, one
-    column per valence (pos/neg). "face"/"place" average across every trial
-    sharing that (subject, window_index, valence, stimulus). "collapsed" is
-    the average of the face-only and place-only means -- each stimulus
-    weighted equally regardless of trial-count imbalance, not a direct pool
-    of every trial -- via a concat+groupby-mean, which also means a
-    (subject, window_index) missing from one stimulus simply averages
-    whichever one is actually available there, rather than becoming NaN."""
+def per_operation_means(df: pd.DataFrame, operation: str) -> dict:
+    """{"face": wide_df, "place": wide_df, "collapsed": wide_df} for one
+    operation -- see analysis/decoding_results_toolkit.py's
+    aggregate_by_subject_window/average_across_groups."""
     op_df = df[df["regressor_label"] == operation]
-
-    out = {}
-    for stim in ("face", "place"):
-        subset = op_df[op_df["stimulus"] == stim]
-        grouped = subset.groupby(["subject", "window_index", "valence"])["self_evidence"].mean().unstack("valence")
-        out[stim] = grouped
-    out["collapsed"] = pd.concat([out["face"], out["place"]]).groupby(level=["subject", "window_index"]).mean()
-    return out
+    per_stimulus = {
+        stim: aggregate_by_subject_window(op_df[op_df["stimulus"] == stim], condition_col="valence")
+        for stim in STIMULUS_MAPPING
+    }
+    return {**per_stimulus, "collapsed": average_across_groups(per_stimulus)}
 
 
-def subtract_baseline(op_means: dict, baseline_means: dict) -> dict:
-    """op_means - baseline_means (e.g. maintain), matched on (subject,
-    window_index) via an inner join -- a subject/window/valence missing from
-    either side (e.g. near a trial-count edge case) is simply excluded
-    rather than guessed at."""
-    out = {}
-    for key, op_df in op_means.items():
-        base_df = baseline_means[key]
-        common_cols = [c for c in ("pos", "neg") if c in op_df.columns and c in base_df.columns]
-        aligned_op, aligned_base = op_df[common_cols].align(base_df[common_cols], join="inner")
-        out[key] = aligned_op - aligned_base
-    return out
-
-
-# =====================================================
-# Plotting
-# =====================================================
-
-def _plot_pos_neg_panel(ax, wide_df: pd.DataFrame, title: str):
-    """wide_df: subject x window_index, columns "pos"/"neg" (whichever are
-    present) -- group mean +/- SE across subjects, one line per valence."""
-    for valence, color in VALENCE_COLORS.items():
-        if valence not in wide_df.columns:
-            continue
-        series = wide_df[valence].dropna()
-        if series.empty:
-            continue
-        by_window = series.groupby("window_index")
-        mean = by_window.mean()
-        n = by_window.count()
-        se = by_window.std(ddof=1) / np.sqrt(n)
-        tr = mean.index.to_numpy() + 1  # 1-indexed TR, matching "TRs 1-3" convention
-        ax.fill_between(tr, mean - se, mean + se, alpha=0.2, color=color)
-        ax.plot(tr, mean, color=color, linewidth=1.5, label=valence)
-    ax.set_title(title, fontsize=10)
-    ax.set_xlabel("TR")
-    ax.legend(fontsize=8)
-
-
-def render_operation_page(pdf, operation: str, op_means: dict, suptitle: str):
+def render_operation_page(pdf, op_means: dict, suptitle: str):
     fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharex=True, sharey=True)
     for ax, key in zip(axes, ("face", "place", "collapsed")):
-        _plot_pos_neg_panel(ax, op_means[key], key)
+        plot_conditions(ax, op_means[key], VALENCE_COLORS, title=key)
     axes[0].set_ylabel("classifier evidence (own true category)")
     fig.suptitle(suptitle, fontsize=13, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.93])
@@ -225,48 +124,10 @@ def render_operation_page(pdf, operation: str, op_means: dict, suptitle: str):
     plt.close(fig)
 
 
-# =====================================================
-# Significance testing
-# =====================================================
+def compute_bin_stats(wide_df: pd.DataFrame, bin_size: int, method: str, alternative: str) -> pd.DataFrame:
+    per_subject_bin, bins_meta = bin_by_size(wide_df, bin_size=bin_size)
+    return compare_conditions_by_bin(per_subject_bin, "pos", "neg", method=method, alternative=alternative, bins_meta=bins_meta)
 
-def bin_and_test(wide_df: pd.DataFrame, bin_size: int, alternative: str) -> pd.DataFrame:
-    """wide_df: subject x window_index, columns "pos"/"neg". Bins window_index
-    into non-overlapping chunks of `bin_size` (bin 0 = TRs 1..bin_size, bin 1
-    = the next bin_size TRs, ...), takes each subject's own mean pos and mean
-    neg evidence within a bin, forms a per-subject (pos - neg) difference
-    score, and one-sample t-tests that difference against 0 -- the paired
-    equivalent of a pos-vs-neg comparison, since each subject contributes
-    exactly one difference score per bin."""
-    if "pos" not in wide_df.columns or "neg" not in wide_df.columns:
-        return pd.DataFrame()
-
-    df = wide_df[["pos", "neg"]].dropna().reset_index()
-    df["bin"] = df["window_index"] // bin_size
-
-    rows = []
-    for bin_id, bin_df in df.groupby("bin"):
-        per_subject = bin_df.groupby("subject")[["pos", "neg"]].mean()
-        diff = (per_subject["pos"] - per_subject["neg"]).to_numpy()
-        n = len(diff)
-        if n < 2:
-            continue
-        t_stat, p_value = stats.ttest_1samp(diff, popmean=0.0, alternative=alternative)
-        rows.append({
-            "bin": int(bin_id),
-            "tr_start": int(bin_id * bin_size) + 1,
-            "tr_end": int(bin_id * bin_size) + bin_size,
-            "n_subjects": n,
-            "mean_diff_pos_minus_neg": float(np.mean(diff)),
-            "sd_diff": float(np.std(diff, ddof=1)),
-            "t_stat": float(t_stat),
-            "p_value": float(p_value),
-        })
-    return pd.DataFrame(rows)
-
-
-# =====================================================
-# Main
-# =====================================================
 
 def main():
     args = parse_args()
@@ -275,57 +136,49 @@ def main():
     subjects = list_subject_dirs(args.analysis_output_dir, desc, subjects=subjects_arg)
     print(f"Scope: {len(subjects)} subject(s): {subjects}")
 
-    raw = load_group_raw(args.analysis_output_dir, desc, subjects)
-    df = add_derived_columns(raw)
+    raw = load_decoding_results(args.analysis_output_dir, desc, subjects)
+    df = select_evidence_value(raw, value="self", new_col="value")
+    df = derive_label(df, "task", VALENCE_MAPPING, new_col="valence")
+    df = derive_label(df, "trial_type", STIMULUS_MAPPING, new_col="stimulus", regex=True)
 
-    operations = [c for c in df["regressor_label"].unique()]
-    # config declaration order isn't available here (no config-only
-    # dependency by design) -- "maintain" first if present, since it's the
-    # baseline every other operation gets compared/subtracted against,
-    # otherwise alphabetical
-    operations = sorted(operations, key=lambda o: (o != "maintain", o))
+    operations = sorted(df["regressor_label"].unique(), key=lambda o: (o != BASELINE_OPERATION, o))
     print(f"Operations found: {operations}")
+
+    means_by_operation = {op: per_operation_means(df, op) for op in operations}
 
     os.makedirs(args.output_dir, exist_ok=True)
     pdf_path = os.path.join(args.output_dir, f"{desc}_valence_evidence.pdf")
     stats_rows = []
 
-    means_by_operation = {op: per_subject_window_means(df, op) for op in operations}
-
     with PdfPages(pdf_path) as pdf:
-        # 1. raw pos vs. neg evidence, one page per operation
         for op in operations:
-            render_operation_page(pdf, op, means_by_operation[op], f"{op}: pos vs. neg classifier evidence")
-            for key in ("face", "place", "collapsed"):
-                bin_stats = bin_and_test(means_by_operation[op][key], args.bin_size, args.alternative)
+            render_operation_page(pdf, means_by_operation[op], f"{op}: pos vs. neg classifier evidence")
+            for scope in ("face", "place", "collapsed"):
+                bin_stats = compute_bin_stats(means_by_operation[op][scope], args.bin_size, args.method, args.alternative)
                 if bin_stats.empty:
                     continue
                 bin_stats.insert(0, "operation", op)
-                bin_stats.insert(1, "stimulus_scope", key)
+                bin_stats.insert(1, "stimulus_scope", scope)
                 bin_stats.insert(2, "baseline_subtracted", False)
                 stats_rows.append(bin_stats)
 
-        # 2. maintain-baseline-subtracted, suppress/switch/clear only
-        if "maintain" in means_by_operation:
-            baseline = means_by_operation["maintain"]
+        if BASELINE_OPERATION in means_by_operation:
+            baseline = means_by_operation[BASELINE_OPERATION]
             for op in operations:
-                if op == "maintain":
+                if op == BASELINE_OPERATION:
                     continue
-                adjusted = subtract_baseline(means_by_operation[op], baseline)
-                render_operation_page(
-                    pdf, op, adjusted,
-                    f"{op} minus maintain baseline: pos vs. neg classifier evidence"
-                )
-                for key in ("face", "place", "collapsed"):
-                    bin_stats = bin_and_test(adjusted[key], args.bin_size, args.alternative)
+                adjusted = {scope: subtract_baseline(means_by_operation[op][scope], baseline[scope]) for scope in ("face", "place", "collapsed")}
+                render_operation_page(pdf, adjusted, f"{op} minus {BASELINE_OPERATION} baseline: pos vs. neg classifier evidence")
+                for scope in ("face", "place", "collapsed"):
+                    bin_stats = compute_bin_stats(adjusted[scope], args.bin_size, args.method, args.alternative)
                     if bin_stats.empty:
                         continue
                     bin_stats.insert(0, "operation", op)
-                    bin_stats.insert(1, "stimulus_scope", key)
+                    bin_stats.insert(1, "stimulus_scope", scope)
                     bin_stats.insert(2, "baseline_subtracted", True)
                     stats_rows.append(bin_stats)
         else:
-            print("  (!) no \"maintain\" operation found -- skipping baseline-subtracted pages/stats")
+            print(f"  (!) no {BASELINE_OPERATION!r} operation found -- skipping baseline-subtracted pages/stats")
 
     print(f"PDF written to: {pdf_path}")
 
