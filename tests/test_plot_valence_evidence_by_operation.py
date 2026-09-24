@@ -1,13 +1,13 @@
-"""analysis/plot_valence_evidence_by_operation.py: the thin, project-specific
+"""_interactive_notebooks/plot_valence_evidence_by_operation.py: the thin, project-specific
 wiring (valence/stimulus/baseline-operation choices) on top of
-analysis/decoding_results_toolkit.py's generic building blocks -- the
+_interactive_notebooks/decoding_results_toolkit.py's generic building blocks -- the
 generic mechanics themselves are covered by tests/test_decoding_results_toolkit.py."""
 
 import pandas as pd
 import pytest
 
-from analysis.decoding_results_toolkit import select_evidence_value, derive_label
-from analysis.plot_valence_evidence_by_operation import (
+from _interactive_notebooks.decoding_results_toolkit import select_evidence_value, derive_label
+from _interactive_notebooks.plot_valence_evidence_by_operation import (
     per_operation_means,
     compute_bin_stats,
     VALENCE_MAPPING,

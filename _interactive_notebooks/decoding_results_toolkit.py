@@ -5,7 +5,7 @@ Reusable building blocks for ad-hoc analyses of mvpa_workflow.py's
 decoding_results.csv (raw, one row per decoded TR -- see
 utils.mvpa_common.timecourse_decoding / workflows.generate_report.py's
 compile_group_decoding). Not part of the general report pipeline -- this is
-for one-off, per-project scripts (see analysis/plot_valence_evidence_by_operation.py
+for one-off, per-project scripts (see _interactive_notebooks/plot_valence_evidence_by_operation.py
 for a worked example) that need their own filters/conditions/windows/stats
 without editing shared code.
 
@@ -352,3 +352,25 @@ def plot_conditions(ax, wide_df: pd.DataFrame, colors: dict, window_level: str =
         ax.set_ylabel(ylabel)
     ax.set_xlabel("TR")
     ax.legend(fontsize=8)
+
+
+def annotate_significance(ax, bin_stats: pd.DataFrame, alpha: float = 0.05, color: str = "black",
+                           p_col: str = "p_value", tr_start_col: str = "tr_start", tr_end_col: str = "tr_end"):
+    """Draws a short horizontal bar spanning [tr_start, tr_end] plus a "*"
+    centered above it, for every row of `bin_stats` (e.g. from
+    compare_conditions_by_bin) with p_col < alpha -- a compact way to show
+    exactly which time windows a stat test called significant directly on
+    the timecourse plot itself, rather than only in a separate table.
+    Extends the axes' ylim upward to make room, so it never overlaps the
+    existing lines/bands."""
+    sig = bin_stats[bin_stats[p_col] < alpha]
+    if sig.empty:
+        return
+    ymin, ymax = ax.get_ylim()
+    span = ymax - ymin
+    bar_y = ymax + 0.06 * span
+    star_y = bar_y + 0.03 * span
+    for _, row in sig.iterrows():
+        ax.plot([row[tr_start_col], row[tr_end_col]], [bar_y, bar_y], color=color, linewidth=2, solid_capstyle="butt")
+        ax.text((row[tr_start_col] + row[tr_end_col]) / 2, star_y, "*", ha="center", va="bottom", fontsize=14, color=color)
+    ax.set_ylim(ymin, star_y + 0.08 * span)

@@ -1,4 +1,4 @@
-"""analysis/decoding_results_toolkit.py: the generic, reusable building
+"""_interactive_notebooks/decoding_results_toolkit.py: the generic, reusable building
 blocks (filters, condition derivation, aggregation, baseline subtraction,
 binning, pluggable stats, plotting) that any one-off decoding_results.csv
 analysis script is meant to compose -- see
@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from analysis.decoding_results_toolkit import (
+from _interactive_notebooks.decoding_results_toolkit import (
     load_decoding_results,
     select_evidence_value,
     apply_filters,
@@ -29,6 +29,7 @@ from analysis.decoding_results_toolkit import (
     wilcoxon_signed_rank,
     compare_conditions_by_bin,
     plot_conditions,
+    annotate_significance,
     STAT_METHODS,
 )
 
@@ -368,3 +369,42 @@ class TestPlotConditions:
         plot_conditions(ax, wide, {"pos": "red", "neg": "blue"})
         assert len(ax.lines) == 1
         plt.close(fig)
+
+
+# =====================================================
+# annotate_significance
+# =====================================================
+
+class TestAnnotateSignificance:
+    def test_draws_a_bar_and_star_only_for_significant_bins(self):
+        bin_stats = pd.DataFrame({
+            "tr_start": [1, 4, 7], "tr_end": [3, 6, 9], "p_value": [0.2, 0.001, 0.04],
+        })
+        fig, ax = plt.subplots()
+        ax.plot([1, 9], [0, 1])  # something already on the axes, for a real ylim
+        n_lines_before = len(ax.lines)
+        n_texts_before = len(ax.texts)
+        annotate_significance(ax, bin_stats, alpha=0.05)
+        # one new line (the bar) + one new text ("*") per significant bin (2 of 3)
+        assert len(ax.lines) == n_lines_before + 2
+        assert len(ax.texts) == n_texts_before + 2
+        assert [t.get_text() for t in ax.texts] == ["*", "*"]
+        plt.close(fig)
+
+    def test_no_significant_bins_draws_nothing(self):
+        bin_stats = pd.DataFrame({"tr_start": [1], "tr_end": [3], "p_value": [0.5]})
+        fig, ax = plt.subplots()
+        ax.plot([1, 3], [0, 1])
+        n_lines_before = len(ax.lines)
+        annotate_significance(ax, bin_stats, alpha=0.05)
+        assert len(ax.lines) == n_lines_before
+        assert len(ax.texts) == 0
+        plt.close(fig)
+
+    def test_extends_ylim_to_make_room(self):
+        bin_stats = pd.DataFrame({"tr_start": [1], "tr_end": [3], "p_value": [0.001]})
+        fig, ax = plt.subplots()
+        ax.plot([1, 3], [0, 1])
+        ymin, ymax_before = ax.get_ylim()
+        annotate_significance(ax, bin_stats, alpha=0.05)
+        assert ax.get_ylim()[1] > ymax_before

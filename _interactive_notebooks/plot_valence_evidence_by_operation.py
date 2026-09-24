@@ -6,7 +6,7 @@ positive- vs. negative-valence classifier evidence, per operation, with a
 maintain-baseline-subtracted view and binned significance testing.
 
 This is a thin, project-specific configuration of the reusable building
-blocks in analysis/decoding_results_toolkit.py -- to point this same
+blocks in _interactive_notebooks/decoding_results_toolkit.py -- to point this same
 approach at a different filter/condition/window/stat combination (a
 different operation set, a different valence coding, two-tailed instead of
 one-tailed, a non-parametric test, wider or narrower bins, ...), either
@@ -45,7 +45,7 @@ from the config -- this script only needs --analysis-output-dir and
 --desc/--config to find that file, not the full model_conditions.
 
 Usage:
-    python analysis/plot_valence_evidence_by_operation.py \\
+    python _interactive_notebooks/plot_valence_evidence_by_operation.py \\
         --analysis-output-dir /path/to/out --config configs/config-kfold.clearvale-operation.json \\
         --subjects configs/subject-list.txt --output-dir ./valence_evidence_analysis
 """
@@ -62,14 +62,14 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 from workflows.generate_report import resolve_desc, list_subject_dirs, parse_subjects_arg
-from analysis.decoding_results_toolkit import (
+from _interactive_notebooks.decoding_results_toolkit import (
     load_decoding_results, select_evidence_value, derive_label,
     aggregate_by_subject_window, average_across_groups, subtract_baseline,
     bin_by_size, compare_conditions_by_bin, plot_conditions, STAT_METHODS,
 )
 
 # -- the only project-specific knobs; everything downstream is generic
-# (analysis/decoding_results_toolkit.py) --
+# (_interactive_notebooks/decoding_results_toolkit.py) --
 VALENCE_MAPPING = {"pos": "WMpos", "neg": "WMneg"}  # task -> condition label (exact match)
 STIMULUS_MAPPING = {"face": "face", "place": "place"}  # trial_type -> group label (regex)
 VALENCE_COLORS = {"pos": "red", "neg": "blue"}
@@ -103,7 +103,7 @@ def parse_args():
 
 def per_operation_means(df: pd.DataFrame, operation: str) -> dict:
     """{"face": wide_df, "place": wide_df, "collapsed": wide_df} for one
-    operation -- see analysis/decoding_results_toolkit.py's
+    operation -- see _interactive_notebooks/decoding_results_toolkit.py's
     aggregate_by_subject_window/average_across_groups."""
     op_df = df[df["regressor_label"] == operation]
     per_stimulus = {
