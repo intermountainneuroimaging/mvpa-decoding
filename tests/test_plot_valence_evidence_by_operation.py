@@ -78,17 +78,31 @@ class TestAddDerivedColumns:
 
 
 class TestPerSubjectWindowMeans:
-    def test_collapses_pools_face_and_place_directly(self):
+    def test_collapsed_averages_the_face_and_place_means(self):
+        # unequal trial counts per stimulus -- distinguishes "average of the
+        # two stimulus means" (0.8 + 0.6) / 2 = 0.7 from "pool every trial
+        # directly" ((0.8*2 + 0.6*1) / 3 = 0.733), which would give a
+        # different number here
         raw = pd.DataFrame([
-            _raw_row("01", 0, "maintain", "WM_maintain_face", "WMpos", maintain=0.8, suppress=0.2),
+            _raw_row("01", 0, "maintain", "WM_maintain_face", "WMpos", maintain=0.9, suppress=0.1),
+            _raw_row("01", 0, "maintain", "WM_maintain_face", "WMpos", maintain=0.7, suppress=0.3),
             _raw_row("01", 0, "maintain", "WM_maintain_place", "WMpos", maintain=0.6, suppress=0.4),
         ])
         df = add_derived_columns(raw)
         means = per_subject_window_means(df, "maintain")
-        # collapsed pools both trials together: (0.8 + 0.6) / 2 = 0.7
-        assert means["collapsed"].loc[("01", 0), "pos"] == pytest.approx(0.7)
-        assert means["face"].loc[("01", 0), "pos"] == pytest.approx(0.8)
+        assert means["face"].loc[("01", 0), "pos"] == pytest.approx(0.8)  # mean(0.9, 0.7)
         assert means["place"].loc[("01", 0), "pos"] == pytest.approx(0.6)
+        assert means["collapsed"].loc[("01", 0), "pos"] == pytest.approx(0.7)  # mean(0.8, 0.6), not mean(0.9,0.7,0.6)
+
+    def test_collapsed_averages_whichever_stimulus_is_available_when_one_is_missing(self):
+        # subject/window has only a face trial for this operation -- collapsed
+        # should just use that, not become NaN for lack of a place trial too
+        raw = pd.DataFrame([
+            _raw_row("01", 0, "maintain", "WM_maintain_face", "WMpos", maintain=0.9, suppress=0.1),
+        ])
+        df = add_derived_columns(raw)
+        means = per_subject_window_means(df, "maintain")
+        assert means["collapsed"].loc[("01", 0), "pos"] == pytest.approx(0.9)
 
     def test_only_selects_rows_for_the_given_operation(self):
         raw = pd.DataFrame([

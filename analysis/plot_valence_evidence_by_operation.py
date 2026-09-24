@@ -12,10 +12,12 @@ classifier's *self*-evidence (evidence_<that row's own true category>) over
 time, split into WMpos ("pos", red) vs. WMneg ("neg", blue) trials:
 
   1. Raw evidence, one page per operation, 3 panels: face-only, place-only,
-     and collapsed across stimulus (pooling every trial regardless of
-     face/place) -- the face/place split is purely a sanity check (are there
-     odd stimulus-specific differences?); the collapsed panel is the one
-     that matters for the pos-vs-neg question itself.
+     and collapsed across stimulus (the average of the face-only and
+     place-only means, giving each stimulus equal weight regardless of
+     trial-count imbalance -- not a direct pool of every trial) -- the
+     face/place split is purely a sanity check (are there odd
+     stimulus-specific differences?); the collapsed panel is the one that
+     matters for the pos-vs-neg question itself.
   2. The same, for suppress/switch/clear only, with maintain's own
      (subject- and window-matched) evidence subtracted out first -- does a
      removal operation's pos/neg pattern look different from maintain's own,
@@ -155,10 +157,13 @@ def add_derived_columns(raw: pd.DataFrame) -> pd.DataFrame:
 def per_subject_window_means(df: pd.DataFrame, operation: str) -> dict:
     """For one operation, returns {"face": wide_df, "place": wide_df,
     "collapsed": wide_df} -- each wide_df is subject x window_index, one
-    column per valence (pos/neg), averaged across every trial sharing that
-    (subject, window_index, valence[, stimulus]) -- "collapsed" pools face
-    and place trials together directly (not an average of the two stimulus
-    means), matching "classifier evidence regardless of stimulus type"."""
+    column per valence (pos/neg). "face"/"place" average across every trial
+    sharing that (subject, window_index, valence, stimulus). "collapsed" is
+    the average of the face-only and place-only means -- each stimulus
+    weighted equally regardless of trial-count imbalance, not a direct pool
+    of every trial -- via a concat+groupby-mean, which also means a
+    (subject, window_index) missing from one stimulus simply averages
+    whichever one is actually available there, rather than becoming NaN."""
     op_df = df[df["regressor_label"] == operation]
 
     out = {}
@@ -166,7 +171,7 @@ def per_subject_window_means(df: pd.DataFrame, operation: str) -> dict:
         subset = op_df[op_df["stimulus"] == stim]
         grouped = subset.groupby(["subject", "window_index", "valence"])["self_evidence"].mean().unstack("valence")
         out[stim] = grouped
-    out["collapsed"] = op_df.groupby(["subject", "window_index", "valence"])["self_evidence"].mean().unstack("valence")
+    out["collapsed"] = pd.concat([out["face"], out["place"]]).groupby(level=["subject", "window_index"]).mean()
     return out
 
 
