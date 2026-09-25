@@ -85,18 +85,11 @@ source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 # get subject for this array task
 subject=`ls -d $BIDS_HCP_ROOT/sub-* | rev | cut -d"/" -f1 | rev | cut -d"-" -f2 | sed -n "$SLURM_ARRAY_TASK_ID p"`
 
-# only needed when this config's model_conditions.timecourse_decoding is
-# configured -- see resolve_pipeline_config.sh's header comment
-FULL_FRAME_ARGS=()
-if [ -n "$FULL_FRAME_MASTER_SPREADSHEET" ]; then
-    FULL_FRAME_ARGS=(--full-frame-spreadsheet "$FULL_FRAME_MASTER_SPREADSHEET")
-fi
-
 # --------------------------------------------
 # gm operation (maintain/suppress/switch/clear) classifier
 # --------------------------------------------
 python "$SCRIPTS_DIR/workflows/mvpa_workflow.py" --subject $subject --config $CONFIG_FILE \
-    --master-spreadsheet $MASTER_SPREADSHEET --analysis-output-dir $OUTPUT_DIR "${FULL_FRAME_ARGS[@]}"
+    --master-spreadsheet $MASTER_SPREADSHEET --analysis-output-dir $OUTPUT_DIR
 
 python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR --config $CONFIG_FILE \
-    --subject $subject "${FULL_FRAME_ARGS[@]}"
+    --master-spreadsheet $MASTER_SPREADSHEET --subject $subject

@@ -9,8 +9,7 @@
     "events_glob": "**/*_events.tsv",
     "hemodynamic_lag": 4.0,
     "output_file": "master_spreadsheet_haxby.csv",
-    "expected_events_file": "tutorial/expected_events_haxby.example.json",
-    "full_frame_output_file": "master_spreadsheet_haxby_full.csv"
+    "expected_events_file": "tutorial/expected_events_haxby.example.json"
   },
   "model_conditions": {
     "training": {

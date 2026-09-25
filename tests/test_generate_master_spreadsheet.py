@@ -11,26 +11,10 @@ import pandas as pd
 import pytest
 
 from workflows.generate_master_spreadsheet import (
-    is_excluded_trial_type,
     find_bold_file,
     process_events_file,
-    process_events_file_full_frame,
     main,
 )
-
-
-# =====================================================
-# is_excluded_trial_type
-# =====================================================
-
-class TestIsExcludedTrialType:
-    @pytest.mark.parametrize("trial_type", ["fixation", "Fixation", "start_block", "end_block", "postrt", "trial_postrt_x"])
-    def test_excluded_types(self, trial_type):
-        assert is_excluded_trial_type(trial_type) is True
-
-    @pytest.mark.parametrize("trial_type", ["face", "place", "view_face", "suppress_place"])
-    def test_non_excluded_types(self, trial_type):
-        assert is_excluded_trial_type(trial_type) is False
 
 
 # =====================================================
@@ -72,8 +56,9 @@ class TestFindBoldFile:
 @pytest.fixture
 def bids_run(tmp_path):
     """A tiny real NIfTI (TR=1.0s, 20 frames) + a matching events.tsv with a mix
-    of valid, excluded, and invalid rows -- named/located so find_bold_file's
-    default (no bold_glob) lookup finds the NIfTI from the events.tsv path."""
+    of administrative, invalid, and real rows -- named/located so
+    find_bold_file's default (no bold_glob) lookup finds the NIfTI from the
+    events.tsv path."""
     data = np.random.default_rng(0).random((4, 4, 4, 20)).astype(np.float32)
     img = nib.Nifti1Image(data, np.eye(4))
     img.header.set_zooms((2.0, 2.0, 2.0, 1.0))  # TR = 1.0s
@@ -81,8 +66,8 @@ def bids_run(tmp_path):
 
     events = pd.DataFrame([
         {"onset": 0.0, "duration": 2.0, "trial_type": "face"},
-        {"onset": 3.0, "duration": 2.0, "trial_type": "fixation"},   # excluded
-        {"onset": 6.0, "duration": float("nan"), "trial_type": "place"},  # invalid
+        {"onset": 3.0, "duration": 2.0, "trial_type": "fixation"},   # administrative, but not excluded here
+        {"onset": 6.0, "duration": float("nan"), "trial_type": "place"},  # invalid -- never covers anything
         {"onset": 9.0, "duration": 2.0, "trial_type": "place"},
     ])
     events_path = tmp_path / "sub-01_task-test_run-01_events.tsv"
@@ -91,43 +76,12 @@ def bids_run(tmp_path):
 
 
 class TestProcessEventsFile:
-    def test_excludes_administrative_and_invalid_rows(self, bids_run):
+    def test_one_row_per_volume_including_administrative_types(self, bids_run):
         events_path, derivatives_root = bids_run
-        table = process_events_file(events_path, derivatives_root, hemodynamic_lag=0.0)
-        # 2 valid trials (face, place) remain; fixation + NaN-duration dropped
-        assert set(table["trial_type"].unique()) == {"face", "place"}
-
-    def test_trial_index_is_contiguous_over_kept_rows(self, bids_run):
-        events_path, derivatives_root = bids_run
-        table = process_events_file(events_path, derivatives_root, hemodynamic_lag=0.0)
-        assert sorted(table["trial_index"].unique().tolist()) == [1, 2]
-
-    def test_one_row_per_volume(self, bids_run):
-        events_path, derivatives_root = bids_run
-        table = process_events_file(events_path, derivatives_root, hemodynamic_lag=0.0)
-        # each 2.0s trial at TR=1.0s -> 2 volumes -> 2 rows per trial, 2 trials = 4 rows
-        assert len(table) == 4
-
-    def test_missing_bold_file_returns_none(self, tmp_path):
-        events = pd.DataFrame([{"onset": 0.0, "duration": 2.0, "trial_type": "face"}])
-        events_path = tmp_path / "sub-99_task-test_run-01_events.tsv"
-        events.to_csv(events_path, sep="\t", index=False)
-        result = process_events_file(str(events_path), str(tmp_path), hemodynamic_lag=0.0)
-        assert result is None
-
-
-# =====================================================
-# process_events_file_full_frame
-# =====================================================
-
-class TestProcessEventsFileFullFrame:
-    def test_one_row_per_volume_including_excluded_types(self, bids_run):
-        events_path, derivatives_root = bids_run
-        table = process_events_file_full_frame(events_path, derivatives_root)
-        # 20-frame run -> exactly one row per volume, unlike process_events_file
+        table = process_events_file(events_path, derivatives_root)
+        # 20-frame run -> exactly one row per volume, nothing excluded/dropped
         assert table["volume_of_interest"].tolist() == list(range(20))
 
-        # fixation is excluded by process_events_file but must still appear here
         by_vol = table.set_index("volume_of_interest")["trial_type"]
         assert by_vol.loc[0] == "face" and by_vol.loc[1] == "face"
         assert by_vol.loc[3] == "fixation" and by_vol.loc[4] == "fixation"
@@ -138,31 +92,35 @@ class TestProcessEventsFileFullFrame:
         assert pd.isna(by_vol.loc[2])
         assert pd.isna(by_vol.loc[19])
 
+    def test_event_index_is_contiguous_over_valid_events(self, bids_run):
+        events_path, derivatives_root = bids_run
+        table = process_events_file(events_path, derivatives_root)
+        # face, fixation, place (the NaN-duration "place" row is invalid, never assigned an event_index)
+        assert sorted(table["event_index"].dropna().unique().tolist()) == [1, 2, 3]
+
     def test_missing_bold_file_returns_none(self, tmp_path):
         events = pd.DataFrame([{"onset": 0.0, "duration": 2.0, "trial_type": "face"}])
         events_path = tmp_path / "sub-99_task-test_run-01_events.tsv"
         events.to_csv(events_path, sep="\t", index=False)
-        result = process_events_file_full_frame(str(events_path), str(tmp_path))
+        result = process_events_file(str(events_path), str(tmp_path))
         assert result is None
 
 
 # =====================================================
-# main(): event_extraction.full_frame_output_file wiring
+# main()
 # =====================================================
 
-class TestMainFullFrameOutput:
-    def _config(self, tmp_path, output_file, full_frame_output_file=None):
+class TestMain:
+    def _config(self, tmp_path, output_file):
         event_extraction = {
             "bids_root": str(tmp_path),
             "output_file": str(output_file),
         }
-        if full_frame_output_file is not None:
-            event_extraction["full_frame_output_file"] = str(full_frame_output_file)
         config_path = tmp_path / "config.json"
         config_path.write_text(json.dumps({"event_extraction": event_extraction}))
         return str(config_path)
 
-    def test_omitted_writes_only_master_spreadsheet(self, tmp_path, bids_run, monkeypatch):
+    def test_writes_one_row_per_volume(self, tmp_path, bids_run, monkeypatch):
         _events_path, _derivatives_root = bids_run  # writes the NIfTI/events.tsv under tmp_path
         output_file = tmp_path / "master_spreadsheet.csv"
         config_path = self._config(tmp_path, output_file)
@@ -171,18 +129,5 @@ class TestMainFullFrameOutput:
         main()
 
         assert output_file.exists()
-        assert not (tmp_path / "master_spreadsheet_full.csv").exists()
-
-    def test_set_writes_full_frame_spreadsheet_too(self, tmp_path, bids_run, monkeypatch):
-        _events_path, _derivatives_root = bids_run
-        output_file = tmp_path / "master_spreadsheet.csv"
-        full_frame_output_file = tmp_path / "master_spreadsheet_full.csv"
-        config_path = self._config(tmp_path, output_file, full_frame_output_file)
-
-        monkeypatch.setattr(sys, "argv", ["generate_master_spreadsheet.py", "--config", config_path])
-        main()
-
-        assert output_file.exists()
-        assert full_frame_output_file.exists()
-        full_table = pd.read_csv(full_frame_output_file)
-        assert len(full_table) == 20  # one row per volume of the 20-frame bids_run fixture
+        table = pd.read_csv(output_file)
+        assert len(table) == 20  # one row per volume of the 20-frame bids_run fixture

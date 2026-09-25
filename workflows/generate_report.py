@@ -16,23 +16,21 @@ Usage:
     # desc is read from --config's model.desc, same sanitization the workflow
     # scripts use, so it always matches where they actually wrote output
     python generate_report.py --analysis-output-dir ./out \\
-        --config examples/config-generalization.example.json \\
-        --full-frame-spreadsheet master_spreadsheet_full.csv
+        --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
 
     # single-subject report -- scoped to just <dir>/<desc>/4057/
     python generate_report.py --analysis-output-dir ./out --subject 4057 \\
-        --config examples/config-generalization.example.json \\
-        --full-frame-spreadsheet master_spreadsheet_full.csv
+        --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
 
     # --desc still works directly, if you'd rather not point at a config
     python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier
 
 Exactly one of --desc/--config is required, to know which classifier's
-output to read. --full-frame-spreadsheet is always optional, and --config's
+output to read. --master-spreadsheet is always optional, and --config's
 timecourse_decoding trial_start_event/conditions/overlay are used for
 annotation best-effort even when --desc is also given -- without
---full-frame-spreadsheet (or without --config at all) the report still
-renders, just without those per-event timing annotations.
+--master-spreadsheet (or without --config at all) the report still renders,
+just without those per-event timing annotations.
 """
 
 import argparse
@@ -94,11 +92,11 @@ def parse_args():
              "only if --desc is given explicitly."
     )
     parser.add_argument(
-        "--full-frame-spreadsheet", default=None,
-        help="The full-frame spreadsheet (event_extraction.full_frame_output_file) -- needed to annotate "
-             "the timecourse page with real per-trial event timing (onset/duration of every real event "
-             "type observed inside a trial). Optional; without it the timecourse page still renders, "
-             "just without those annotations."
+        "--master-spreadsheet", default=None,
+        help="master_spreadsheet.csv produced by generate_master_spreadsheet.py -- needed to annotate the "
+             "timecourse page with real per-trial event timing (onset/duration of every real event type "
+             "observed inside a trial). Optional; without it the timecourse page still renders, just "
+             "without those annotations."
     )
     parser.add_argument("--output", default=None, help="Output PDF path. Defaults to <dir>/<desc>/report_<desc>.pdf (group) or <dir>/<desc>/<subject>/report_<subject>.pdf (single-subject).")
     return parser.parse_args()
@@ -483,7 +481,7 @@ def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, 
     return sorted(markers, key=lambda m: m["mean_start"])
 
 
-def load_annotation_info(config_path, full_frame_spreadsheet_path):
+def load_annotation_info(config_path, master_spreadsheet_path):
     """Returns (event_markers, tr, overlay_conditions), any of which may be
     None/empty if the optional inputs are missing or insufficient --
     annotation is strictly best-effort and never blocks the rest of the
@@ -499,13 +497,13 @@ def load_annotation_info(config_path, full_frame_spreadsheet_path):
     absent) -- see summarize_raw_for_timecourse/resolve_overlay_styles for
     how it's used (filtering/labeling and, via each entry's own optional
     "color"/"line_type", the timecourse page's per-trace styling)."""
-    if not config_path or not full_frame_spreadsheet_path:
+    if not config_path or not master_spreadsheet_path:
         return [], None, {}
     if not os.path.isfile(config_path):
         print(f"(!) --config {config_path} not found -- skipping timecourse annotation")
         return [], None, {}
-    if not os.path.isfile(full_frame_spreadsheet_path):
-        print(f"(!) --full-frame-spreadsheet {full_frame_spreadsheet_path} not found -- skipping timecourse annotation")
+    if not os.path.isfile(master_spreadsheet_path):
+        print(f"(!) --master-spreadsheet {master_spreadsheet_path} not found -- skipping timecourse annotation")
         return [], None, {}
 
     with open(config_path) as f:
@@ -521,7 +519,7 @@ def load_annotation_info(config_path, full_frame_spreadsheet_path):
     annotation_labels = tc_cfg.get("annotation_labels", {})
 
     full_frame = pd.read_csv(
-        full_frame_spreadsheet_path, dtype={"subject": str, "session": str, "task": str, "trial_type": str}
+        master_spreadsheet_path, dtype={"subject": str, "session": str, "task": str, "trial_type": str}
     )
     event_markers = (
         compute_event_markers(full_frame, trial_start_event, timecourse_conditions, annotation_labels)
@@ -1599,7 +1597,7 @@ def main():
     subjects = list_subject_dirs(args.analysis_output_dir, desc, args.subject, subjects_arg)
     fold_flags = {s: has_fold_files(args.analysis_output_dir, desc, s) for s in subjects}
     regressor_categories = infer_categories(args.analysis_output_dir, desc, subjects)
-    event_markers, tr, overlay_conditions = load_annotation_info(args.config, args.full_frame_spreadsheet)
+    event_markers, tr, overlay_conditions = load_annotation_info(args.config, args.master_spreadsheet)
     mnispace = resolve_mnispace(args.config)
 
     if args.output:

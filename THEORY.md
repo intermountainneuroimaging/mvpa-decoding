@@ -56,24 +56,24 @@ within a trial, not just whether it can be decoded at all.
 ## Timecourse decoding: the central logic of the paper
 
 The paper's key analytic move -- and the reason `model_conditions.timecourse_decoding`
-has its own independent `window` rather than reusing whatever window built
-`master_spreadsheet.csv` -- is to apply the trained classifier at **every TR**
-across a window locked to trial onset (the paper used 13.8 s / 30 TRs,
-unshifted from onset), producing a trial-averaged time series of classifier
-evidence for the originally-encoded item's category. Comparing this evidence
-trajectory across operations against a `maintain` baseline is how the paper
-answers its central question: an operation that drives classifier evidence
-down faster or further than simply maintaining the item is evidence that the
-item's representation is being actively removed from the focus of attention,
-not just passively decaying.
+never applies `hemodynamic_lag` the way `training`/`testing` do -- is to apply
+the trained classifier at **every TR** across a window locked to trial onset
+(the paper used 13.8 s / 30 TRs, unshifted from onset), producing a
+trial-averaged time series of classifier evidence for the originally-encoded
+item's category. Comparing this evidence trajectory across operations against
+a `maintain` baseline is how the paper answers its central question: an
+operation that drives classifier evidence down faster or further than simply
+maintaining the item is evidence that the item's representation is being
+actively removed from the focus of attention, not just passively decaying.
 
 This repo's `mvpa_workflow.py` reproduces that logic directly:
-`build_timecourse_instructions()` recomputes, per trial, exactly this kind of
-onset-locked window (via `onset`/`duration`/`trial_index`, independent of the
-`hemodynamic_lag` used to build the table), predicts the trained classifier at
-every resulting volume, and reports evidence/accuracy per relative
-`window_index` -- the same shape of result as the paper's Fig. 4a/4b decoding
-time series.
+`build_timecourse_instructions()` partitions each run into onset-locked trials
+anchored on `trial_start_event` (unshifted, independent of the
+`hemodynamic_lag` `training`/`testing` apply via `label_conditions_with_lag`),
+predicts the trained classifier at **every** resulting volume (real
+rest/fixation frames included, not excluded), and reports evidence/accuracy
+per relative `window_index` -- the same shape of result as the paper's
+Fig. 4a/4b decoding time series.
 
 ## Where each output maps back to the paper
 

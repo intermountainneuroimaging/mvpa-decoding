@@ -11,15 +11,17 @@ only writes its own output) when its config section is present:
                                training-labeled data).
   2. model_conditions.testing        -- one fit on the complete training set,
                                evaluated against a genuinely separate test set.
-  3. model_conditions.timecourse_decoding -- predicts at every TR of every run in
-                               the full-frame spreadsheet (event_extraction.
-                               full_frame_output_file), continuously and without
-                               exclusions, using that same complete-training-set
-                               fit (never per-fold) -- unless step 2's guard below
-                               substitutes a held-out k-fold classifier instead.
-                               Rows are grouped into trials anchored on
-                               trial_start_event, with window_index counting up
-                               from 0 at each anchor.
+  3. model_conditions.timecourse_decoding -- predicts at every TR of every run,
+                               continuously and without exclusions, using that
+                               same complete-training-set fit (never per-fold)
+                               -- unless step 2's guard below substitutes a
+                               held-out k-fold classifier instead. Rows are
+                               grouped into trials anchored on trial_start_event,
+                               with window_index counting up from 0 at each
+                               anchor. Unlike training/testing (step 2, and
+                               transitively model.kfold_cv), this never applies
+                               event_extraction.hemodynamic_lag -- see
+                               README.md section 4.
 
 The complete-training-set classifier (step 2/3's "full model") is always fit,
 regardless of which of the above are configured, since timecourse decoding
@@ -63,9 +65,9 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
 
   model_conditions.timecourse_decoding configured -- always the complete-training
   classifier, never per-fold:
-    decoding/<subject>_decoding_results.csv             -- raw, one row per BOLD volume in the
-                                                            full-frame spreadsheet (every frame,
-                                                            no exclusions), real trial_type per row
+    decoding/<subject>_decoding_results.csv             -- raw, one row per BOLD volume of every
+                                                            qualifying boldfile (every frame, no
+                                                            exclusions), real trial_type per row
     decoding/<subject>_summary_decoding_results.csv     -- averaged per (window_index, regressor_label)
 
 `model/` is therefore exclusively k-fold's directory, `test/` is exclusively
@@ -77,8 +79,7 @@ utils.mvpa_common.impa_tag.
 Usage:
     python mvpa_workflow.py --subject 4057 \\
         --config examples/config-generalization.example.json \\
-        --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out \\
-        [--full-frame-spreadsheet master_spreadsheet_full.csv]  # only needed for timecourse_decoding
+        --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out
 """
 
 import os
@@ -91,7 +92,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
 from utils.mvpa_common import (
-    build_trial_pivot_table, quick_safe, label_rows,
+    build_trial_pivot_table, quick_safe, label_conditions_with_lag, label_rows_optional,
     track_runtime, load_config, apply_regressor_codes,
     load_images_and_mask, build_timecourse_instructions,
     model_classification, model_performance, permutation_significance,
@@ -132,15 +133,6 @@ def parse_args():
         "--master-spreadsheet",
         required=True,
         help="Path to master_spreadsheet.csv produced by generate_master_spreadsheet.py"
-    )
-
-    parser.add_argument(
-        "--full-frame-spreadsheet",
-        default=None,
-        help="Path to the full-frame spreadsheet produced by generate_master_spreadsheet.py's "
-             "event_extraction.full_frame_output_file -- required only when "
-             "model_conditions.timecourse_decoding is configured (one row per BOLD volume, "
-             "real per-frame trial_type, no exclusions)."
     )
 
     return parser.parse_args()
@@ -389,10 +381,14 @@ def main(args):
     subject_id = args.subject
     analysis_output_dir = args.analysis_output_dir
     master_spreadsheet_file = args.master_spreadsheet
-    full_frame_spreadsheet_file = args.full_frame_spreadsheet
 
     full_cfg = load_config(args.config)
     model_conditions = full_cfg["model_conditions"]
+    # applied only when selecting which volumes of a matched training/testing
+    # event to use (label_conditions_with_lag) -- the BOLD response peaks
+    # several seconds after the real-world event, not during it.
+    # timecourse_decoding never applies this; see README.md section 4.
+    hemodynamic_lag = full_cfg.get("event_extraction", {}).get("hemodynamic_lag", 0)
 
     training_conditions = model_conditions["training"]["conditions"]
     # optional -- omit either section entirely to skip that step: no test/ or
@@ -402,12 +398,6 @@ def main(args):
     timecourse_cfg = model_conditions.get("timecourse_decoding")
     timecourse_conditions = timecourse_cfg["conditions"] if timecourse_cfg else None
     trial_start_event = timecourse_cfg["trial_start_event"] if timecourse_cfg else None
-    if timecourse_cfg is not None and not full_frame_spreadsheet_file:
-        raise SystemExit(
-            "model_conditions.timecourse_decoding is configured but --full-frame-spreadsheet "
-            "wasn't given -- continuous timecourse decoding reads its own full-frame spreadsheet "
-            "(event_extraction.full_frame_output_file), not master_spreadsheet.csv."
-        )
 
     # class label order shared across training/testing/timecourse regressor codes
     regressor_categories = list(training_conditions.keys())
@@ -464,20 +454,15 @@ def main(args):
     # Load Data
     # -------------------------------------------------
 
-    training_df = apply_regressor_codes(label_rows(subject_df, training_conditions), regressor_categories)
+    training_df = apply_regressor_codes(
+        label_conditions_with_lag(subject_df, training_conditions, hemodynamic_lag), regressor_categories
+    )
     testing_df = (
-        apply_regressor_codes(label_rows(subject_df, testing_conditions), regressor_categories)
+        apply_regressor_codes(label_conditions_with_lag(subject_df, testing_conditions, hemodynamic_lag), regressor_categories)
         if testing_conditions is not None else None
     )
     if timecourse_cfg is not None:
-        full_frame = pd.read_csv(
-            full_frame_spreadsheet_file,
-            dtype={"subject": str, "session": str, "task": str, "trial_type": str}
-        )
-        full_frame_subject_df = full_frame[full_frame["subject"] == subject_id]
-        if full_frame_subject_df.empty:
-            raise SystemExit(f"No rows found for subject {subject_id!r} in {full_frame_spreadsheet_file}")
-        timecourse_instr = build_timecourse_instructions(full_frame_subject_df, timecourse_conditions, trial_start_event)
+        timecourse_instr = build_timecourse_instructions(subject_df, timecourse_conditions, trial_start_event)
         timecourse_instr = apply_regressor_codes(timecourse_instr, regressor_categories)
     else:
         timecourse_instr = None
@@ -575,18 +560,25 @@ def main(args):
     # rows now, since k-fold no longer touches testing rows at all).
     # -------------------------------------------------
 
+    # which condition (if any) each row's own real trial_type matches --
+    # evaluated directly against subject_df, independent of
+    # label_conditions_with_lag's hemodynamic_lag-shifted volume selection
+    # (training_df/testing_df no longer share subject_df's row index, since a
+    # matched event's selected volumes can differ from its own), so this is
+    # exactly "which condition does this event belong to" regardless of which
+    # lagged volumes end up used for fitting.
     pivot_source = subject_df.copy()
-    pivot_source["training_condition"] = training_df["regressor_label"].reindex(pivot_source.index)
-    if testing_df is not None:
-        pivot_source["testing_condition"] = testing_df["regressor_label"].reindex(pivot_source.index)
+    pivot_source["training_condition"] = label_rows_optional(subject_df, training_conditions)["regressor_label"]
+    if testing_conditions is not None:
+        pivot_source["testing_condition"] = label_rows_optional(subject_df, testing_conditions)["regressor_label"]
     if fold_groups is not None:
         for fold_id, held_out_runs in enumerate(fold_groups, start=1):
             held_out_runs = set(held_out_runs)
-            in_training = pivot_source.index.isin(training_df.index)
+            in_training = pivot_source["training_condition"].notna()
             is_train = in_training & (~pivot_source["run"].isin(held_out_runs))
             is_test = in_training & (pivot_source["run"].isin(held_out_runs))
             pivot_source[f"fold{fold_id}_split"] = np.select([is_train, is_test], ["train", "test"], default="")
-    trial_pivot = build_trial_pivot_table(pivot_source)
+    trial_pivot = build_trial_pivot_table(pivot_source, group_cols=("boldfile", "event_index"))
     output_file = os.path.join(analysis_output_dir, model_descr, subject_id, f"{subject_id}_trial_pivot.csv")
     Path(os.path.dirname(output_file)).mkdir(parents=True, exist_ok=True)
     trial_pivot.to_csv(output_file, index=False)

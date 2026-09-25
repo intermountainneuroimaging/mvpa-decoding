@@ -24,9 +24,9 @@ present: `model.kfold_cv` cross-validates entirely within
 `model_conditions.testing` evaluates one classifier fit on the complete
 training set against a genuinely separate test set (optional -- section 4,
 output under `test/`); `model_conditions.timecourse_decoding` continuously
-decodes every BOLD volume of every run (from the full-frame spreadsheet, see
-section 3), grouped into trials anchored on `trial_start_event`, using that
-same complete-training-set fit (section 4, output under `decoding/`). Any
+decodes every BOLD volume of every run, grouped into trials anchored on
+`trial_start_event`, using that same complete-training-set fit (section 4,
+output under `decoding/`). Any
 combination -- one, two, all three, or none of them beyond the sanity-check
 trial pivot table -- is valid in a single run; see
 [section 6](#6-running-workflowsmvpa_workflowpy) for the full breakdown. All
@@ -140,7 +140,7 @@ Read by `generate_master_spreadsheet.py`.
 |---|---|
 | `bids_root` | Directory to search under for events.tsv files. |
 | `events_glob` | Glob (supports `**`) used to find events.tsv files under `bids_root`. |
-| `hemodynamic_lag` | Seconds added to every event's `onset` before converting to volume indices. Override per-run with `--hemodynamic-lag`. |
+| `hemodynamic_lag` | Seconds added to a matched event's `onset` before selecting volumes for **training/testing** (and, transitively, `model.kfold_cv`) -- read here, but applied later, by `mvpa_workflow.py` (section 4/6), not by this script. `generate_master_spreadsheet.py` itself ignores it entirely; `model_conditions.timecourse_decoding` never applies it either. |
 | `output_file` | Where the resulting table is written. Override with `--output`. |
 | `expected_events_file` | *(optional)* Path to a template of expected `trial_type` values -- see below. Override with `--expected-events`. |
 | `derivatives_root` | *(optional)* Directory to search under for BOLD files, if different from `bids_root` -- e.g. a separate fMRIPrep `derivatives/` tree. Omit the key (or set it to `null`) to inherit `bids_root`. Setting it to `""` is **not** the same as omitting it -- an explicit empty string is honored literally (resolves to the current working directory) and prints a warning, since that's almost never what's intended. See [Using preprocessed/derivative data](#using-preprocessedderivative-data-eg-fmriprep). |
@@ -176,16 +176,19 @@ immediately as an unexpected value here.
 python workflows/generate_master_spreadsheet.py --config tutorial/config-haxby.example.json
 ```
 
-Output (`master_spreadsheet_haxby.csv`) -- one row per BOLD volume that overlapped
-an event's active window:
+Output (`master_spreadsheet_haxby.csv`) -- one row per BOLD volume,
+`0..n_frames-1`, for every processed run. Nothing is excluded and no
+`hemodynamic_lag` shift is applied here -- every real event (administrative
+rows like `fixation` included) gets its own frames, verbatim onset/duration,
+and a volume covered by no event at all gets a blank `trial_type`/`onset`/
+`duration`/`event_index` rather than being skipped:
 
 | Column | Meaning |
 |---|---|
 | `subject`, `session`, `task`, `run` | *Inferred* from the events filename. |
-| `volume_of_interest` | *Computed*: the BOLD frame index, from `onset + hemodynamic_lag` through `onset + hemodynamic_lag + duration`, using the BOLD file's own TR, clipped to its frame count. |
-| `trial_type` | Verbatim from the events file -- never reinterpreted, split, or renamed. |
-| `trial_index` | *Computed*: 1-based sequential index (in onset order) among this run's *retained* events -- i.e. after the hardcoded exclusions below, so it's always contiguous. Identifies "which event produced this volume," used by `mvpa_workflow.py` for trial-balancing. (The full-frame spreadsheet below has its own analogous `event_index`, used by `timecourse_decoding`.) |
-| `onset`, `duration` | Verbatim from the events file, repeated across every volume belonging to that event. |
+| `volume_of_interest` | *Computed*: `0..n_frames-1`, the BOLD file's own frame count -- every volume gets a row, always. |
+| `trial_type`, `onset`, `duration` | Verbatim from whichever real events.tsv row's `[onset, onset+duration)` span covers this volume (later-onset event wins on overlap) -- blank if none does. |
+| `event_index` | *Computed*: a contiguous `1..N` id (in onset order) over every real event in this run, administrative rows included, so rows produced by the same event can be grouped back together -- blank for volumes covered by no event. This is the raw event id `model_conditions.timecourse_decoding` groups trials from (section 4/6); `training`/`testing` re-derive their *own*, `hemodynamic_lag`-shifted, exclusion-filtered volume selection from it at run time instead of reading it directly (see `trial_index` in section 6). |
 | `boldfile`, `eventfile` | Resolved source file paths, for traceability/sorting. |
 | *(varies)* | Any other BIDS entity found in the filename, e.g. `dir` -- *inferred*, present only if that entity appears in your filenames (the tutorial data has none). |
 
@@ -193,16 +196,18 @@ Example real output row (from `tutorial/haxby-data`; `session` is empty since
 this dataset has no `ses-` entity):
 
 ```
-subject  session  volume_of_interest  trial_type  trial_index  onset  duration  task           run  boldfile                                                                                eventfile
+subject  session  volume_of_interest  trial_type  event_index  onset  duration  task           run  boldfile                                                                                eventfile
 1                 65                  house       51           160.0  0.5       objectviewing  1    tutorial/haxby-data/derivatives/sub-1/func/..._run-01_desc-preproc_bold.nii.gz  tutorial/haxby-data/sub-1/func/..._run-01_events.tsv
 ```
 
-### Hardcoded exclusions
+### Administrative/non-trial events
 
-`generate_master_spreadsheet.py` drops a fixed set of administrative/non-trial
-`trial_type` values before windowing -- typically not used in the MVPA analyses therefore it  isn't exposed as a config option. Edit the `EXCLUDED_TRIAL_TYPE_EXACT`
-/ `EXCLUDED_TRIAL_TYPE_SUBSTRINGS` constants near the top of the script to
-change the list:
+`master_spreadsheet.csv` itself excludes nothing -- a fixed set of
+administrative/non-trial `trial_type` values is instead ignored later, only
+as *candidates* for `training`/`testing` (section 4/6): `mvpa_common.py`'s
+`EXCLUDED_TRIAL_TYPE_EXACT`/`EXCLUDED_TRIAL_TYPE_SUBSTRINGS` constants (not
+exposed as a config option on purpose -- edit them directly to change the
+list):
 
 | Match | Excludes |
 |---|---|
@@ -210,31 +215,11 @@ change the list:
 | substring (case-insensitive): `fixation` | `trial_fixation`, `BaselineFixation`, `EndFixation`, etc. |
 | substring (case-insensitive): `postrt` | post-response-time administrative events |
 
-`rest_block` is **not** excluded -- it's a real experimental condition in some
-designs, not a structural marker. Exclusions (and invalid-duration rows) are
-dropped *before* `trial_index` is assigned, so `trial_index` is always a
-contiguous `1..N` over exactly the events that end up in the output table --
-not the row's raw position in the source events.tsv, which would otherwise
-leave gaps wherever an excluded row used to sit.
-
-### The full-frame spreadsheet (`event_extraction.full_frame_output_file`)
-
-*(optional)* -- only needed by `model_conditions.timecourse_decoding`
-(section 4). Setting this key writes a **second**, unfiltered table
-alongside `master_spreadsheet.csv`: one row per BOLD volume, `0..n_frames-1`,
-for every processed run -- no hardcoded exclusions above, no
-`hemodynamic_lag` shift (verbatim events.tsv `onset`/`duration` throughout;
-`hemodynamic_lag` only ever applies to `master_spreadsheet.csv`'s own
-training/testing volume selection). Each volume's `trial_type`/`onset`/
-`duration` come from whichever real event actually covers it -- including
-administrative rows like `fixation`, which get their own frames here instead
-of being dropped -- and an `event_index` column (contiguous `1..N` in onset
-order, administrative rows included) identifies which real event produced
-each row, the same role `trial_index` plays above. A volume covered by no
-event at all gets `trial_type`/`onset`/`duration`/`event_index` left blank
-rather than being skipped. `master_spreadsheet.csv` itself, and everything
-that reads it (`training`/`testing`/`model.kfold_cv`), is unaffected either
-way -- omit this key entirely to skip it, with no extra runtime or output.
+`rest_block` is **not** excluded -- it's a real experimental condition in
+some designs, not a structural marker. `model_conditions.timecourse_decoding`
+doesn't apply this exclusion at all -- administrative rows are decoded and
+appear in `decoding_results.csv` like any other real event, left for you to
+filter on afterward (section 4).
 
 ### Using preprocessed/derivative data (e.g. fMRIPrep)
 
@@ -365,10 +350,27 @@ and -- when `testing` *is* present -- what gets scored against it), and
 }
 ```
 
+**`hemodynamic_lag` and which volumes `training`/`testing` actually use.**
+Neither section's query directly selects `master_spreadsheet.csv` rows the
+way `timecourse_decoding`'s does below -- `mvpa_workflow.py` (section 6)
+resolves them through `mvpa_common.label_conditions_with_lag` instead: for
+each real event (administrative rows excluded, see section 3) whose own
+`trial_type`/`task`/`run`/... match a condition's query, it shifts forward by
+`event_extraction.hemodynamic_lag` (section 3) before selecting volumes --
+`[onset + hemodynamic_lag, onset + duration + hemodynamic_lag)` -- since the
+BOLD response to a real-world event peaks several seconds after it, not
+during it. Those *shifted* volumes get that condition's `regressor_label`,
+independent of whichever real (unshifted) event `master_spreadsheet.csv`
+itself says is happening there at that moment. `model.kfold_cv` (section 5)
+inherits this automatically, since it cross-validates entirely within
+whatever `training` already resolved this way.
+
 **`timecourse_decoding`** -- *(optional)* continuous, real-event decoding,
-read from the full-frame spreadsheet (`event_extraction.full_frame_output_file`,
-see section 3), not `master_spreadsheet.csv`. Always uses the one classifier
-fit on the complete `training` set (never per-fold, even when
+read from `master_spreadsheet.csv` like `training`/`testing`, but --
+critically -- **never** through `label_conditions_with_lag`: it decodes every
+volume continuously, real-time, with no `hemodynamic_lag` shift and no
+exclusions. Always uses the one classifier fit on the complete `training` set
+(never per-fold, even when
 `model.kfold_cv` is also configured). Omit the whole section (not just leave
 it empty) to skip timecourse decoding entirely -- no `decoding/` output
 files at all, no extra runtime for that step, and `generate_report.py`'s
@@ -552,16 +554,13 @@ only ever read the query keys they need, so they simply ignore all three).
 
 ```
 python utils/validate_model_config.py --config tutorial/config-haxby.example.json \
-    --master-spreadsheet master_spreadsheet_haxby.csv \
-    --full-frame-spreadsheet master_spreadsheet_haxby_full.csv
+    --master-spreadsheet master_spreadsheet_haxby.csv
 ```
 
-Without `--master-spreadsheet`/`--full-frame-spreadsheet`, only the JSON
-structure is checked (valid `match` types, regexes that actually compile,
-`trial_start_event` present, etc.). With them, every condition's query (and
-`timecourse_decoding.trial_start_event`, checked against
-`--full-frame-spreadsheet` specifically, since that's what it's evaluated
-against at runtime) is run against the real table and you additionally get:
+Without `--master-spreadsheet`, only the JSON structure is checked (valid
+`match` types, regexes that actually compile, `trial_start_event` present,
+etc.). With it, every condition's query (and `timecourse_decoding`'s
+`trial_start_event`) is run against the real table and you additionally get:
 
 - **Error** if a condition matches 0 rows (dead query -- likely a typo or a
   task/trial_type that doesn't exist in this dataset).
@@ -897,10 +896,10 @@ each only writing its own output when its config section is present:
    complete-training-set classifier against a genuinely separate test set.
    Output under `test/`.
 3. **`model_conditions.timecourse_decoding`** (section 4) -- continuously
-   decodes every BOLD volume of every run, from the full-frame spreadsheet
-   (`--full-frame-spreadsheet`, `event_extraction.full_frame_output_file`),
-   using that same complete-training-set classifier (never per-fold, even
-   when `model.kfold_cv` is also configured). Output under `decoding/`.
+   decodes every BOLD volume of every run in `master_spreadsheet.csv`, with
+   no `hemodynamic_lag` shift and no exclusions, using that same
+   complete-training-set classifier (never per-fold, even when
+   `model.kfold_cv` is also configured). Output under `decoding/`.
 
 Any combination of the three is valid -- all three, any two, one, or none
 (in which case the run only produces the trial pivot table sanity check
@@ -910,9 +909,7 @@ training(1-9)/testing(10-12) split:
 
 ```
 python workflows/mvpa_workflow.py --subject 1 --config tutorial/config-haxby.example.json \
-    --master-spreadsheet master_spreadsheet_haxby.csv \
-    --full-frame-spreadsheet master_spreadsheet_haxby_full.csv \
-    --analysis-output-dir ./out
+    --master-spreadsheet master_spreadsheet_haxby.csv --analysis-output-dir ./out
 ```
 
 There's no separate `inputs.json`/`--input-scaffold` -- everything comes
@@ -922,13 +919,15 @@ the script:
 1. Filters `master_spreadsheet.csv` to that subject and writes a **trial
    pivot table** (see below) -- a sanity check, computed before any
    `model_conditions` filtering.
-2. Evaluates `model_conditions.training`/`testing`/`timecourse_decoding`'s
-   queries to label and select rows (a row matching more than one condition
-   takes the first match, in the order conditions are listed --
-   `validate_model_config.py` already warns about that case). Loads BOLD
-   patterns directly from each row's `boldfile` (already a concrete,
-   resolved path -- no glob/pattern matching needed at this stage),
-   z-scores, and slices to `volume_of_interest`.
+2. Resolves `model_conditions.training`/`testing`'s rows via
+   `label_conditions_with_lag` -- administrative events excluded as
+   candidates, `conditions` matched against each real event's own values
+   (first match wins, in the order conditions are listed --
+   `validate_model_config.py` already warns about ambiguous overlaps), then
+   `event_extraction.hemodynamic_lag`-shifted volumes selected for each match
+   (see section 4). Loads BOLD patterns directly from each row's `boldfile`
+   (already a concrete, resolved path -- no glob/pattern matching needed at
+   this stage), z-scores, and slices to `volume_of_interest`.
 3. **Always** trains a classifier on the complete `training` set -- this is
    what `timecourse_decoding` predicts with below, and (when `testing` is
    configured) what gets evaluated against it.
@@ -944,15 +943,16 @@ the script:
    writing accuracy/evidence/AUC and an importance-map NIfTI under
    `<analysis-output-dir>/<desc>/<subject>/test/`.
 6. If `model_conditions.timecourse_decoding` is configured **and the
-   double-dipping guard below doesn't skip it for this subject**: reads the
-   full-frame spreadsheet for this subject, restricts to boldfiles that
-   *qualify* (any row matching any `conditions` query -- see section 4),
-   partitions every volume of those boldfiles into trials anchored on
-   `trial_start_event` (`window_index` counts up from 0 at each match, until
-   the next one), labels each volume's `regressor_label` via `conditions`
-   where its real `trial_type` matches (blank otherwise -- that volume is
-   still decoded, just unscored), predicts with the complete-training-set
-   classifier from step 3 (or, per the guard below, each overlapping run's
+   double-dipping guard below doesn't skip it for this subject**: reads
+   `master_spreadsheet.csv` for this subject (no lag, no exclusions),
+   restricts to boldfiles that *qualify* (any row matching any `conditions`
+   query -- see section 4), partitions every volume of those boldfiles into
+   trials anchored on `trial_start_event` (`window_index` counts up from 0 at
+   each match, until the next one), labels each volume's `regressor_label`
+   via `conditions` where its real `trial_type` matches (blank otherwise --
+   that volume is still decoded, just unscored), predicts with the
+   complete-training-set classifier from step 3 (or, per the guard below,
+   each overlapping run's
    own held-out k-fold classifier) on **every** volume of every qualifying
    boldfile, and writes two files to
    `<analysis-output-dir>/<desc>/<subject>/decoding/`:
@@ -987,9 +987,10 @@ that isn't clean at the run level lets the classifier partially "recognize"
 the run itself rather than genuinely generalizing -- the textbook
 non-independence/circular-analysis problem. It's an easy trap to fall into
 here specifically because `model_conditions.training`/`testing`/
-`timecourse_decoding` are three independent queries -- `training`/`testing`
-over `master_spreadsheet.csv`, `timecourse_decoding` over the full-frame
-spreadsheet -- and nothing stops two of them from matching rows out of the
+`timecourse_decoding` are three independent queries over the same
+`master_spreadsheet.csv` -- `training`/`testing` resolved through
+`label_conditions_with_lag`, `timecourse_decoding` read continuously,
+unshifted -- and nothing stops two of them from matching rows out of the
 very same bold file (e.g. reusing the same task/run range, or a
 `kfold_cv.example.json`-style config where `testing` is left
 byte-identical to `training` for convenience).
@@ -1113,13 +1114,11 @@ renders whichever families actually have data:
 # desc is read from --config's model.desc (same sanitization the workflow
 # scripts use), so it always matches where they actually wrote output
 python workflows/generate_report.py --analysis-output-dir ./out \
-    --config tutorial/config-haxby.example.json \
-    --full-frame-spreadsheet master_spreadsheet_haxby_full.csv
+    --config tutorial/config-haxby.example.json --master-spreadsheet master_spreadsheet_haxby.csv
 
 # single-subject report -- scoped to just <dir>/<desc>/1/
 python workflows/generate_report.py --analysis-output-dir ./out --subject 1 \
-    --config tutorial/config-haxby.example.json \
-    --full-frame-spreadsheet master_spreadsheet_haxby_full.csv
+    --config tutorial/config-haxby.example.json --master-spreadsheet master_spreadsheet_haxby.csv
 
 # --desc still works directly, if you'd rather not point at a config
 python workflows/generate_report.py --analysis-output-dir ./out --desc haxby_object_classifier
@@ -1131,7 +1130,7 @@ python workflows/generate_report.py --analysis-output-dir ./out --desc haxby_obj
 | `--desc`/`--config` | **Exactly one required.** `--desc` names the classifier folder directly; `--config` reads it from the config's own `model.desc` instead (`quick_safe`-sanitized, identical to what `mvpa_workflow.py` used to name its output folder) -- since it's the same value, the two can't drift apart the way a hand-typed `--desc` can. `--config` also supplies annotation (see below) even when `--desc` is given directly. |
 | `--subject` | *(optional)* Restrict the report to one subject. Omit to aggregate over every subject folder found under `<dir>/<desc>/`. |
 | `--config` | Supplies `model.desc` (see above, when `--desc` is omitted) and `model_conditions.timecourse_decoding` (`trial_start_event`/conditions, and optionally `overlay` -- see section 4) for timecourse annotation either way. Without it (i.e. using `--desc` alone), the timecourse page still renders, just unannotated (and never split by overlay). |
-| `--full-frame-spreadsheet` | *(optional)* Needed alongside `--config` to compute each subject's TR and the real per-trial event timing (both derived from real data, not hardcoded) -- used to convert `window_index` to seconds and annotate the timecourse plot with every real event observed inside a trial. Without it, the x-axis stays in raw `window_index` units and annotation is skipped. |
+| `--master-spreadsheet` | *(optional)* Needed alongside `--config` to compute each subject's TR and the real per-trial event timing (both derived from real data, not hardcoded) -- used to convert `window_index` to seconds and annotate the timecourse plot with every real event observed inside a trial. Without it, the x-axis stays in raw `window_index` units and annotation is skipped. |
 | `--output` | *(optional)* Defaults to `<dir>/<desc>/report_<desc>.pdf` (group) or `<dir>/<desc>/<subject>/report_<subject>.pdf` (single-subject). |
 
 **A "Data Independence Warning" page appears automatically, right after the
@@ -1368,7 +1367,6 @@ they all read the exact same config path:
   "group_gm_mask": "/path/to/study/masks/group_gm_mask.nii.gz",
   "output_dir": "/path/to/study/mvpa-decoding",
   "master_spreadsheet": "/path/to/study/mvpa-decoding/master_spreadsheet.csv",
-  "full_frame_master_spreadsheet": "/path/to/study/mvpa-decoding/master_spreadsheet_full.csv",
   "mni_template": "/path/to/MNI152_T1_2mm_brain.nii.gz"
 }
 ```
@@ -1381,7 +1379,6 @@ they all read the exact same config path:
 | `group_gm_mask` | stage 1 only | The group-level MNI-space GM mask stage 1 resamples into each subject/session's native space. Not needed if your data is already MNI-space (`model.mnispace: true`, mask pointed straight at a shared MNI-space mask) and stage 1 never runs. |
 | `output_dir` | stages 3, 4 | Where `mvpa_workflow.py`/`generate_report.py` write everything -- passed straight through as `--analysis-output-dir`. |
 | `master_spreadsheet` | stages 2, 3, 4 | Where stage 2 writes `master_spreadsheet.csv` and every later stage reads it from. |
-| `full_frame_master_spreadsheet` | optional, stages 2, 3, 4 | Only needed when a config's `model_conditions.timecourse_decoding` is configured -- must match that config's own `event_extraction.full_frame_output_file`. Stage 2 writes it (alongside `master_spreadsheet.csv`) whenever that config key is set; stages 3/4 forward it to `mvpa_workflow.py`/`generate_report.py` as `--full-frame-spreadsheet` whenever this field is set, and simply omit that flag otherwise. |
 | `mni_template` | optional, stage 4 only | Reference grid for stage 4's importance-map resampling. Falls back to `$FSLDIR/data/standard/MNI152_T1_2mm_brain.nii.gz` (resolved after `module load fsl`) when omitted; moot entirely when `hcppipe_root` is also omitted, since that skips the resample step altogether. |
 
 Every field is a full, already-resolved absolute path -- no `{subject}`/

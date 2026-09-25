@@ -8,8 +8,7 @@
     "events_glob": "**/*_events.tsv",
     "hemodynamic_lag": 4.6,
     "output_file": "master_spreadsheet.csv",
-    "expected_events_file": "examples/expected_events.example.json",
-    "full_frame_output_file": "master_spreadsheet_full.csv"
+    "expected_events_file": "examples/expected_events.example.json"
   },
 
   "model_conditions": {
@@ -106,7 +105,6 @@
     "hcppipe_root": "/path/to/study/HCPPipe",
     "group_gm_mask": "/path/to/study/masks/group_gm_mask.nii.gz",
     "output_dir": "/path/to/study/mvpa-decoding",
-    "master_spreadsheet": "/path/to/study/mvpa-decoding/master_spreadsheet.csv",
-    "full_frame_master_spreadsheet": "/path/to/study/mvpa-decoding/master_spreadsheet_full.csv"
+    "master_spreadsheet": "/path/to/study/mvpa-decoding/master_spreadsheet.csv"
   }
 }

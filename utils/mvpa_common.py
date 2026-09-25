@@ -39,12 +39,30 @@ BIDS_ENTITY_RE = re.compile(r"(?:^|_)(?P<key>[a-zA-Z]+)-(?P<val>[^_.]+)")
 MATCH_TYPES = {"exact", "in", "regex"}
 BOOL_KEYS = {"and", "or", "not"}
 
+# trial_type values considered administrative/non-trial (never a real training/
+# testing candidate) -- edit these directly to add/remove exclusions; not
+# exposed as a config option on purpose, since it's a blanket policy rather
+# than a per-dataset choice. master_spreadsheet.csv itself no longer filters
+# these out (generate_master_spreadsheet.py keeps every real event, admin
+# rows included, for continuous timecourse decoding) -- label_conditions_with_lag
+# is what actually excludes them, at training/testing selection time.
+EXCLUDED_TRIAL_TYPE_EXACT = ("start_block", "end_block")
+EXCLUDED_TRIAL_TYPE_SUBSTRINGS = ("fixation", "postrt")
+
+
+def is_excluded_trial_type(trial_type) -> bool:
+    tt = str(trial_type).lower()
+    if tt in EXCLUDED_TRIAL_TYPE_EXACT:
+        return True
+    return any(s in tt for s in EXCLUDED_TRIAL_TYPE_SUBSTRINGS)
+
+
 # reserved trial_type value: an events.tsv that emits an explicit row tagged
 # exactly this (any onset/duration) marks trial starts unambiguously by
 # construction -- partition_into_trials prefers these over trial_start_event
 # for a boldfile whenever they're present, exactly as events.tsv's own
 # fixation/postrt/start_block/end_block are a fixed, not-configurable
-# convention (see generate_master_spreadsheet.py's EXCLUDED_TRIAL_TYPE_*).
+# convention (see EXCLUDED_TRIAL_TYPE_* above).
 # events.tsv files that don't emit this tag are unaffected -- trial_start_event
 # is the fallback for those, evaluated per boldfile independently of every
 # other boldfile in the same dataset (a real mix of both is fine).
@@ -207,10 +225,11 @@ def label_rows_optional(df: pd.DataFrame, conditions: dict, label_column: str = 
 
 
 def build_trial_pivot_table(df: pd.DataFrame, group_cols=("boldfile", "trial_index")) -> pd.DataFrame:
-    """One row per source event (grouped by group_cols, matching the row count of the
-    source events.tsv files), with that trial's volume_of_interest values spread across
-    vol_of_interest_1..N columns (NaN-padded to the widest trial). Sanity-check table --
-    not used for modeling."""
+    """One row per group_cols group (e.g. one row per real event, when df is
+    master_spreadsheet.csv and group_cols is ("boldfile", "event_index")),
+    with that group's volume_of_interest values spread across
+    vol_of_interest_1..N columns (NaN-padded to the widest group). Sanity-check
+    table -- not used for modeling."""
     id_cols = [c for c in df.columns if c != "volume_of_interest"]
 
     records = []
@@ -353,6 +372,88 @@ def label_rows(df: pd.DataFrame, conditions: dict, label_column: str = "regresso
         labeled.append(subset)
     combined = pd.concat(labeled)
     return combined[~combined.index.duplicated(keep="first")]
+
+
+def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hemodynamic_lag: float,
+                               label_column: str = "regressor_label") -> pd.DataFrame:
+    """model_conditions.training/testing's (and, transitively, model.kfold_cv's)
+    counterpart to build_timecourse_instructions: selects which BOLD volumes
+    actually get used to train/test a classifier.
+
+    Deliberately does NOT enumerate candidate events from full_frame_df's own
+    (dense, one-real-event-per-volume) event_index/trial_type columns --
+    whenever two real events are close enough together that a later one's
+    span fully overwrites an earlier one's (e.g. Haxby's ~2s-apart stimulus
+    flashes at a 2.5s TR, where several flashes in a row can compete for the
+    same single volume), the earlier event's event_index never appears
+    *anywhere* in full_frame_df, so it would be silently invisible here too.
+    Real events overlapping in time is exactly the normal, expected case for
+    training/testing purposes (a classifier is trained on a lag-shifted
+    window per event regardless of what else is nominally happening at that
+    moment) -- it must never cause an event to be dropped as a candidate.
+
+    Instead, for each boldfile, the original events.tsv (found via its own
+    `eventfile` column -- constant per boldfile in full_frame_df) is re-read
+    from scratch: same administrative-row exclusion as
+    generate_master_spreadsheet.py used to apply directly (EXCLUDED_TRIAL_TYPE_*
+    above), same contiguous 1..N trial_index numbering (in onset order, over
+    every retained event, assigned *before* matching conditions -- so it's
+    consistent across training/testing/model.kfold_cv regardless of which
+    condition, if any, a given event matches). `conditions` is then matched
+    against each retained event's own values (first match wins, same as
+    label_rows; task/run/subject/session/boldfile/eventfile/any extra BIDS
+    entity are pulled from full_frame_df's own per-boldfile constant columns,
+    since the raw events.tsv itself has none of those) and events matching
+    none are dropped. For each matched event, volumes are selected shifted
+    forward by hemodynamic_lag -- [onset + hemodynamic_lag, onset + duration +
+    hemodynamic_lag) -- since the BOLD response to a real-world event peaks
+    several seconds after it, not during it; independent of what
+    full_frame_df's own (unshifted, single-winner-per-volume) trial_type says
+    is "really" happening there at that moment."""
+    non_event_cols = {"volume_of_interest", "trial_type", "onset", "duration", "event_index"}
+
+    rows = []
+    for boldfile, group in full_frame_df.groupby("boldfile", sort=False):
+        first = group.iloc[0]
+        extra_cols = {c: first[c] for c in group.columns if c not in non_event_cols}
+
+        events = pd.read_csv(first["eventfile"], sep="\t")
+        events["onset"] = pd.to_numeric(events["onset"], errors="coerce")
+        events["duration"] = pd.to_numeric(events["duration"], errors="coerce")
+        events = events.sort_values("onset").reset_index(drop=True)
+
+        valid = events["onset"].notna() & events["duration"].notna() & np.isfinite(events["duration"])
+        excluded = events["trial_type"].apply(is_excluded_trial_type)
+        events = events[valid & ~excluded].reset_index(drop=True)
+        # contiguous 1..N over every retained event, in onset order -- assigned
+        # before condition-matching, so it's the same regardless of which
+        # condition (if any) ends up matching a given event
+        events["trial_index"] = np.arange(1, len(events) + 1)
+
+        for k, v in extra_cols.items():
+            events[k] = v
+
+        labels = pd.Series(pd.NA, index=events.index, dtype=object)
+        for name, query in conditions.items():
+            mask = evaluate_query_node(query, events) & labels.isna()
+            labels[mask] = name
+        events = events[labels.notna()].copy()
+        events[label_column] = labels[labels.notna()]
+        if events.empty:
+            continue
+
+        tr, n_frames = get_bold_header_info(boldfile)
+        for _, ev in events.iterrows():
+            start_time = ev["onset"] + hemodynamic_lag
+            stop_time = start_time + ev["duration"]
+            start_vol, stop_vol = compute_volume_range(start_time, stop_time, tr, n_frames)
+            base = ev.to_dict()
+            for vol in range(start_vol, stop_vol):
+                row = dict(base)
+                row["volume_of_interest"] = vol
+                rows.append(row)
+
+    return pd.DataFrame(rows)
 
 
 def get_single_match(pattern: str) -> str:

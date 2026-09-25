@@ -86,15 +86,12 @@ if [ -z "$SCRIPTS_DIR" ]; then
 fi
 export SCRIPTS_DIR
 
-# the group report itself only needs output_dir -- hcppipe_root is optional
-# here: it's only used by the native->MNI importance-map resample below,
-# which is itself skipped when hcppipe_root isn't set (e.g. every classifier
-# under this output_dir already used model.mnispace=true, so there's no
-# native-space impa left to resample). full_frame_master_spreadsheet is also
-# optional -- only needed for timecourse-page event annotations (see
-# resolve_pipeline_config.sh's header comment); without it the report still
-# renders, just without those annotations.
-export REQUIRED_PIPELINE_FIELDS="output_dir"
+# the group report itself only needs output_dir/master_spreadsheet --
+# hcppipe_root is optional here: it's only used by the native->MNI
+# importance-map resample below, which is itself skipped when hcppipe_root
+# isn't set (e.g. every classifier under this output_dir already used
+# model.mnispace=true, so there's no native-space impa left to resample)
+export REQUIRED_PIPELINE_FIELDS="output_dir master_spreadsheet"
 source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 
 # --------------------------------------------
@@ -160,15 +157,10 @@ else
     done
 fi
 
-FULL_FRAME_ARGS=()
-if [ -n "$FULL_FRAME_MASTER_SPREADSHEET" ]; then
-    FULL_FRAME_ARGS=(--full-frame-spreadsheet "$FULL_FRAME_MASTER_SPREADSHEET")
-fi
-
 if [ -n "$SUBJECT_LIST" ]; then
     python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR \
-        --config $CONFIG_FILE --subjects "$SUBJECT_LIST" "${FULL_FRAME_ARGS[@]}"
+        --config $CONFIG_FILE --master-spreadsheet $MASTER_SPREADSHEET --subjects "$SUBJECT_LIST"
 else
     python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR \
-        --config $CONFIG_FILE "${FULL_FRAME_ARGS[@]}"
+        --config $CONFIG_FILE --master-spreadsheet $MASTER_SPREADSHEET
 fi

@@ -143,72 +143,69 @@ Output:
 
 ```
 Found 12 events file(s) under tutorial/haxby-data
-Wrote 1152 rows to master_spreadsheet_haxby.csv
-Wrote 1452 rows to master_spreadsheet_haxby_full.csv
+Wrote 1452 rows to master_spreadsheet_haxby.csv
 ```
 
-1152 = 12 runs x 8 categories x 12 stimuli/block. Each individual 0.5s
-stimulus presentation maps to essentially one BOLD volume (TR=2.5s, so a
-0.5s window plus the lag rounds to a single frame) -- this pipeline links
-*events* to frames, not *blocks*, so each of the 12 stimulus presentations in
-a block is its own row with the same `trial_type`, not one row per block.
-`master_spreadsheet_haxby_full.csv` (from `event_extraction.full_frame_output_file`)
-is the second, unfiltered table `model_conditions.timecourse_decoding` reads
-below -- one row per BOLD volume of every run (1452 = 12 runs x 121 volumes),
-including the `rest` blocks `master_spreadsheet_haxby.csv` itself doesn't
-carry, and with no `hemodynamic_lag` shift.
+1452 = 12 runs x 121 volumes -- one row per BOLD volume of every run, no
+exclusions, no `hemodynamic_lag` shift (see README.md section 3). Each
+volume's `trial_type`/`onset`/`duration` come from whichever real event
+covers it, including the `rest` gaps between blocks (blank `trial_type`
+there, not dropped) and the individual 0.5s stimulus presentations within
+each block (this pipeline links *events* to frames, not *blocks*, so several
+consecutive volumes typically share the same category `trial_type` within a
+block, rather than one row per block).
 
 ## Step 5: Validate the model config
 
 ```
 python utils/validate_model_config.py --config tutorial/config-haxby.example.json \
-    --master-spreadsheet master_spreadsheet_haxby.csv \
-    --full-frame-spreadsheet master_spreadsheet_haxby_full.csv
+    --master-spreadsheet master_spreadsheet_haxby.csv
 ```
 
 Output (all 8 categories, training/testing/timecourse_decoding):
 
 ```
-  [training] 'bottle': 108 rows      [testing] 'bottle': 36 rows      [timecourse_decoding] 'bottle': 29 rows
-  [training] 'cat': 108 rows         [testing] 'cat': 36 rows         [timecourse_decoding] 'cat': 30 rows
-  [training] 'chair': 108 rows       [testing] 'chair': 36 rows       [timecourse_decoding] 'chair': 30 rows
-  [training] 'face': 108 rows        [testing] 'face': 36 rows        [timecourse_decoding] 'face': 30 rows
-  [training] 'house': 108 rows       [testing] 'house': 36 rows       [timecourse_decoding] 'house': 29 rows
-  [training] 'scissors': 108 rows    [testing] 'scissors': 36 rows    [timecourse_decoding] 'scissors': 30 rows
-  [training] 'scrambledpix': 108 rows [testing] 'scrambledpix': 36 rows [timecourse_decoding] 'scrambledpix': 29 rows
-  [training] 'shoe': 108 rows        [testing] 'shoe': 36 rows        [timecourse_decoding] 'shoe': 30 rows
+  [training] 'bottle': 90 rows       [testing] 'bottle': 29 rows       [timecourse_decoding] 'bottle': 29 rows
+  [training] 'cat': 89 rows          [testing] 'cat': 30 rows          [timecourse_decoding] 'cat': 30 rows
+  [training] 'chair': 88 rows        [testing] 'chair': 30 rows        [timecourse_decoding] 'chair': 30 rows
+  [training] 'face': 89 rows         [testing] 'face': 30 rows         [timecourse_decoding] 'face': 30 rows
+  [training] 'house': 89 rows        [testing] 'house': 29 rows        [timecourse_decoding] 'house': 29 rows
+  [training] 'scissors': 90 rows     [testing] 'scissors': 30 rows     [timecourse_decoding] 'scissors': 30 rows
+  [training] 'scrambledpix': 90 rows [testing] 'scrambledpix': 29 rows [timecourse_decoding] 'scrambledpix': 29 rows
+  [training] 'shoe': 86 rows         [testing] 'shoe': 30 rows         [timecourse_decoding] 'shoe': 30 rows
   [timecourse_decoding] trial_start_event: 948 rows
 
 0 error(s), 0 warning(s)
 ```
 
-Perfectly balanced (9 runs x 12 stimuli = 108 for training; 3 runs x 12 = 36
-for testing), across all 8 categories -- confirms the run-based train/test
-split lines up cleanly with the data, and that `boldfile` rows correctly
-resolved to the preprocessed derivatives. `timecourse_decoding`'s own counts
-(29-30 rows each) are lower and slightly uneven because they're read from
-`master_spreadsheet_haxby_full.csv` -- each category's real per-block volume
-count, with no `hemodynamic_lag` shift -- rather than
-`master_spreadsheet_haxby.csv`'s lagged, per-stimulus windowing; both are
-expected, not an error.
+All three sections read the same `master_spreadsheet_haxby.csv` now, and
+these counts are each category's real per-block volume count -- close to,
+but not exactly, 108/36 for training/testing (9/3 runs x 12 stimuli) since
+this is a direct count of real per-frame `trial_type` values, not the
+`hemodynamic_lag`-shifted volume selection `mvpa_workflow.py` actually uses
+for training/testing (see README.md section 4's `label_conditions_with_lag`)
+-- a close, not exact, sanity-check proxy. `timecourse_decoding`'s own counts
+happen to match `testing`'s here only because this config's `timecourse_decoding.conditions`
+are byte-identical to `testing`'s (both real per-frame `trial_type` counts,
+no lag either way).
 
 ## Step 6: Train and evaluate
 
 ```
 python workflows/mvpa_workflow.py --subject 1 --config tutorial/config-haxby.example.json \
-    --master-spreadsheet master_spreadsheet_haxby.csv \
-    --full-frame-spreadsheet master_spreadsheet_haxby_full.csv \
-    --analysis-output-dir ./haxby_out
+    --master-spreadsheet master_spreadsheet_haxby.csv --analysis-output-dir ./haxby_out
 ```
 
 Since this config sets `model_conditions.testing`/`timecourse_decoding` but
 not `model.kfold_cv`, `mvpa_workflow.py` fits one classifier on the full
-9-run training set and writes only `test/` (the "Full" independent-test-set
-family) and `decoding/` output for this subject -- no `model/` directory at
-all, since there's no k-fold step configured here. Ran in ~23 seconds (final
-model + held-out test evaluation + timecourse decoding). This dataset's tiny
-volumes (40x64x64, ~23K-voxel mask) make it fast compared to this repo's
-other, larger sample data.
+9-run training set (`label_conditions_with_lag` selects its actual,
+`hemodynamic_lag`-shifted volumes from `master_spreadsheet_haxby.csv`) and
+writes only `test/` (the "Full" independent-test-set family) and `decoding/`
+output for this subject -- no `model/` directory at all, since there's no
+k-fold step configured here. Ran in ~20 seconds without `model.permutation_test`
+configured (roughly +6 minutes with it, per the 1000-permutation run below).
+This dataset's tiny volumes (40x64x64, ~23K-voxel mask) make it fast compared
+to this repo's other, larger sample data.
 
 ## Results
 

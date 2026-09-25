@@ -18,6 +18,8 @@ from utils.mvpa_common import (
     build_timecourse_instructions,
     qualifying_boldfiles,
     label_rows_optional,
+    label_conditions_with_lag,
+    is_excluded_trial_type,
     build_trial_pivot_table,
     validate_query_node,
     evaluate_query_node,
@@ -385,6 +387,118 @@ class TestLabelRowsOptional:
         assert result["regressor_label"].tolist()[0] == "maintain"
         assert pd.isna(result["regressor_label"].tolist()[1])
         assert result["regressor_label"].tolist()[2] == "suppress"
+
+
+# =====================================================
+# is_excluded_trial_type
+# =====================================================
+
+class TestIsExcludedTrialType:
+    @pytest.mark.parametrize("trial_type", ["fixation", "Fixation", "start_block", "end_block", "postrt", "trial_postrt_x"])
+    def test_excluded_types(self, trial_type):
+        assert is_excluded_trial_type(trial_type) is True
+
+    @pytest.mark.parametrize("trial_type", ["face", "place", "view_face", "suppress_place"])
+    def test_non_excluded_types(self, trial_type):
+        assert is_excluded_trial_type(trial_type) is False
+
+
+# =====================================================
+# label_conditions_with_lag
+# =====================================================
+
+def _write_events_tsv(tmp_path, *rows, name="events.tsv"):
+    """rows: (onset, duration, trial_type) tuples -> a real events.tsv on disk."""
+    path = tmp_path / name
+    pd.DataFrame(rows, columns=["onset", "duration", "trial_type"]).to_csv(path, sep="\t", index=False)
+    return str(path)
+
+
+def _full_frame_metadata_df(boldfile, eventfile, subject="01", session="", task="WM", run=1):
+    """label_conditions_with_lag only reads full_frame_df for each boldfile's
+    constant metadata (subject/session/task/run/eventfile) -- it re-derives
+    the actual event list from eventfile itself (see the fix below), not from
+    full_frame_df's own (lossy) trial_type/onset/duration/event_index
+    columns. One row is enough regardless of how many real events/volumes
+    exist."""
+    return pd.DataFrame([{
+        "boldfile": boldfile, "eventfile": eventfile, "volume_of_interest": 0,
+        "trial_type": None, "onset": None, "duration": None, "event_index": None,
+        "subject": subject, "session": session, "task": task, "run": run,
+    }])
+
+
+class TestLabelConditionsWithLag:
+    def test_selects_lag_shifted_volumes_for_matched_event(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("utils.mvpa_common.get_bold_header_info", lambda boldfile: (1.0, 20))
+        eventfile = _write_events_tsv(tmp_path, (2.0, 3.0, "maintain_face"))
+        df = _full_frame_metadata_df("run1", eventfile)
+        conditions = {"maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"}}
+
+        result = label_conditions_with_lag(df, conditions, hemodynamic_lag=2.0)
+
+        # start = onset(2.0) + lag(2.0) = 4.0 -> vol 4; 3.0s duration / 1.0s TR = 3 volumes
+        assert result["volume_of_interest"].tolist() == [4, 5, 6]
+        assert (result["regressor_label"] == "maintain").all()
+        assert (result["trial_type"] == "maintain_face").all()  # real, unshifted label
+        assert (result["trial_index"] == 1).all()
+
+    def test_administrative_events_are_never_candidates(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("utils.mvpa_common.get_bold_header_info", lambda boldfile: (1.0, 20))
+        eventfile = _write_events_tsv(tmp_path, (2.0, 3.0, "fixation"))
+        df = _full_frame_metadata_df("run1", eventfile)
+        # a deliberately permissive query that would otherwise match anything
+        conditions = {"anything": {"column": "trial_type", "match": "regex", "value": ".*"}}
+
+        result = label_conditions_with_lag(df, conditions, hemodynamic_lag=0.0)
+        assert result.empty
+
+    def test_unmatched_events_produce_no_rows(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("utils.mvpa_common.get_bold_header_info", lambda boldfile: (1.0, 20))
+        eventfile = _write_events_tsv(tmp_path, (2.0, 1.0, "probe"))
+        df = _full_frame_metadata_df("run1", eventfile)
+        conditions = {"maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"}}
+
+        result = label_conditions_with_lag(df, conditions, hemodynamic_lag=0.0)
+        assert result.empty
+
+    def test_zero_lag_matches_the_events_own_span(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("utils.mvpa_common.get_bold_header_info", lambda boldfile: (1.0, 20))
+        eventfile = _write_events_tsv(tmp_path, (5.0, 2.0, "maintain_face"))
+        df = _full_frame_metadata_df("run1", eventfile)
+        conditions = {"maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"}}
+
+        result = label_conditions_with_lag(df, conditions, hemodynamic_lag=0.0)
+        assert result["volume_of_interest"].tolist() == [5, 6]
+
+    def test_events_overwritten_in_the_dense_table_are_still_selected(self, tmp_path, monkeypatch):
+        # regression: two real events close enough together that a dense,
+        # single-winner-per-volume table (build_full_frame_table) would have
+        # the second one fully overwrite the first (both resolve to volume 0
+        # at this TR) -- label_conditions_with_lag must NOT enumerate
+        # candidates from that lossy table; it re-reads eventfile directly,
+        # so both events must still show up as independent training rows
+        monkeypatch.setattr("utils.mvpa_common.get_bold_header_info", lambda boldfile: (2.5, 20))
+        eventfile = _write_events_tsv(
+            tmp_path, (0.0, 0.5, "maintain_face"), (0.4, 0.5, "suppress_face"),
+        )
+        # sanity: confirm the premise -- these two really do collide in the
+        # dense table (both need volume 0 at TR=2.5s), with "suppress_face"
+        # (later onset) winning and "maintain_face" completely disappearing
+        raw = pd.read_csv(eventfile, sep="\t")
+        dense = build_full_frame_table(raw, tr=2.5, n_frames=20)
+        assert dense.loc[0, "trial_type"] == "suppress_face"
+        assert "maintain_face" not in dense["trial_type"].values
+
+        df = _full_frame_metadata_df("run1", eventfile)
+        conditions = {
+            "maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"},
+            "suppress": {"column": "trial_type", "match": "regex", "value": ".*suppress.*"},
+        }
+        result = label_conditions_with_lag(df, conditions, hemodynamic_lag=0.0)
+
+        assert set(result["regressor_label"]) == {"maintain", "suppress"}
+        assert (result[result["regressor_label"] == "maintain"]["volume_of_interest"] == 0).all()
 
 
 class TestQualifyingBoldfiles:

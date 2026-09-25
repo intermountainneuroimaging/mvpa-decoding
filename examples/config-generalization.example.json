@@ -8,8 +8,7 @@
     "events_glob": "**/*_events.tsv",
     "hemodynamic_lag": 4.6,
     "output_file": "master_spreadsheet.csv",
-    "expected_events_file": "examples/expected_events.example.json",
-    "full_frame_output_file": "master_spreadsheet_full.csv"
+    "expected_events_file": "examples/expected_events.example.json"
   },
 
   "model_conditions": {
