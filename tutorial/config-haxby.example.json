@@ -9,7 +9,8 @@
     "events_glob": "**/*_events.tsv",
     "hemodynamic_lag": 4.0,
     "output_file": "master_spreadsheet_haxby.csv",
-    "expected_events_file": "tutorial/expected_events_haxby.example.json"
+    "expected_events_file": "tutorial/expected_events_haxby.example.json",
+    "full_frame_output_file": "master_spreadsheet_haxby_full.csv"
   },
   "model_conditions": {
     "training": {
@@ -503,15 +504,13 @@
           ]
         }
       },
-      "window": {
-        "start": {
-          "reference": "onset",
-          "offset_seconds": 0
-        },
-        "end": {
-          "reference": "offset_end",
-          "offset_seconds": 10
-        }
+      "trial_start_event": {
+        "column": "trial_type",
+        "match": "in",
+        "values": ["bottle", "cat", "chair", "face", "house", "scissors", "scrambledpix", "shoe"]
+      },
+      "annotation_labels": {
+        "item": ["bottle", "cat", "chair", "face", "house", "scissors", "scrambledpix", "shoe"]
       }
     }
   },

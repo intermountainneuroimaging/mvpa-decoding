@@ -11,10 +11,15 @@ only writes its own output) when its config section is present:
                                training-labeled data).
   2. model_conditions.testing        -- one fit on the complete training set,
                                evaluated against a genuinely separate test set.
-  3. model_conditions.timecourse_decoding -- predicts at every TR across a
-                               decode window, using that same complete-training-set
+  3. model_conditions.timecourse_decoding -- predicts at every TR of every run in
+                               the full-frame spreadsheet (event_extraction.
+                               full_frame_output_file), continuously and without
+                               exclusions, using that same complete-training-set
                                fit (never per-fold) -- unless step 2's guard below
                                substitutes a held-out k-fold classifier instead.
+                               Rows are grouped into trials anchored on
+                               trial_start_event, with window_index counting up
+                               from 0 at each anchor.
 
 The complete-training-set classifier (step 2/3's "full model") is always fit,
 regardless of which of the above are configured, since timecourse decoding
@@ -58,7 +63,9 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
 
   model_conditions.timecourse_decoding configured -- always the complete-training
   classifier, never per-fold:
-    decoding/<subject>_decoding_results.csv             -- raw, one row per decoded TR
+    decoding/<subject>_decoding_results.csv             -- raw, one row per BOLD volume in the
+                                                            full-frame spreadsheet (every frame,
+                                                            no exclusions), real trial_type per row
     decoding/<subject>_summary_decoding_results.csv     -- averaged per (window_index, regressor_label)
 
 `model/` is therefore exclusively k-fold's directory, `test/` is exclusively
@@ -70,7 +77,8 @@ utils.mvpa_common.impa_tag.
 Usage:
     python mvpa_workflow.py --subject 4057 \\
         --config examples/config-generalization.example.json \\
-        --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out
+        --master-spreadsheet master_spreadsheet.csv --analysis-output-dir ./out \\
+        [--full-frame-spreadsheet master_spreadsheet_full.csv]  # only needed for timecourse_decoding
 """
 
 import os
@@ -124,6 +132,15 @@ def parse_args():
         "--master-spreadsheet",
         required=True,
         help="Path to master_spreadsheet.csv produced by generate_master_spreadsheet.py"
+    )
+
+    parser.add_argument(
+        "--full-frame-spreadsheet",
+        default=None,
+        help="Path to the full-frame spreadsheet produced by generate_master_spreadsheet.py's "
+             "event_extraction.full_frame_output_file -- required only when "
+             "model_conditions.timecourse_decoding is configured (one row per BOLD volume, "
+             "real per-frame trial_type, no exclusions)."
     )
 
     return parser.parse_args()
@@ -372,6 +389,7 @@ def main(args):
     subject_id = args.subject
     analysis_output_dir = args.analysis_output_dir
     master_spreadsheet_file = args.master_spreadsheet
+    full_frame_spreadsheet_file = args.full_frame_spreadsheet
 
     full_cfg = load_config(args.config)
     model_conditions = full_cfg["model_conditions"]
@@ -383,7 +401,13 @@ def main(args):
     testing_conditions = testing_cfg["conditions"] if testing_cfg else None
     timecourse_cfg = model_conditions.get("timecourse_decoding")
     timecourse_conditions = timecourse_cfg["conditions"] if timecourse_cfg else None
-    timecourse_window = timecourse_cfg["window"] if timecourse_cfg else None
+    trial_start_event = timecourse_cfg["trial_start_event"] if timecourse_cfg else None
+    if timecourse_cfg is not None and not full_frame_spreadsheet_file:
+        raise SystemExit(
+            "model_conditions.timecourse_decoding is configured but --full-frame-spreadsheet "
+            "wasn't given -- continuous timecourse decoding reads its own full-frame spreadsheet "
+            "(event_extraction.full_frame_output_file), not master_spreadsheet.csv."
+        )
 
     # class label order shared across training/testing/timecourse regressor codes
     regressor_categories = list(training_conditions.keys())
@@ -446,8 +470,15 @@ def main(args):
         if testing_conditions is not None else None
     )
     if timecourse_cfg is not None:
-        timecourse_labeled = apply_regressor_codes(label_rows(subject_df, timecourse_conditions), regressor_categories)
-        timecourse_instr = build_timecourse_instructions(timecourse_labeled, timecourse_window)
+        full_frame = pd.read_csv(
+            full_frame_spreadsheet_file,
+            dtype={"subject": str, "session": str, "task": str, "trial_type": str}
+        )
+        full_frame_subject_df = full_frame[full_frame["subject"] == subject_id]
+        if full_frame_subject_df.empty:
+            raise SystemExit(f"No rows found for subject {subject_id!r} in {full_frame_spreadsheet_file}")
+        timecourse_instr = build_timecourse_instructions(full_frame_subject_df, timecourse_conditions, trial_start_event)
+        timecourse_instr = apply_regressor_codes(timecourse_instr, regressor_categories)
     else:
         timecourse_instr = None
 

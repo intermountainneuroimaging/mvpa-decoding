@@ -34,6 +34,9 @@
 #   "group_gm_mask": "/path/to/group_gm_mask.nii.gz",
 #   "output_dir": "/path/to/mvpa-decoding-output",
 #   "master_spreadsheet": "/path/to/mvpa-decoding-output/master_spreadsheet.csv",
+#   "full_frame_master_spreadsheet": "/path/to/mvpa-decoding-output/master_spreadsheet_full.csv"  (optional --
+#                                     only needed when a config's model_conditions.timecourse_decoding is
+#                                     configured; must match that config's own event_extraction.full_frame_output_file)
 #   "mni_template": "/path/to/MNI152_T1_2mm_brain.nii.gz"   (optional -- see below)
 # }
 #
@@ -76,7 +79,8 @@ with open(config_path) as f:
     cfg = json.load(f)
 
 pipeline = cfg.get("pipeline", {})
-optional_fields = ["bids_hcp_root", "hcppipe_root", "group_gm_mask", "output_dir", "master_spreadsheet"]
+optional_fields = ["bids_hcp_root", "hcppipe_root", "group_gm_mask", "output_dir", "master_spreadsheet",
+                    "full_frame_master_spreadsheet"]
 required = required_arg.split()
 
 missing = [k for k in required if k not in pipeline]

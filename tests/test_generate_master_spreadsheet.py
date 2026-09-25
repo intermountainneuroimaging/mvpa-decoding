@@ -2,6 +2,9 @@
 table builder. Synthetic fixtures only (tiny NIfTI + tiny events.tsv written
 to tmp_path) -- no dependency on gitignored real data."""
 
+import json
+import sys
+
 import numpy as np
 import nibabel as nib
 import pandas as pd
@@ -11,6 +14,8 @@ from workflows.generate_master_spreadsheet import (
     is_excluded_trial_type,
     find_bold_file,
     process_events_file,
+    process_events_file_full_frame,
+    main,
 )
 
 
@@ -109,3 +114,75 @@ class TestProcessEventsFile:
         events.to_csv(events_path, sep="\t", index=False)
         result = process_events_file(str(events_path), str(tmp_path), hemodynamic_lag=0.0)
         assert result is None
+
+
+# =====================================================
+# process_events_file_full_frame
+# =====================================================
+
+class TestProcessEventsFileFullFrame:
+    def test_one_row_per_volume_including_excluded_types(self, bids_run):
+        events_path, derivatives_root = bids_run
+        table = process_events_file_full_frame(events_path, derivatives_root)
+        # 20-frame run -> exactly one row per volume, unlike process_events_file
+        assert table["volume_of_interest"].tolist() == list(range(20))
+
+        # fixation is excluded by process_events_file but must still appear here
+        by_vol = table.set_index("volume_of_interest")["trial_type"]
+        assert by_vol.loc[0] == "face" and by_vol.loc[1] == "face"
+        assert by_vol.loc[3] == "fixation" and by_vol.loc[4] == "fixation"
+        assert by_vol.loc[9] == "place" and by_vol.loc[10] == "place"
+
+        # the NaN-duration row never covers anything; gaps stay NaN, not dropped
+        assert len(table) == 20
+        assert pd.isna(by_vol.loc[2])
+        assert pd.isna(by_vol.loc[19])
+
+    def test_missing_bold_file_returns_none(self, tmp_path):
+        events = pd.DataFrame([{"onset": 0.0, "duration": 2.0, "trial_type": "face"}])
+        events_path = tmp_path / "sub-99_task-test_run-01_events.tsv"
+        events.to_csv(events_path, sep="\t", index=False)
+        result = process_events_file_full_frame(str(events_path), str(tmp_path))
+        assert result is None
+
+
+# =====================================================
+# main(): event_extraction.full_frame_output_file wiring
+# =====================================================
+
+class TestMainFullFrameOutput:
+    def _config(self, tmp_path, output_file, full_frame_output_file=None):
+        event_extraction = {
+            "bids_root": str(tmp_path),
+            "output_file": str(output_file),
+        }
+        if full_frame_output_file is not None:
+            event_extraction["full_frame_output_file"] = str(full_frame_output_file)
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json.dumps({"event_extraction": event_extraction}))
+        return str(config_path)
+
+    def test_omitted_writes_only_master_spreadsheet(self, tmp_path, bids_run, monkeypatch):
+        _events_path, _derivatives_root = bids_run  # writes the NIfTI/events.tsv under tmp_path
+        output_file = tmp_path / "master_spreadsheet.csv"
+        config_path = self._config(tmp_path, output_file)
+
+        monkeypatch.setattr(sys, "argv", ["generate_master_spreadsheet.py", "--config", config_path])
+        main()
+
+        assert output_file.exists()
+        assert not (tmp_path / "master_spreadsheet_full.csv").exists()
+
+    def test_set_writes_full_frame_spreadsheet_too(self, tmp_path, bids_run, monkeypatch):
+        _events_path, _derivatives_root = bids_run
+        output_file = tmp_path / "master_spreadsheet.csv"
+        full_frame_output_file = tmp_path / "master_spreadsheet_full.csv"
+        config_path = self._config(tmp_path, output_file, full_frame_output_file)
+
+        monkeypatch.setattr(sys, "argv", ["generate_master_spreadsheet.py", "--config", config_path])
+        main()
+
+        assert output_file.exists()
+        assert full_frame_output_file.exists()
+        full_table = pd.read_csv(full_frame_output_file)
+        assert len(full_table) == 20  # one row per volume of the 20-frame bids_run fixture

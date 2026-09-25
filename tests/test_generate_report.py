@@ -25,12 +25,16 @@ from workflows.generate_report import (
     compile_group_decoding,
     compile_group_cv_results,
     summarize_raw_for_timecourse,
+    broadcast_trial_label,
     resolve_overlay_styles,
     resolve_overlay_groups,
     resolve_timecourse_groups,
     render_timecourse_pages,
     _build_overlay_legend,
     load_annotation_info,
+    compute_event_markers,
+    resolve_marker_label,
+    draw_event_annotations,
     resolve_desc,
     resolve_group_impa_mni,
     resolve_mnispace,
@@ -506,6 +510,13 @@ class TestRenderDoubleDippingPage:
 # summarize_raw_for_timecourse
 # =====================================================
 
+def _distinct_trials(n):
+    """A unique (boldfile, trial_index) per row -- broadcast_trial_label is
+    then a no-op, matching pre-broadcast test expectations exactly (each row
+    already represents its own separate trial's contribution)."""
+    return {"boldfile": [f"run{i}.nii.gz" for i in range(n)], "trial_index": list(range(1, n + 1))}
+
+
 class TestSummarizeRawForTimecourse:
     def test_groups_by_window_index_and_regressor_label_without_overlay(self):
         raw = pd.DataFrame({
@@ -513,6 +524,7 @@ class TestSummarizeRawForTimecourse:
             "regressor_label": ["face", "face", "face", "face"],
             "evidence_face": [0.8, 0.6, 0.4, 0.2],
             "evidence_place": [0.2, 0.4, 0.6, 0.8],
+            **_distinct_trials(4),
         })
         result = summarize_raw_for_timecourse(raw)
 
@@ -527,13 +539,14 @@ class TestSummarizeRawForTimecourse:
             "window_index": [0, 0, 0, 0],
             "regressor_label": ["face", "face", "face", "face"],
             "evidence_face": [0.8, 0.6, 0.4, 0.2],
+            **_distinct_trials(4),
         })
         result = summarize_raw_for_timecourse(raw)
         expected_se = pd.Series([0.8, 0.6, 0.4, 0.2]).std(ddof=1) / (4 ** 0.5)
         assert result.iloc[0]["evidence_face_se"] == pytest.approx(expected_se)
 
     def test_se_is_zero_for_a_single_trial(self):
-        raw = pd.DataFrame({"window_index": [0], "regressor_label": ["face"], "evidence_face": [0.8]})
+        raw = pd.DataFrame({"window_index": [0], "regressor_label": ["face"], "evidence_face": [0.8], **_distinct_trials(1)})
         result = summarize_raw_for_timecourse(raw)
         assert result.iloc[0]["evidence_face_se"] == 0.0
 
@@ -544,6 +557,7 @@ class TestSummarizeRawForTimecourse:
             "trial_type": ["maintain_face", "maintain_face", "suppress_face", "suppress_face"],
             "evidence_face": [0.8, 0.6, 0.4, 0.2],
             "evidence_place": [0.2, 0.4, 0.6, 0.8],
+            **_distinct_trials(4),
         })
         overlay_conditions = {
             "maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"},
@@ -563,12 +577,89 @@ class TestSummarizeRawForTimecourse:
             "regressor_label": ["face", "face"],
             "trial_type": ["maintain_face", "unrelated_trial"],
             "evidence_face": [0.8, 0.5],
+            **_distinct_trials(2),
         })
         overlay_conditions = {"maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"}}
         result = summarize_raw_for_timecourse(raw, overlay_conditions)
 
         assert len(result) == 1
-        assert "1 row(s) matched no overlay condition" in capsys.readouterr().out
+        assert "1 row(s) belonged to a trial matching no overlay condition" in capsys.readouterr().out
+
+    def test_trial_tail_with_blank_regressor_label_plots_under_its_trial_content_label(self):
+        # frames 0-1 of trial 1 are the real "face" content event
+        # (regressor_label set); frame 2 is that same trial's trailing,
+        # unlabeled fixation/rest tail (regressor_label blank) -- it must
+        # still show up under "face", not get silently dropped
+        raw = pd.DataFrame({
+            "window_index": [0, 1, 2],
+            "regressor_label": ["face", "face", None],
+            "evidence_face": [0.8, 0.6, 0.4],
+            "boldfile": ["run1.nii.gz"] * 3,
+            "trial_index": [1, 1, 1],
+        })
+        result = summarize_raw_for_timecourse(raw)
+
+        assert set(result["window_index"]) == {0, 1, 2}
+        assert (result["regressor_label"] == "face").all()
+        assert result.set_index("window_index").loc[2, "evidence_face"] == pytest.approx(0.4)
+
+    def test_overlay_broadcasts_across_trial_tail_too(self):
+        # same shape as above, but for overlay_label: the trailing
+        # unlabeled frame belongs to the same "maintain" trial and must be
+        # grouped under "maintain", not dropped as "matched no overlay
+        # condition"
+        raw = pd.DataFrame({
+            "window_index": [0, 1, 2],
+            "regressor_label": ["face", "face", None],
+            "trial_type": ["maintain_face", "maintain_face", None],
+            "evidence_face": [0.8, 0.6, 0.4],
+            "boldfile": ["run1.nii.gz"] * 3,
+            "trial_index": [1, 1, 1],
+        })
+        overlay_conditions = {"maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"}}
+        result = summarize_raw_for_timecourse(raw, overlay_conditions)
+
+        assert set(result["window_index"]) == {0, 1, 2}
+        assert (result["overlay_label"] == "maintain").all()
+
+
+class TestBroadcastTrialLabel:
+    def test_fills_blank_labels_within_the_same_trial(self):
+        df = pd.DataFrame({
+            "boldfile": ["run1", "run1", "run1"],
+            "trial_index": [1, 1, 1],
+            "regressor_label": ["face", None, None],
+        })
+        result = broadcast_trial_label(df, "regressor_label")
+        assert result.tolist() == ["face", "face", "face"]
+
+    def test_different_trials_are_not_mixed(self):
+        df = pd.DataFrame({
+            "boldfile": ["run1", "run1", "run1", "run1"],
+            "trial_index": [1, 1, 2, 2],
+            "regressor_label": ["face", None, "place", None],
+        })
+        result = broadcast_trial_label(df, "regressor_label")
+        assert result.tolist() == ["face", "face", "place", "place"]
+
+    def test_trial_with_no_label_at_all_stays_null(self):
+        df = pd.DataFrame({
+            "boldfile": ["run1", "run1"],
+            "trial_index": [1, 1],
+            "regressor_label": [None, None],
+        })
+        result = broadcast_trial_label(df, "regressor_label")
+        assert result.isna().all()
+
+    def test_ambiguous_trial_warns_and_picks_deterministically(self, capsys):
+        df = pd.DataFrame({
+            "boldfile": ["run1", "run1"],
+            "trial_index": [1, 1],
+            "regressor_label": ["face", "place"],
+        })
+        result = broadcast_trial_label(df, "regressor_label")
+        assert (result == "face").all()  # alphabetically first
+        assert "more than one distinct regressor_label" in capsys.readouterr().out
 
 # =====================================================
 # resolve_overlay_styles
@@ -752,6 +843,7 @@ def _synthetic_timecourse_rows(overlay_trial_types, n_windows=3):
                     "regressor_label": true_cond, "trial_type": trial_type,
                     "evidence_face": 0.6 if true_cond == "face" else 0.4,
                     "evidence_place": 0.4 if true_cond == "face" else 0.6,
+                    "boldfile": f"{true_cond}_{trial_type}.nii.gz", "trial_index": 1,
                 })
     return rows
 
@@ -765,8 +857,8 @@ class TestRenderTimecoursePagesGroups:
         _write_decoding_raw(tmp_path, "desc1", "01", _synthetic_timecourse_rows(["maintain", "suppress"]))
         pdf_path = tmp_path / "out.pdf"
         with PdfPages(str(pdf_path)) as pdf:
-            render_timecourse_pages(pdf, str(tmp_path), "desc1", ["01"], window=None, tr=None,
-                                     median_duration={}, overlay_conditions=overlay)
+            render_timecourse_pages(pdf, str(tmp_path), "desc1", ["01"], event_markers=[], tr=None,
+                                     overlay_conditions=overlay)
             assert pdf.get_pagecount() == 1
 
     def test_group_key_splits_into_separate_blocks_with_own_legends(self, tmp_path):
@@ -777,8 +869,8 @@ class TestRenderTimecoursePagesGroups:
         _write_decoding_raw(tmp_path, "desc1", "01", _synthetic_timecourse_rows(["maintain_pos", "maintain_neg"]))
         pdf_path = tmp_path / "out.pdf"
         with PdfPages(str(pdf_path)) as pdf:
-            render_timecourse_pages(pdf, str(tmp_path), "desc1", ["01"], window=None, tr=None,
-                                     median_duration={}, overlay_conditions=overlay)
+            render_timecourse_pages(pdf, str(tmp_path), "desc1", ["01"], event_markers=[], tr=None,
+                                     overlay_conditions=overlay)
             assert pdf.get_pagecount() == 1
         # the actual 2-block (pos/neg) x 2-true-condition grid shape, and
         # that each block gets its own legend, is verified directly via
@@ -799,8 +891,8 @@ class TestRenderTimecoursePagesGroups:
                              _synthetic_timecourse_rows(["maintain_pos", "maintain_neg", "suppress"]))
         pdf_path = tmp_path / "out.pdf"
         with PdfPages(str(pdf_path)) as pdf:
-            render_timecourse_pages(pdf, str(tmp_path), "desc1", ["01"], window=None, tr=None,
-                                     median_duration={}, overlay_conditions=overlay)
+            render_timecourse_pages(pdf, str(tmp_path), "desc1", ["01"], event_markers=[], tr=None,
+                                     overlay_conditions=overlay)
             assert pdf.get_pagecount() == 1
         assert "group" in capsys.readouterr().out.lower()
 
@@ -927,10 +1019,7 @@ def _write_config(tmp_path, timecourse_decoding_extra):
         "model_conditions": {
             "timecourse_decoding": {
                 "conditions": {"face": {"column": "trial_type", "match": "regex", "value": ".*face.*"}},
-                "window": {
-                    "start": {"reference": "onset", "offset_seconds": 0},
-                    "end": {"reference": "offset_end", "offset_seconds": 10},
-                },
+                "trial_start_event": {"column": "trial_type", "match": "exact", "value": "view_face"},
                 **timecourse_decoding_extra,
             }
         }
@@ -940,14 +1029,17 @@ def _write_config(tmp_path, timecourse_decoding_extra):
     return str(path), config
 
 
-def _write_master_spreadsheet(tmp_path, boldfile):
-    master = pd.DataFrame([{
-        "subject": "01", "session": "", "task": "test", "run": 1,
-        "trial_type": "maintain_face", "trial_index": 1, "onset": 0.0, "duration": 2.0,
-        "volume_of_interest": 0, "boldfile": boldfile, "eventfile": "x",
-    }])
-    path = tmp_path / "master_spreadsheet.csv"
-    master.to_csv(path, index=False)
+def _write_full_frame_spreadsheet(tmp_path, boldfile):
+    full_frame = pd.DataFrame([
+        {"subject": "01", "session": "", "task": "test", "run": 1,
+         "trial_type": "view_face", "onset": 0.0, "duration": 1.0,
+         "volume_of_interest": 0, "event_index": 1, "boldfile": boldfile, "eventfile": "x"},
+        {"subject": "01", "session": "", "task": "test", "run": 1,
+         "trial_type": "maintain_face", "onset": 1.0, "duration": 1.0,
+         "volume_of_interest": 1, "event_index": 2, "boldfile": boldfile, "eventfile": "x"},
+    ])
+    path = tmp_path / "master_spreadsheet_full.csv"
+    full_frame.to_csv(path, index=False)
     return str(path)
 
 
@@ -955,9 +1047,9 @@ class TestLoadAnnotationInfoOverlay:
     def test_returns_overlay_conditions_when_present(self, tmp_path, synthetic_bold_file):
         overlay = {"maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"}}
         config_path, config = _write_config(tmp_path, {"overlay": overlay})
-        master_path = _write_master_spreadsheet(tmp_path, synthetic_bold_file)
+        full_frame_path = _write_full_frame_spreadsheet(tmp_path, synthetic_bold_file)
 
-        window, tr, median_duration, overlay_conditions = load_annotation_info(config_path, master_path)
+        event_markers, tr, overlay_conditions = load_annotation_info(config_path, full_frame_path)
 
         assert overlay_conditions == overlay
         assert tr == pytest.approx(2.0)  # synthetic_bold_file's TR
@@ -965,23 +1057,227 @@ class TestLoadAnnotationInfoOverlay:
     def test_overlay_conditions_may_carry_color_and_line_type(self, tmp_path, synthetic_bold_file):
         overlay = {"maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*", "color": 0, "line_type": "--"}}
         config_path, config = _write_config(tmp_path, {"overlay": overlay})
-        master_path = _write_master_spreadsheet(tmp_path, synthetic_bold_file)
+        full_frame_path = _write_full_frame_spreadsheet(tmp_path, synthetic_bold_file)
 
-        _, _, _, overlay_conditions = load_annotation_info(config_path, master_path)
+        _, _, overlay_conditions = load_annotation_info(config_path, full_frame_path)
 
         assert overlay_conditions == overlay
 
     def test_empty_overlay_conditions_when_absent(self, tmp_path, synthetic_bold_file):
         config_path, _ = _write_config(tmp_path, {})
-        master_path = _write_master_spreadsheet(tmp_path, synthetic_bold_file)
+        full_frame_path = _write_full_frame_spreadsheet(tmp_path, synthetic_bold_file)
 
-        _, _, _, overlay_conditions = load_annotation_info(config_path, master_path)
+        _, _, overlay_conditions = load_annotation_info(config_path, full_frame_path)
 
         assert overlay_conditions == {}
 
     def test_empty_overlay_conditions_when_config_missing(self):
-        _, _, _, overlay_conditions = load_annotation_info(None, None)
+        _, _, overlay_conditions = load_annotation_info(None, None)
         assert overlay_conditions == {}
+
+
+# =====================================================
+# compute_event_markers / draw_event_annotations
+# =====================================================
+
+VIEW_FACE_ANCHOR = {"column": "trial_type", "match": "exact", "value": "view_face"}
+
+
+def _tc_row(boldfile, vol, trial_type, onset, event_index):
+    return {"boldfile": boldfile, "volume_of_interest": vol, "trial_type": trial_type,
+            "onset": onset, "event_index": event_index}
+
+
+class TestComputeEventMarkers:
+    def test_reliable_events_get_zero_std_markers(self):
+        rows = []
+        for run in ("run1", "run2"):
+            rows += [
+                _tc_row(run, 0, "view_face", 0.0, 1),
+                _tc_row(run, 1, "maintain", 1.0, 2),
+                _tc_row(run, 2, "maintain", 1.0, 2),
+                _tc_row(run, 3, "fixation", 3.0, 3),
+            ]
+        df = pd.DataFrame(rows)
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
+
+        by_type = {m["trial_type"]: m for m in markers}
+        assert set(by_type) == {"view_face", "maintain", "fixation"}
+        assert by_type["view_face"]["mean_start"] == 0
+        assert by_type["view_face"]["std_start"] == 0
+        assert by_type["maintain"]["mean_start"] == 1
+        assert by_type["maintain"]["mean_duration"] == 2
+        assert by_type["fixation"]["mean_start"] == 3
+
+    def test_frequency_counts_distinct_boldfile_trial_pairs_not_just_trial_index(self):
+        # two trials PER boldfile (trial_index resets to 1 at each boldfile's
+        # own second anchor), with a *different* second-position event in
+        # each ("maintain" in trial 1, "probe" in trial 2, of both runs) --
+        # every trial has *something* at that position (4 of 4 = 100%), so
+        # it must still be annotated, combined into one "maintain/probe"
+        # marker (see the mutually-exclusive-value docstring on
+        # compute_event_markers) rather than incorrectly computing each
+        # value's frequency against the whole-dataset trial count (2 of 4 =
+        # 50%, which would have been a coincidental pass here but is the
+        # wrong number, and fails outright once there are more than 2
+        # mutually exclusive values -- see the Haxby-style test below).
+        rows = []
+        for run in ("run1", "run2"):
+            rows += [
+                _tc_row(run, 0, "view_face", 0.0, 1),
+                _tc_row(run, 1, "maintain", 1.0, 2),  # only in trial 1 of each run
+                _tc_row(run, 2, "view_face", 2.0, 3),
+                _tc_row(run, 3, "probe", 3.0, 4),  # only in trial 2 of each run
+            ]
+        df = pd.DataFrame(rows)
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
+        by_type = {m["trial_type"]: m for m in markers}
+        assert "maintain/probe" in by_type
+
+    def test_mutually_exclusive_values_combine_into_one_labeled_marker(self):
+        # Haxby-style block design: the 2nd position is always exactly one
+        # of 8 categories, never the same one twice in a row -- each
+        # individual category value is only ~1/8 of trials (well under the
+        # 50% default threshold), but *something* real happens there in
+        # every single trial, so it must still be annotated as a single
+        # combined marker, not silently dropped for every value
+        categories = ["bottle", "cat", "chair", "face", "house", "scissors", "scrambledpix", "shoe"]
+        rows = []
+        for i, category in enumerate(categories):
+            rows.append(_tc_row(f"run{i}", 0, "view_face", 0.0, 1))
+            rows.append(_tc_row(f"run{i}", 1, category, 1.0, 2))
+        df = pd.DataFrame(rows)
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR, max_label_values=4)
+
+        assert len(markers) == 2  # view_face, plus one combined marker for the categories
+        combined = [m for m in markers if m["trial_type"] != "view_face"][0]
+        assert combined["trial_type"] == "bottle/cat/chair/face/..."
+        assert combined["mean_start"] == 1
+
+    def test_annotation_labels_names_a_combined_marker(self):
+        # same Haxby-style shape as above, but with annotation_labels
+        # configured -- the combined marker should show the friendly name
+        # ("item") instead of the auto-joined "bottle/cat/chair/face/..."
+        categories = ["bottle", "cat", "chair", "face", "house", "scissors", "scrambledpix", "shoe"]
+        rows = []
+        for i, category in enumerate(categories):
+            rows.append(_tc_row(f"run{i}", 0, "view_face", 0.0, 1))
+            rows.append(_tc_row(f"run{i}", 1, category, 1.0, 2))
+        df = pd.DataFrame(rows)
+        annotation_labels = {"item": categories}
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR, annotation_labels=annotation_labels)
+
+        combined = [m for m in markers if m["trial_type"] != "view_face"][0]
+        assert combined["trial_type"] == "item"
+
+    def test_repeated_same_type_subevents_merge_into_one_marker(self):
+        # 5 separate "cat" flashes back to back (distinct event_index, same
+        # trial_type, no other real event between them) must collapse into
+        # ONE annotated sub-event spanning all 5 frames, not 5 separate
+        # markers each 1 frame wide at the same position
+        rows = [_tc_row("run1", 0, "view_face", 0.0, 1)]
+        rows += [_tc_row("run1", 1 + i, "cat", float(1 + i), 2 + i) for i in range(5)]
+        rows.append(_tc_row("run1", 6, "fixation", 6.0, 7))
+        df = pd.DataFrame(rows)
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
+
+        by_type = {m["trial_type"]: m for m in markers}
+        assert set(by_type) == {"view_face", "cat", "fixation"}
+        assert by_type["cat"]["mean_start"] == 1
+        assert by_type["cat"]["mean_duration"] == 5  # all 5 flashes merged
+        assert by_type["fixation"]["mean_start"] == 6
+
+    def test_rare_event_below_frequency_threshold_is_dropped(self):
+        rows = []
+        for i, run in enumerate(("run1", "run2", "run3", "run4")):
+            rows.append(_tc_row(run, 0, "view_face", 0.0, 1))
+            if i == 0:
+                rows.append(_tc_row(run, 1, "probe", 1.0, 2))  # only 1 of 4 trials
+        df = pd.DataFrame(rows)
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
+        assert "probe" not in {m["trial_type"] for m in markers}
+
+    def test_timecourse_conditions_scopes_to_qualifying_boldfiles(self):
+        # "run2" never has a row matching `conditions` (no "maintain" event)
+        # -- it must be excluded from the marker computation entirely, the
+        # same way build_timecourse_instructions would exclude it from
+        # decoding, not just left contributing unscored rows
+        rows = [
+            _tc_row("run1", 0, "view_face", 0.0, 1),
+            _tc_row("run1", 1, "maintain", 1.0, 2),
+            _tc_row("run2", 0, "view_face", 0.0, 1),
+            _tc_row("run2", 1, "probe", 1.0, 2),  # would otherwise dilute/appear as a marker
+        ]
+        df = pd.DataFrame(rows)
+        conditions = {"maintain": {"column": "trial_type", "match": "exact", "value": "maintain"}}
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR, timecourse_conditions=conditions)
+        trial_types = {m["trial_type"] for m in markers}
+        assert "probe" not in trial_types  # run2 excluded entirely
+        assert "maintain" in trial_types
+
+    def test_jittery_start_time_has_nonzero_std(self):
+        rows = [
+            _tc_row("run1", 0, "view_face", 0.0, 1),
+            _tc_row("run1", 1, "probe", 1.0, 2),
+            _tc_row("run2", 0, "view_face", 0.0, 1),
+            _tc_row("run2", 2, "probe", 2.0, 2),  # starts one TR later this trial
+        ]
+        df = pd.DataFrame(rows)
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
+        by_type = {m["trial_type"]: m for m in markers}
+        assert by_type["probe"]["std_start"] > 0
+
+
+class TestResolveMarkerLabel:
+    def test_single_value_returned_as_is_even_if_covered_by_a_group(self):
+        # only "bottle" occurred at this position -- must stay "bottle", not
+        # get force-relabeled just because a configured group happens to
+        # include it
+        label = resolve_marker_label(["bottle"], {"item": ["bottle", "cat"]})
+        assert label == "bottle"
+
+    def test_group_fully_covering_the_values_wins(self):
+        label = resolve_marker_label(["bottle", "cat"], {"item": ["bottle", "cat", "chair"]})
+        assert label == "item"
+
+    def test_group_missing_a_present_value_does_not_match(self):
+        # "shoe" isn't in the "item" group -- the group can't be used even
+        # though it covers some of the values
+        label = resolve_marker_label(["bottle", "shoe"], {"item": ["bottle", "cat", "chair"]})
+        assert label == "bottle/shoe"
+
+    def test_first_matching_group_wins_in_config_order(self):
+        labels = {
+            "narrow": ["bottle", "cat"],
+            "wide": ["bottle", "cat", "chair", "face"],
+        }
+        assert resolve_marker_label(["bottle", "cat"], labels) == "narrow"
+
+    def test_falls_back_to_joined_values_when_nothing_configured(self):
+        label = resolve_marker_label(["bottle", "cat"], None)
+        assert label == "bottle/cat"
+
+    def test_truncates_past_max_label_values(self):
+        label = resolve_marker_label(["a", "b", "c", "d", "e"], None, max_label_values=3)
+        assert label == "a/b/c/..."
+
+
+class TestDrawEventAnnotations:
+    def test_reliable_marker_draws_shaded_span(self):
+        fig, ax = plt.subplots()
+        ax.plot([0, 1, 2], [0, 1, 0])
+        markers = [{"trial_type": "maintain", "mean_start": 1.0, "std_start": 0.0, "mean_duration": 2.0}]
+        draw_event_annotations(ax, markers, tr=1.0, show_labels=True)
+        assert len(ax.patches) >= 1
+        plt.close(fig)
+
+    def test_jittery_marker_draws_multiple_fading_bands(self):
+        fig, ax = plt.subplots()
+        ax.plot([0, 1, 2], [0, 1, 0])
+        markers = [{"trial_type": "probe", "mean_start": 1.0, "std_start": 2.0, "mean_duration": 1.0}]
+        draw_event_annotations(ax, markers, tr=1.0, show_labels=False)
+        assert len(ax.patches) == 4  # 4 fading bands, per the "blurry" implementation
+        plt.close(fig)
 
 
 # =====================================================

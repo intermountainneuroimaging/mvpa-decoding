@@ -16,21 +16,23 @@ Usage:
     # desc is read from --config's model.desc, same sanitization the workflow
     # scripts use, so it always matches where they actually wrote output
     python generate_report.py --analysis-output-dir ./out \\
-        --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
+        --config examples/config-generalization.example.json \\
+        --full-frame-spreadsheet master_spreadsheet_full.csv
 
     # single-subject report -- scoped to just <dir>/<desc>/4057/
     python generate_report.py --analysis-output-dir ./out --subject 4057 \\
-        --config examples/config-generalization.example.json --master-spreadsheet master_spreadsheet.csv
+        --config examples/config-generalization.example.json \\
+        --full-frame-spreadsheet master_spreadsheet_full.csv
 
     # --desc still works directly, if you'd rather not point at a config
     python generate_report.py --analysis-output-dir ./out --desc gm_valence_classifier
 
 Exactly one of --desc/--config is required, to know which classifier's
-output to read. --master-spreadsheet is always optional, and --config's
-timecourse_decoding conditions/window/overlay are used for annotation
-best-effort even when --desc is also given -- without --master-spreadsheet
-(or without --config at all) the report still renders, just without those
-annotations.
+output to read. --full-frame-spreadsheet is always optional, and --config's
+timecourse_decoding trial_start_event/conditions/overlay are used for
+annotation best-effort even when --desc is also given -- without
+--full-frame-spreadsheet (or without --config at all) the report still
+renders, just without those per-event timing annotations.
 """
 
 import argparse
@@ -56,7 +58,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
-from utils.mvpa_common import label_rows, get_bold_header_info, resolve_window_times, quick_safe, impa_tag
+from utils.mvpa_common import label_rows, label_rows_optional, get_bold_header_info, quick_safe, impa_tag, partition_into_trials, qualifying_boldfiles
 
 
 # =====================================================
@@ -88,10 +90,16 @@ def parse_args():
     parser.add_argument(
         "--config", default=None,
         help="mvpa config JSON. Supplies model.desc (see --desc) when --desc is omitted, and "
-             "timecourse_decoding conditions/window/overlay for annotation either way. Optional only if "
-             "--desc is given explicitly."
+             "timecourse_decoding trial_start_event/conditions/overlay for annotation either way. Optional "
+             "only if --desc is given explicitly."
     )
-    parser.add_argument("--master-spreadsheet", default=None, help="master_spreadsheet.csv -- needed for TR + median trial duration (timecourse annotation). Optional.")
+    parser.add_argument(
+        "--full-frame-spreadsheet", default=None,
+        help="The full-frame spreadsheet (event_extraction.full_frame_output_file) -- needed to annotate "
+             "the timecourse page with real per-trial event timing (onset/duration of every real event "
+             "type observed inside a trial). Optional; without it the timecourse page still renders, "
+             "just without those annotations."
+    )
     parser.add_argument("--output", default=None, help="Output PDF path. Defaults to <dir>/<desc>/report_<desc>.pdf (group) or <dir>/<desc>/<subject>/report_<subject>.pdf (single-subject).")
     return parser.parse_args()
 
@@ -364,47 +372,165 @@ def compile_group_cv_results(analysis_output_dir: str, desc: str, subjects: list
 # Timecourse annotation info (best-effort -- never raises)
 # =====================================================
 
-def load_annotation_info(config_path, master_spreadsheet_path):
-    """Returns (window, tr, median_duration_by_condition, overlay_conditions), any
-    of which may be None/empty if the optional inputs are missing or insufficient --
-    annotation is strictly best-effort and never blocks the rest of the report.
-    overlay_conditions is model_conditions.timecourse_decoding.overlay verbatim
-    (empty dict if absent) -- see summarize_raw_for_timecourse/resolve_overlay_styles
-    for how it's used (filtering/labeling and, via each entry's own optional
+def resolve_marker_label(distinct_types: list, annotation_labels: dict = None, max_label_values: int = 4) -> str:
+    """The single value when every instance at a position agrees. Otherwise
+    (a mutually-exclusive "content" position, e.g. one of several trained
+    categories or operations) -- the first entry of annotation_labels whose
+    own value list fully covers distinct_types wins (config order); config
+    values not present in distinct_types are fine, only the reverse
+    (something in distinct_types missing from the group) disqualifies a
+    group. Falls back to the distinct values themselves, joined with "/"
+    (truncated with "..." past max_label_values), when nothing configured
+    covers this exact combination."""
+    if len(distinct_types) == 1:
+        return distinct_types[0]
+
+    remaining = set(distinct_types)
+    for name, group_values in (annotation_labels or {}).items():
+        if remaining <= set(group_values):
+            return name
+
+    shown = distinct_types[:max_label_values]
+    return "/".join(shown) + ("/..." if len(distinct_types) > max_label_values else "")
+
+
+def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, timecourse_conditions: dict = None, annotation_labels: dict = None, min_frequency: float = 0.5, max_label_values: int = 4):
+    """Returns a list of {"trial_type", "mean_start", "std_start", "mean_duration"}
+    (all in window_index/TR units), one per real *ordinal position* (1st real
+    sub-event in the trial, 2nd, 3rd, ...) observed often enough (>=
+    min_frequency of trials have something there) to annotate --
+    rare/misaligned positions are dropped rather than adding noisy one-off
+    markers. Before ranking, consecutive real events within the same trial
+    that share the identical trial_type are merged into one sub-event first
+    (the same "a repeated run of the same real value is one occurrence" rule
+    partition_into_trials already applies to trial boundaries) -- e.g. a
+    block design's 10 repeated same-category stimulus flashes are one
+    annotated sub-event, not 10.
+
+    Grouping by ordinal position rather than literal trial_type matters
+    whenever a trial's Nth event is one of several **mutually exclusive**
+    real values -- e.g. one of several trained categories in a block design,
+    or one of several operations in a working-memory design -- since any
+    single value alone is often well under min_frequency (each only ever
+    occupying its own fraction of trials) even though *something* reliably
+    happens at that position in nearly every trial. "trial_type" is resolved
+    by resolve_marker_label -- the single value when every instance at that
+    position agrees, otherwise annotation_labels' friendly name for that
+    combination if configured (e.g. {"item": ["bottle", "cat", ...]}), else
+    the distinct values themselves joined with "/" -- so the marker still
+    shows *where* that position falls even when *what* happens there varies
+    trial to trial.
+
+    Frames before a boldfile's first anchor (trial_index == 0) aren't part
+    of any real trial and are excluded. timecourse_conditions, when given,
+    scopes full_frame_df to the same qualifying boldfiles
+    build_timecourse_instructions would actually decode (see
+    qualifying_boldfiles) -- so annotation reflects only the runs really in
+    scope, not every boldfile in full_frame_df."""
+    if timecourse_conditions:
+        full_frame_df = full_frame_df[full_frame_df["boldfile"].isin(
+            qualifying_boldfiles(full_frame_df, timecourse_conditions)
+        )]
+    trials = partition_into_trials(full_frame_df, trial_start_event)
+    trials = trials[trials["trial_index"] > 0]
+    if trials.empty:
+        return []
+
+    n_trials = trials[["boldfile", "trial_index"]].drop_duplicates().shape[0]
+
+    events = trials.dropna(subset=["event_index"]).groupby(["boldfile", "event_index"], sort=False).agg(
+        trial_type=("trial_type", "first"),
+        trial_index=("trial_index", "first"),
+        start=("window_index", "min"),
+        n_frames=("window_index", "size"),
+    ).reset_index()
+    events = events.sort_values(["boldfile", "trial_index", "start"]).reset_index(drop=True)
+
+    # merge consecutive real events (same trial, back-to-back, identical
+    # trial_type) into one combined sub-event before ranking -- the same "a
+    # repeated run of the same real value is one occurrence" rule
+    # partition_into_trials already applies to trial boundaries, applied
+    # here to sub-event positions within a trial (e.g. a block design's 10
+    # repeated same-category stimulus flashes are one annotated sub-event,
+    # not 10)
+    same_trial = (events["boldfile"] == events["boldfile"].shift()) & (events["trial_index"] == events["trial_index"].shift())
+    same_type = events["trial_type"] == events["trial_type"].shift()
+    run_id = (~(same_trial & same_type)).cumsum()
+    events = events.groupby(run_id, sort=False).agg(
+        boldfile=("boldfile", "first"),
+        trial_index=("trial_index", "first"),
+        trial_type=("trial_type", "first"),
+        start=("start", "min"),
+        n_frames=("n_frames", "sum"),
+    ).reset_index(drop=True)
+
+    events["position"] = events.groupby(["boldfile", "trial_index"]).cumcount() + 1
+
+    markers = []
+    for position, group in events.groupby("position"):
+        frequency = group[["boldfile", "trial_index"]].drop_duplicates().shape[0] / n_trials
+        if frequency < min_frequency:
+            continue
+        distinct_types = sorted(group["trial_type"].unique())
+        label = resolve_marker_label(distinct_types, annotation_labels, max_label_values)
+        markers.append({
+            "trial_type": label,
+            "mean_start": float(group["start"].mean()),
+            "std_start": float(group["start"].std(ddof=0)) if len(group) > 1 else 0.0,
+            "mean_duration": float(group["n_frames"].mean()),
+        })
+
+    return sorted(markers, key=lambda m: m["mean_start"])
+
+
+def load_annotation_info(config_path, full_frame_spreadsheet_path):
+    """Returns (event_markers, tr, overlay_conditions), any of which may be
+    None/empty if the optional inputs are missing or insufficient --
+    annotation is strictly best-effort and never blocks the rest of the
+    report. event_markers is compute_event_markers' output: one entry per
+    real event type reliably observed inside a trial, used to draw per-event
+    timing annotations on the timecourse page -- labeled per
+    model_conditions.timecourse_decoding.annotation_labels when given (see
+    resolve_marker_label), a friendly name for a group of mutually exclusive
+    trial_type values (empty dict if absent, meaning no group gets a
+    friendly name -- resolve_marker_label falls back to auto-joining the
+    values). overlay_conditions is
+    model_conditions.timecourse_decoding.overlay verbatim (empty dict if
+    absent) -- see summarize_raw_for_timecourse/resolve_overlay_styles for
+    how it's used (filtering/labeling and, via each entry's own optional
     "color"/"line_type", the timecourse page's per-trace styling)."""
-    if not config_path or not master_spreadsheet_path:
-        return None, None, {}, {}
+    if not config_path or not full_frame_spreadsheet_path:
+        return [], None, {}
     if not os.path.isfile(config_path):
         print(f"(!) --config {config_path} not found -- skipping timecourse annotation")
-        return None, None, {}, {}
-    if not os.path.isfile(master_spreadsheet_path):
-        print(f"(!) --master-spreadsheet {master_spreadsheet_path} not found -- skipping timecourse annotation")
-        return None, None, {}, {}
+        return [], None, {}
+    if not os.path.isfile(full_frame_spreadsheet_path):
+        print(f"(!) --full-frame-spreadsheet {full_frame_spreadsheet_path} not found -- skipping timecourse annotation")
+        return [], None, {}
 
     with open(config_path) as f:
         cfg = json.load(f)
     tc_cfg = cfg.get("model_conditions", {}).get("timecourse_decoding")
     if not tc_cfg:
         print("(!) config has no model_conditions.timecourse_decoding -- skipping timecourse annotation")
-        return None, None, {}, {}
+        return [], None, {}
 
-    window = tc_cfg.get("window")
-    conditions = tc_cfg.get("conditions", {})
+    trial_start_event = tc_cfg.get("trial_start_event")
+    timecourse_conditions = tc_cfg.get("conditions", {})
     overlay_conditions = tc_cfg.get("overlay", {})
+    annotation_labels = tc_cfg.get("annotation_labels", {})
 
-    master = pd.read_csv(
-        master_spreadsheet_path, dtype={"subject": str, "session": str, "task": str, "trial_type": str}
+    full_frame = pd.read_csv(
+        full_frame_spreadsheet_path, dtype={"subject": str, "session": str, "task": str, "trial_type": str}
     )
-    labeled = label_rows(master, conditions)
-
-    # median duration per condition, from one row per source event (dedupe the
-    # per-volume explosion via boldfile+trial_index)
-    dedup = labeled.drop_duplicates(subset=["boldfile", "trial_index"])
-    median_duration = dedup.groupby("regressor_label")["duration"].median().to_dict()
+    event_markers = (
+        compute_event_markers(full_frame, trial_start_event, timecourse_conditions, annotation_labels)
+        if trial_start_event else []
+    )
 
     # TR derived from the data (majority across boldfiles), not hardcoded
     trs = []
-    for boldfile in dedup["boldfile"].unique():
+    for boldfile in full_frame["boldfile"].unique():
         if os.path.exists(boldfile):
             try:
                 tr, _ = get_bold_header_info(boldfile)
@@ -414,14 +540,14 @@ def load_annotation_info(config_path, master_spreadsheet_path):
 
     if not trs:
         print("(!) could not read TR from any boldfile -- timecourse x-axis will stay in window_index units")
-        return window, None, median_duration, overlay_conditions
+        return event_markers, None, overlay_conditions
 
     tr_counts = Counter(trs)
     tr = tr_counts.most_common(1)[0][0]
     if len(tr_counts) > 1:
         print(f"(!) multiple distinct TRs found across boldfiles ({dict(tr_counts)}) -- using the majority TR={tr}")
 
-    return window, tr, median_duration, overlay_conditions
+    return event_markers, tr, overlay_conditions
 
 
 # =====================================================
@@ -823,6 +949,33 @@ def render_confusion_matrices_page(pdf, analysis_output_dir, desc, subjects):
     plt.close(fig)
 
 
+def broadcast_trial_label(df: pd.DataFrame, label_col: str, trial_cols=("boldfile", "trial_index")) -> pd.Series:
+    """label_col's values, broadcast across every row of the same
+    (boldfile, trial_index) trial -- since continuous timecourse decoding
+    labels only the real content event within a trial (regressor_label is
+    blank for its fixation/rest/ITI tail, see build_timecourse_instructions),
+    grouping directly by label_col would silently drop that trailing,
+    unlabeled portion of the trial from the timecourse plot instead of
+    showing the full trial through to its end. Returns label_col's dtype;
+    a trial with no non-null value anywhere keeps all-null (still excluded,
+    same as before -- there's nothing to plot it as). A trial with more than
+    one *distinct* non-null value is unexpected (conditions should partition
+    trials, not split one down the middle) and prints a warning; the
+    alphabetically-first value wins for that trial, deterministically."""
+    multi = (
+        df.groupby(list(trial_cols))[label_col]
+        .agg(lambda s: s.dropna().nunique())
+    )
+    ambiguous = multi[multi > 1]
+    if len(ambiguous):
+        print(f"  (!) {len(ambiguous)} trial(s) have more than one distinct {label_col} value -- "
+              f"using the alphabetically-first one for the timecourse plot")
+
+    ordered = df.sort_values(list(trial_cols) + [label_col], na_position="last")
+    broadcast = ordered.groupby(list(trial_cols))[label_col].transform("first")
+    return broadcast.reindex(df.index)
+
+
 def summarize_raw_for_timecourse(raw_df: pd.DataFrame, overlay_conditions: dict = None) -> pd.DataFrame:
     """One row per (window_index, regressor_label[, overlay_label]) -- for each
     evidence_* column, both the mean *and* the trial-to-trial standard error
@@ -830,20 +983,35 @@ def summarize_raw_for_timecourse(raw_df: pd.DataFrame, overlay_conditions: dict 
     own raw rows, /sqrt(n)), suffixed evidence_*_se. Computed directly from the
     raw per-TR file rather than the pre-aggregated summary CSV specifically so
     this trial-level spread is available at all -- the summary only ever kept
-    the mean (mvpa_common.summarize_decoding() has no equivalent). When
-    overlay_conditions is given, rows are additionally tagged via label_rows
-    (dropping unmatched rows, count printed) and grouped by overlay_label as
-    an extra key. Each overlay entry may carry "color"/"line_type" alongside
-    its query fields (label_rows/evaluate_query_node only ever read the query
-    keys they need, so these are ignored here and picked up separately by
-    resolve_overlay_styles for the actual plot styling)."""
-    df = raw_df
+    the mean (mvpa_common.summarize_decoding() has no equivalent).
+
+    regressor_label (and overlay_label, when overlay_conditions is given) are
+    first broadcast across each row's whole trial (broadcast_trial_label) --
+    otherwise grouping directly by these per-frame labels would silently
+    plot only a trial's labeled content event and cut off its unlabeled
+    fixation/rest/ITI tail, instead of the full trial through to its end.
+    When overlay_conditions is given, rows are additionally tagged via
+    label_rows (dropping unmatched rows, count printed) and grouped by
+    overlay_label as an extra key. Each overlay entry may carry "color"/
+    "line_type" alongside its query fields (label_rows/evaluate_query_node
+    only ever read the query keys they need, so these are ignored here and
+    picked up separately by resolve_overlay_styles for the actual plot
+    styling)."""
+    df = raw_df.copy()
+    df["regressor_label"] = broadcast_trial_label(df, "regressor_label")
     group_cols = ["window_index", "regressor_label"]
     if overlay_conditions:
-        df = label_rows(df, overlay_conditions, label_column="overlay_label")
-        dropped = len(raw_df) - len(df)
+        # label_rows_optional (not label_rows) so a trial's unlabeled tail
+        # survives long enough to inherit its trial's own overlay_label
+        # below -- only whole trials that never matched any overlay
+        # condition get dropped, not just their trailing unmatched frames
+        df = label_rows_optional(df, overlay_conditions, label_column="overlay_label")
+        df["overlay_label"] = broadcast_trial_label(df, "overlay_label")
+        before = len(df)
+        df = df[df["overlay_label"].notna()]
+        dropped = before - len(df)
         if dropped:
-            print(f"  (!) {dropped} row(s) matched no overlay condition -- dropped from the timecourse plot")
+            print(f"  (!) {dropped} row(s) belonged to a trial matching no overlay condition -- dropped from the timecourse plot")
         group_cols = group_cols + ["overlay_label"]
 
     evidence_cols = [c for c in df.columns if c.startswith("evidence_")]
@@ -989,12 +1157,51 @@ def _build_overlay_legend(cats: list, overlay_styles: dict, ncol: int, overlay_c
     return list(handles), list(labels)
 
 
-def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr, median_duration,
+def draw_event_annotations(ax, event_markers, tr, show_labels):
+    """One annotation per compute_event_markers() entry: a light shaded
+    axvspan over the event's typical [start, start+duration) plus a dotted
+    axvline at its start and a text label there, when that event reliably
+    starts at the same relative time across trials (std_start < half a TR).
+    Otherwise ("blurry" -- real trial-to-trial jitter in when it starts) skip
+    the crisp line/edges and instead fade several progressively wider,
+    fainter bands outward from the mean start -- sized off std_start -- so
+    the boundary visibly softens rather than showing a falsely precise edge."""
+    ylim = ax.get_ylim()
+    for marker in event_markers:
+        start = marker["mean_start"] * tr
+        duration = marker["mean_duration"] * tr
+        std = marker["std_start"] * tr
+        label = marker["trial_type"]
+
+        if std < 0.5 * tr:
+            ax.axvspan(start, start + duration, color="gray", alpha=0.12, zorder=0)
+            ax.axvline(start, color="gray", linestyle=":", linewidth=0.75, zorder=0)
+        else:
+            for band, alpha in zip((0.5, 1.0, 1.5, 2.0), (0.10, 0.07, 0.05, 0.03)):
+                half_width = band * std
+                ax.axvspan(start - half_width, start + duration + half_width, color="gray", alpha=alpha, zorder=0)
+            label = f"{label} (variable timing)"
+
+        if show_labels:
+            ax.text(start, ylim[1], label, fontsize=6.5, ha="left", va="bottom", rotation=45)
+
+
+def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, event_markers, tr,
                              overlay_conditions=None):
     """Timecourse decoding always comes from the complete-training-set
     classifier (mvpa_workflow.py never runs it per-fold), so there's exactly
     one decoding_raw file per subject regardless of whether model.kfold_cv
     is also configured -- no fold-level variability source anymore.
+
+    Each subplot's x-axis spans the full trial (anchor to next anchor) by
+    default, since decoding_results.csv now covers every frame of every
+    trial continuously and summarize_raw_for_timecourse broadcasts each
+    row's regressor_label/overlay_label across its whole trial (see
+    broadcast_trial_label) -- so a trial's unlabeled fixation/rest/ITI tail
+    still plots as part of its content event's own line, instead of being
+    silently cut off where the real per-frame label stops. event_markers
+    (compute_event_markers' output, via load_annotation_info) draws the
+    real per-trial event timing on top -- see draw_event_annotations.
 
     overlay_conditions both filters/labels rows (as always) and, via each
     entry's own optional "color"/"line_type", controls exactly how its trace
@@ -1104,7 +1311,7 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr
     # there's only one subject's own decoding
     variability_label = "darker band: +/- SE across subjects; lighter band: +/- trial-to-trial SE"
     x_is_seconds = tr is not None
-    x_label = "Time from window start (s)" if x_is_seconds else "window_index"
+    x_label = "Time from trial start (s)" if x_is_seconds else "window_index"
 
     first_ax = None
     for i, row in enumerate(grid_rows):
@@ -1147,18 +1354,8 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, window, tr
                                  alpha=0.25, color=color, zorder=2)
                 ax.plot(x, agg["mean"], color=color, linestyle=linestyle, linewidth=1.5, zorder=3)
 
-            if window is not None and x_is_seconds:
-                dur = median_duration.get(true_cond)
-                if dur is not None:
-                    window_start_offset, _ = resolve_window_times(window, onset=0, duration=dur)
-                    onset_mark = -window_start_offset
-                    end_mark = dur - window_start_offset
-                    ax.axvline(onset_mark, color="gray", linestyle="--", linewidth=0.75)
-                    ax.axvline(end_mark, color="gray", linestyle=":", linewidth=0.75)
-                    if row["is_first_in_block"]:
-                        ylim = ax.get_ylim()
-                        ax.text(onset_mark, ylim[1], "onset", fontsize=7, ha="center", va="bottom")
-                        ax.text(end_mark, ylim[1], "event end", fontsize=7, ha="center", va="bottom")
+            if event_markers and x_is_seconds:
+                draw_event_annotations(ax, event_markers, tr, show_labels=row["is_first_in_block"])
 
             if row["is_first_in_block"]:
                 ax.set_title(f"evidence: {cat}", fontsize=10)
@@ -1402,7 +1599,7 @@ def main():
     subjects = list_subject_dirs(args.analysis_output_dir, desc, args.subject, subjects_arg)
     fold_flags = {s: has_fold_files(args.analysis_output_dir, desc, s) for s in subjects}
     regressor_categories = infer_categories(args.analysis_output_dir, desc, subjects)
-    window, tr, median_duration, overlay_conditions = load_annotation_info(args.config, args.master_spreadsheet)
+    event_markers, tr, overlay_conditions = load_annotation_info(args.config, args.full_frame_spreadsheet)
     mnispace = resolve_mnispace(args.config)
 
     if args.output:
@@ -1419,7 +1616,7 @@ def main():
         render_double_dipping_page(pdf, args.analysis_output_dir, desc, subjects)
         render_accuracy_auc_page(pdf, args.analysis_output_dir, desc, subjects, fold_flags, regressor_categories)
         render_confusion_matrices_page(pdf, args.analysis_output_dir, desc, subjects)
-        render_timecourse_pages(pdf, args.analysis_output_dir, desc, subjects, window, tr, median_duration,
+        render_timecourse_pages(pdf, args.analysis_output_dir, desc, subjects, event_markers, tr,
                                  overlay_conditions)
         render_importance_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, regressor_categories,
                                  os.path.dirname(output_path), mnispace=mnispace)

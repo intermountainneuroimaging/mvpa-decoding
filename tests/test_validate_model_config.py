@@ -22,10 +22,7 @@ def _minimal_config():
                     "face": {"column": "trial_type", "match": "exact", "value": "face"},
                     "place": {"column": "trial_type", "match": "exact", "value": "place"},
                 },
-                "window": {
-                    "start": {"reference": "onset", "offset_seconds": 0},
-                    "end": {"reference": "offset_end", "offset_seconds": 10},
-                },
+                "trial_start_event": {"column": "trial_type", "match": "exact", "value": "view_face"},
             },
         }
     }
@@ -57,11 +54,11 @@ class TestStructuralValidation:
         errors, warnings = validate_config(cfg)
         assert errors == []
 
-    def test_timecourse_decoding_missing_window_is_error(self):
+    def test_timecourse_decoding_missing_trial_start_event_is_error(self):
         cfg = _minimal_config()
-        del cfg["model_conditions"]["timecourse_decoding"]["window"]
+        del cfg["model_conditions"]["timecourse_decoding"]["trial_start_event"]
         errors, _ = validate_config(cfg)
-        assert any("window" in e for e in errors)
+        assert any("trial_start_event" in e for e in errors)
 
     def test_timecourse_decoding_entirely_absent_is_valid(self):
         # optional -- unlike training, omitting the whole section (not just
@@ -123,3 +120,31 @@ class TestDataDrivenValidation:
         }
         errors, _ = validate_config(cfg, valid_columns={"trial_type"}, df=self._df())
         assert any("unknown column" in e for e in errors)
+
+    def test_timecourse_decoding_checked_against_full_frame_df_not_master(self):
+        # master_spreadsheet.csv's own trial_type column (self._df()) has no
+        # "view_face" -- timecourse_decoding's conditions/trial_start_event are
+        # evaluated against full_frame_df instead, where it does appear
+        cfg = _minimal_config()
+        full_frame_df = pd.DataFrame({"trial_type": ["view_face", "face", "place"]})
+        errors, _ = validate_config(
+            cfg, valid_columns={"trial_type"}, df=self._df(),
+            full_frame_valid_columns={"trial_type"}, full_frame_df=full_frame_df,
+        )
+        assert errors == []
+
+    def test_timecourse_decoding_skipped_without_full_frame_df(self):
+        # no full_frame_df given -- timecourse_decoding's data-driven checks are
+        # skipped rather than incorrectly run against master_spreadsheet.csv
+        cfg = _minimal_config()
+        errors, _ = validate_config(cfg, valid_columns={"trial_type"}, df=self._df())
+        assert errors == []
+
+    def test_trial_start_event_matching_zero_rows_is_error(self):
+        cfg = _minimal_config()
+        full_frame_df = pd.DataFrame({"trial_type": ["face", "place"]})  # no view_face
+        errors, _ = validate_config(
+            cfg, valid_columns={"trial_type"}, df=self._df(),
+            full_frame_valid_columns={"trial_type"}, full_frame_df=full_frame_df,
+        )
+        assert any("trial_start_event" in e and "0 rows" in e for e in errors)

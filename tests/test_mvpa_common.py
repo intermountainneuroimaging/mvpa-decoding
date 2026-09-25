@@ -13,12 +13,14 @@ from utils.mvpa_common import (
     parse_bids_entities,
     resolve_config_root,
     compute_volume_range,
+    build_full_frame_table,
+    partition_into_trials,
+    build_timecourse_instructions,
+    qualifying_boldfiles,
+    label_rows_optional,
     build_trial_pivot_table,
     validate_query_node,
     evaluate_query_node,
-    validate_window_bound,
-    validate_window,
-    resolve_window_times,
     quick_safe,
     label_rows,
     apply_regressor_codes,
@@ -186,6 +188,17 @@ class TestQueryDSL:
         # fullmatch: only the exact "face" row matches, not "view_face"
         assert mask.tolist() == [False, True]
 
+    def test_evaluate_regex_missing_value_never_matches(self):
+        # a continuous-decoding gap/rest frame has no real trial_type at all
+        # (None/NaN) -- must never match, not crash. Depending on the
+        # column's pandas dtype, astype(str) can leave a real missing value
+        # as an actual NaN rather than stringifying it to "nan", so this
+        # specifically guards against passing that non-str value to
+        # re.Pattern.fullmatch
+        df = pd.DataFrame({"trial_type": ["face", None]})
+        mask = evaluate_query_node({"column": "trial_type", "match": "regex", "value": ".*face.*"}, df)
+        assert mask.tolist() == [True, False]
+
     def test_evaluate_and(self):
         df = pd.DataFrame({"task": ["loc", "loc", "WM"], "trial_type": ["face", "place", "face"]})
         query = {"and": [
@@ -209,46 +222,236 @@ class TestQueryDSL:
 
 
 # =====================================================
-# timecourse_decoding window: validate_window / resolve_window_times
+# Continuous timecourse decoding: build_full_frame_table / partition_into_trials
+# / label_rows_optional / build_timecourse_instructions
 # =====================================================
 
-class TestWindow:
-    def test_valid_window(self):
-        window = {
-            "start": {"reference": "onset", "offset_seconds": 0},
-            "end": {"reference": "offset_end", "offset_seconds": 10},
-        }
-        assert validate_window(window) == []
+def _events(*rows):
+    """rows: (onset, duration, trial_type) tuples -> a raw events dataframe."""
+    return pd.DataFrame(rows, columns=["onset", "duration", "trial_type"])
 
-    def test_invalid_reference(self):
-        errors = validate_window_bound({"reference": "bogus", "offset_seconds": 0}, "path")
-        assert len(errors) == 1
 
-    def test_end_before_start_same_reference_is_invalid(self):
-        window = {
-            "start": {"reference": "onset", "offset_seconds": 5},
-            "end": {"reference": "onset", "offset_seconds": 2},
-        }
-        errors = validate_window(window)
-        assert len(errors) == 1
+class TestBuildFullFrameTable:
+    def test_continuous_coverage_no_exclusions(self):
+        # a 5-TR view_face event (the exact shape from the "decode every frame"
+        # example), then a 3-TR maintain, then a 2-TR fixation -- fixation
+        # would be dropped by generate_master_spreadsheet.py's own exclusion
+        # policy, but build_full_frame_table never excludes anything
+        events = _events((0.0, 5.0, "view_face"), (5.0, 3.0, "maintain"), (8.0, 2.0, "fixation"))
+        table = build_full_frame_table(events, tr=1.0, n_frames=10)
 
-    def test_resolve_window_times_onset_reference(self):
-        window = {
-            "start": {"reference": "onset", "offset_seconds": 0},
-            "end": {"reference": "offset_end", "offset_seconds": 10},
-        }
-        start, stop = resolve_window_times(window, onset=5.0, duration=2.0)
-        assert start == 5.0
-        assert stop == 17.0  # onset + duration + 10
+        assert table["volume_of_interest"].tolist() == list(range(10))
+        assert table["trial_type"].tolist() == ["view_face"] * 5 + ["maintain"] * 3 + ["fixation"] * 2
+        assert table["event_index"].tolist() == [1] * 5 + [2] * 3 + [3] * 2
+        assert not table["trial_type"].isna().any()
 
-    def test_resolve_window_times_negative_offset(self):
-        window = {
-            "start": {"reference": "onset", "offset_seconds": -2},
-            "end": {"reference": "onset", "offset_seconds": 0},
+    def test_gap_with_no_covering_event_is_nan(self):
+        events = _events((0.0, 2.0, "view_face"))  # only covers vols 0-1 of 5
+        table = build_full_frame_table(events, tr=1.0, n_frames=5)
+        assert table.loc[:1, "trial_type"].tolist() == ["view_face", "view_face"]
+        assert table.loc[2:, "trial_type"].isna().all()
+        assert table.loc[2:, "event_index"].isna().all()
+
+    def test_invalid_duration_row_produces_no_coverage(self):
+        events = _events((0.0, float("nan"), "bad_row"), (0.0, 3.0, "view_face"))
+        table = build_full_frame_table(events, tr=1.0, n_frames=3)
+        # the NaN-duration row is simply never a candidate -- view_face covers everything
+        assert table["trial_type"].tolist() == ["view_face"] * 3
+
+    def test_overlap_later_onset_wins(self):
+        events = _events((0.0, 3.0, "a"), (1.0, 3.0, "b"))  # a: vols 0-2, b: vols 1-3
+        table = build_full_frame_table(events, tr=1.0, n_frames=4)
+        assert table["trial_type"].tolist() == ["a", "b", "b", "b"]
+
+
+def _full_frame_df(boldfile, *rows):
+    """rows: (volume_of_interest, trial_type, onset, event_index) tuples."""
+    df = pd.DataFrame(rows, columns=["volume_of_interest", "trial_type", "onset", "event_index"])
+    df["boldfile"] = boldfile
+    return df
+
+
+VIEW_FACE_ANCHOR = {"column": "trial_type", "match": "exact", "value": "view_face"}
+
+
+class TestPartitionIntoTrials:
+    def test_window_index_resets_at_each_anchor(self):
+        # two back-to-back trials in one run: view_face(5 TRs) -> maintain(3) ->
+        # fixation(2), twice -- window_index must count 0..9 within each, not
+        # keep climbing across the boundary
+        rows = []
+        for trial, base in enumerate((0, 10)):
+            rows += [(base + i, "view_face", float(base), 3 * trial + 1) for i in range(5)]
+            rows += [(base + 5 + i, "maintain", float(base + 5), 3 * trial + 2) for i in range(3)]
+            rows += [(base + 8 + i, "fixation", float(base + 8), 3 * trial + 3) for i in range(2)]
+        df = _full_frame_df("run1", *rows)
+
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR)
+
+        first_trial = result[result["volume_of_interest"] < 10].sort_values("volume_of_interest")
+        second_trial = result[result["volume_of_interest"] >= 10].sort_values("volume_of_interest")
+        assert first_trial["trial_index"].unique().tolist() == [1]
+        assert first_trial["window_index"].tolist() == list(range(10))
+        assert second_trial["trial_index"].unique().tolist() == [2]
+        assert second_trial["window_index"].tolist() == list(range(10))
+
+    def test_leading_frames_before_first_anchor_get_trial_index_zero(self):
+        rows = [(0, "instructions", 0.0, 1), (1, "instructions", 0.0, 1)]
+        rows += [(2 + i, "view_face", 2.0, 2) for i in range(3)]
+        df = _full_frame_df("run1", *rows)
+
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR).sort_values("volume_of_interest")
+        leading = result[result["trial_type"] == "instructions"]
+        assert leading["trial_index"].tolist() == [0, 0]
+        assert leading["window_index"].tolist() == [0, 1]  # own volume_of_interest, no anchor yet
+        assert result[result["trial_type"] == "view_face"]["trial_index"].unique().tolist() == [1]
+
+    def test_no_anchor_found_leaves_everything_trial_index_zero(self):
+        df = _full_frame_df("run1", (0, "maintain", 0.0, 1), (1, "maintain", 0.0, 1))
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR)
+        assert (result["trial_index"] == 0).all()
+
+    def test_block_of_repeated_same_type_events_collapses_to_one_trial(self):
+        # a Haxby-style block design: the anchor matches EVERY stimulus
+        # (any of several categories), and the same category repeats back to
+        # back many times in a row with nothing else between them -- that
+        # whole run must be ONE trial (block), not one trial per repeat
+        anchor = {"column": "trial_type", "match": "in", "values": ["scissors", "face"]}
+        rows = [(i, "scissors", float(i), i + 1) for i in range(6)]  # 6 separate "scissors" events
+        rows += [(6 + i, "face", float(6 + i), 6 + i + 1) for i in range(4)]  # then 4 "face" events
+        df = _full_frame_df("run1", *rows)
+
+        result = partition_into_trials(df, anchor).sort_values("volume_of_interest")
+
+        assert result["trial_index"].tolist() == [1] * 6 + [2] * 4
+        assert result["window_index"].tolist() == list(range(6)) + list(range(4))
+
+    def test_same_type_recurring_after_a_gap_starts_a_new_trial(self):
+        # unlike the collapsed-run case above, the same trial_type occurring
+        # again *after* a different, non-matching real event happened in
+        # between (e.g. the next trial's own cue) must still start a fresh
+        # trial -- this is the real Clearvale shape (view_face -> operation
+        # -> probe -> view_face again for the next trial)
+        rows = [(0, "view_face", 0.0, 1), (1, "maintain", 1.0, 2), (2, "view_face", 2.0, 3)]
+        df = _full_frame_df("run1", *rows)
+
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR).sort_values("volume_of_interest")
+        assert result["trial_index"].tolist() == [1, 1, 2]
+        assert result["window_index"].tolist() == [0, 1, 0]
+
+    def test_explicit_trial_start_tag_takes_priority_over_trial_start_event(self):
+        # a "trial_start" tagged row exists -- it must be used as the anchor
+        # directly, ignoring trial_start_event entirely (which here would
+        # give a completely different, wrong answer if it were consulted)
+        rows = [
+            (0, "trial_start", 0.0, 1),
+            (1, "view_face", 1.0, 2),  # would itself match VIEW_FACE_ANCHOR, but must NOT be used
+            (2, "maintain", 2.0, 3),
+        ]
+        df = _full_frame_df("run1", *rows)
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR).sort_values("volume_of_interest")
+        assert result["trial_index"].tolist() == [1, 1, 1]
+        assert result["window_index"].tolist() == [0, 1, 2]
+
+    def test_trial_start_event_fallback_used_when_no_explicit_tag_present(self):
+        # no "trial_start" row anywhere in this boldfile -- falls back to
+        # trial_start_event exactly as before
+        rows = [(0, "view_face", 0.0, 1), (1, "maintain", 1.0, 2)]
+        df = _full_frame_df("run1", *rows)
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR).sort_values("volume_of_interest")
+        assert result["trial_index"].tolist() == [1, 1]
+
+    def test_mixed_dataset_each_boldfile_resolved_independently(self):
+        # one boldfile has explicit "trial_start" tags, the other doesn't --
+        # each must be partitioned by its own appropriate mechanism
+        tagged = _full_frame_df("run_tagged", (0, "trial_start", 0.0, 1), (1, "maintain", 1.0, 2))
+        untagged = _full_frame_df("run_untagged", (0, "view_face", 0.0, 1), (1, "maintain", 1.0, 2))
+        df = pd.concat([tagged, untagged], ignore_index=True)
+
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR)
+        assert (result[result["boldfile"] == "run_tagged"]["trial_index"] == 1).all()
+        assert (result[result["boldfile"] == "run_untagged"]["trial_index"] == 1).all()
+
+
+class TestLabelRowsOptional:
+    def test_unmatched_rows_kept_with_none_label(self):
+        df = pd.DataFrame({"trial_type": ["maintain", "fixation", "suppress"]})
+        conditions = {
+            "maintain": {"column": "trial_type", "match": "exact", "value": "maintain"},
+            "suppress": {"column": "trial_type", "match": "exact", "value": "suppress"},
         }
-        start, stop = resolve_window_times(window, onset=5.0, duration=2.0)
-        assert start == 3.0
-        assert stop == 5.0
+        result = label_rows_optional(df, conditions)
+        assert len(result) == 3  # nothing dropped, unlike label_rows
+        assert result["regressor_label"].tolist()[0] == "maintain"
+        assert pd.isna(result["regressor_label"].tolist()[1])
+        assert result["regressor_label"].tolist()[2] == "suppress"
+
+
+class TestQualifyingBoldfiles:
+    def test_run_restriction_inside_a_condition_scopes_by_boldfile(self):
+        # mirrors a real config where a condition ANDs trial_type with a run
+        # restriction -- run is constant per boldfile, so this should
+        # reproduce exactly the same run-level scoping it used to enforce
+        # per-row
+        df = pd.DataFrame({
+            "boldfile": ["run10", "run10", "run1", "run1"],
+            "trial_type": ["bottle", "cat", "bottle", "cat"],
+            "run": ["10", "10", "1", "1"],
+        })
+        conditions = {
+            "bottle": {"and": [{"column": "trial_type", "match": "exact", "value": "bottle"},
+                                {"column": "run", "match": "in", "values": ["10", "11", "12"]}]},
+        }
+        assert qualifying_boldfiles(df, conditions) == {"run10"}
+
+
+class TestBuildTimecourseInstructions:
+    def test_decodes_every_frame_with_real_trial_type(self):
+        rows = [(i, "view_face", 0.0, 1) for i in range(5)]  # the 5-TR view_face example
+        rows += [(5 + i, "maintain", 5.0, 2) for i in range(3)]
+        rows += [(8 + i, "fixation", 8.0, 3) for i in range(2)]
+        df = _full_frame_df("run1", *rows)
+        for extra_col, value in (("subject", "01"), ("session", ""), ("task", "WM"), ("run", 1)):
+            df[extra_col] = value
+
+        conditions = {"maintain": {"column": "trial_type", "match": "exact", "value": "maintain"}}
+        instr = build_timecourse_instructions(df, conditions, VIEW_FACE_ANCHOR)
+
+        # every single input frame comes out -- nothing skipped
+        assert len(instr) == len(df)
+        view_face_rows = instr[instr["trial_type"] == "view_face"].sort_values("window_index")
+        assert view_face_rows["window_index"].tolist() == [0, 1, 2, 3, 4]
+        assert view_face_rows["regressor_label"].isna().all()  # not one of `conditions`
+
+        maintain_rows = instr[instr["trial_type"] == "maintain"]
+        assert (maintain_rows["regressor_label"] == "maintain").all()
+
+        fixation_rows = instr[instr["trial_type"] == "fixation"]
+        assert fixation_rows["regressor_label"].isna().all()
+
+    def test_boldfile_with_no_matching_condition_is_excluded_entirely(self):
+        # "run1" has a maintain event (qualifies); "run2" only ever has
+        # view_face/fixation, never matching `conditions` -- e.g. a
+        # training-only run in a same-task, run-split design -- so it must
+        # be excluded from continuous decoding altogether, not just left
+        # with every row unscored
+        qualifying_rows = [(i, "view_face", 0.0, 1) for i in range(2)]
+        qualifying_rows += [(2 + i, "maintain", 2.0, 2) for i in range(2)]
+        df_qualifying = _full_frame_df("run1", *qualifying_rows)
+
+        non_qualifying_rows = [(i, "view_face", 0.0, 1) for i in range(2)]
+        non_qualifying_rows += [(2 + i, "fixation", 2.0, 2) for i in range(2)]
+        df_non_qualifying = _full_frame_df("run2", *non_qualifying_rows)
+
+        df = pd.concat([df_qualifying, df_non_qualifying], ignore_index=True)
+        for extra_col, value in (("subject", "01"), ("session", ""), ("task", "WM"), ("run", 1)):
+            df[extra_col] = value
+
+        conditions = {"maintain": {"column": "trial_type", "match": "exact", "value": "maintain"}}
+        instr = build_timecourse_instructions(df, conditions, VIEW_FACE_ANCHOR)
+
+        assert set(instr["boldfile"]) == {"run1"}
+        assert len(instr) == len(df_qualifying)
 
 
 # =====================================================

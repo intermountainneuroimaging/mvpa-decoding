@@ -13,6 +13,13 @@ set this separately when your preprocessed/derivative data (e.g. fMRIPrep output
 lives in a different directory tree than the raw events.tsv files, or doesn't
 follow the same naming convention (pair it with `bold_glob`).
 
+Setting event_extraction.full_frame_output_file also writes a second,
+unfiltered table: one row per BOLD volume (every frame of every run, no
+exclusions, no hemodynamic_lag), with the real trial_type of whatever event
+covers that frame -- used by model_conditions.timecourse_decoding for
+continuous, real-event decoding (see README.md section 4). Omit it to skip
+entirely; master_spreadsheet.csv itself is unaffected either way.
+
 Usage:
     python generate_master_spreadsheet.py --config mvpa_config.json
 """
@@ -28,7 +35,7 @@ import pandas as pd
 import nibabel as nib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
-from utils.mvpa_common import parse_bids_entities, compute_volume_range, resolve_config_root
+from utils.mvpa_common import parse_bids_entities, compute_volume_range, resolve_config_root, build_full_frame_table
 
 # "ses" has a dedicated output column (session) whenever present, but -- per the
 # BIDS spec -- is optional in filenames for single-session datasets, so it's not
@@ -121,7 +128,14 @@ def load_expected_events(path: str) -> set:
     return set(loaded)
 
 
-def process_events_file(events_path: str, derivatives_root: str, hemodynamic_lag: float, bold_glob: str = None, verbose: bool = False):
+def resolve_events_context(events_path: str, derivatives_root: str, bold_glob: str = None, verbose: bool = False):
+    """Shared front-matter for one events.tsv: parses BIDS entities, resolves the
+    one matching BOLD file, reads its TR/frame count, and loads the raw events
+    table (onset/duration coerced numeric, sorted by onset) -- everything both
+    process_events_file (the filtered/windowed master_spreadsheet rows) and
+    process_events_file_full_frame (the unfiltered, one-row-per-volume table)
+    need, computed once instead of twice. Returns None (after printing why) if
+    this file should be skipped entirely."""
     entities = parse_bids_entities(events_path)
     missing = [e for e in REQUIRED_ENTITIES if e not in entities]
     if missing:
@@ -148,6 +162,19 @@ def process_events_file(events_path: str, derivatives_root: str, hemodynamic_lag
     events["onset"] = pd.to_numeric(events["onset"], errors="coerce")
     events["duration"] = pd.to_numeric(events["duration"], errors="coerce")
     events = events.sort_values("onset").reset_index(drop=True)
+
+    return {
+        "entities": entities, "extra_entities": extra_entities,
+        "bold_path": bold_path, "tr": tr, "n_frames": n_frames, "events": events,
+    }
+
+
+def process_events_file(events_path: str, derivatives_root: str, hemodynamic_lag: float, bold_glob: str = None, verbose: bool = False, ctx: dict = None):
+    ctx = ctx or resolve_events_context(events_path, derivatives_root, bold_glob, verbose=verbose)
+    if ctx is None:
+        return None
+    entities, extra_entities = ctx["entities"], ctx["extra_entities"]
+    bold_path, tr, n_frames, events = ctx["bold_path"], ctx["tr"], ctx["n_frames"], ctx["events"]
 
     # Drop excluded/invalid rows *before* assigning trial_index, so trial_index is a
     # contiguous 1..N over exactly the events that end up in the output table --
@@ -192,6 +219,29 @@ def process_events_file(events_path: str, derivatives_root: str, hemodynamic_lag
     return pd.DataFrame(rows)
 
 
+def process_events_file_full_frame(events_path: str, derivatives_root: str, bold_glob: str = None, verbose: bool = False, ctx: dict = None):
+    """The full_frame_output_file counterpart to process_events_file: one row
+    per BOLD volume 0..n_frames-1, no exclusions, no hemodynamic_lag -- see
+    build_full_frame_table."""
+    ctx = ctx or resolve_events_context(events_path, derivatives_root, bold_glob, verbose=verbose)
+    if ctx is None:
+        return None
+    entities, extra_entities = ctx["entities"], ctx["extra_entities"]
+    bold_path, tr, n_frames, events = ctx["bold_path"], ctx["tr"], ctx["n_frames"], ctx["events"]
+
+    table = build_full_frame_table(events, tr, n_frames)
+    table["subject"] = entities["sub"]
+    table["session"] = entities.get("ses", "")
+    table["task"] = entities["task"]
+    table["run"] = int(entities["run"])
+    table["boldfile"] = bold_path
+    table["eventfile"] = events_path
+    for k, v in extra_entities.items():
+        table[k] = v
+
+    return table
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", required=True, help="Path to the mvpa config JSON (reads its event_extraction section)")
@@ -212,15 +262,32 @@ def main():
     output_file = args.output or event_cfg.get("output_file", "master_spreadsheet.csv")
     bold_glob = event_cfg.get("bold_glob")
     expected_events_file = args.expected_events or event_cfg.get("expected_events_file")
+    # optional -- omit to skip entirely (no extra runtime/output). Only needed by
+    # model_conditions.timecourse_decoding (see README.md section 4): a second,
+    # unfiltered table with one row per BOLD volume (every frame, no exclusions,
+    # no hemodynamic_lag), real trial_type per row -- master_spreadsheet.csv
+    # itself, and everything that reads it (training/testing/model.kfold_cv), is
+    # unaffected by this option either way.
+    full_frame_output_file = event_cfg.get("full_frame_output_file")
 
     events_files = find_events_files(bids_root, event_cfg.get("events_glob", "**/*_events.tsv"))
     print(f"Found {len(events_files)} events file(s) under {bids_root}")
 
     all_rows = []
+    all_full_frame_rows = []
     for events_path in events_files:
-        df = process_events_file(events_path, derivatives_root, hemodynamic_lag, bold_glob, verbose=args.verbose)
+        ctx = resolve_events_context(events_path, derivatives_root, bold_glob, verbose=args.verbose)
+        if ctx is None:
+            continue
+
+        df = process_events_file(events_path, derivatives_root, hemodynamic_lag, bold_glob, ctx=ctx)
         if df is not None and not df.empty:
             all_rows.append(df)
+
+        if full_frame_output_file:
+            full_df = process_events_file_full_frame(events_path, derivatives_root, bold_glob, ctx=ctx)
+            if full_df is not None and not full_df.empty:
+                all_full_frame_rows.append(full_df)
 
     if not all_rows:
         raise SystemExit("No events rows produced -- check bids_root/derivatives_root/events_glob/bold_glob in the config.")
@@ -240,6 +307,14 @@ def main():
 
     table.to_csv(output_file, index=False)
     print(f"Wrote {len(table)} rows to {output_file}")
+
+    if full_frame_output_file:
+        if not all_full_frame_rows:
+            raise SystemExit("event_extraction.full_frame_output_file is set but no full-frame rows were produced.")
+        full_table = pd.concat(all_full_frame_rows, ignore_index=True)
+        full_table = full_table.sort_values(["subject", "task", "run", "volume_of_interest"])
+        full_table.to_csv(full_frame_output_file, index=False)
+        print(f"Wrote {len(full_table)} rows to {full_frame_output_file}")
 
 
 if __name__ == "__main__":

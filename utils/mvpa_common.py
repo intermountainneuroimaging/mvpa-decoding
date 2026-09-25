@@ -38,7 +38,17 @@ BIDS_ENTITY_RE = re.compile(r"(?:^|_)(?P<key>[a-zA-Z]+)-(?P<val>[^_.]+)")
 
 MATCH_TYPES = {"exact", "in", "regex"}
 BOOL_KEYS = {"and", "or", "not"}
-WINDOW_REFERENCES = {"onset", "offset_end"}
+
+# reserved trial_type value: an events.tsv that emits an explicit row tagged
+# exactly this (any onset/duration) marks trial starts unambiguously by
+# construction -- partition_into_trials prefers these over trial_start_event
+# for a boldfile whenever they're present, exactly as events.tsv's own
+# fixation/postrt/start_block/end_block are a fixed, not-configurable
+# convention (see generate_master_spreadsheet.py's EXCLUDED_TRIAL_TYPE_*).
+# events.tsv files that don't emit this tag are unaffected -- trial_start_event
+# is the fallback for those, evaluated per boldfile independently of every
+# other boldfile in the same dataset (a real mix of both is fine).
+TRIAL_START_TAG = "trial_start"
 
 
 def parse_bids_entities(filename: str) -> dict:
@@ -77,6 +87,123 @@ def compute_volume_range(start_time: float, stop_time: float, tr: float, n_frame
     n_volumes = max(1, round((stop_time - start_time) / tr))
     stop_vol = min(start_vol + n_volumes, n_frames)
     return start_vol, max(stop_vol, start_vol)
+
+
+def build_full_frame_table(events: pd.DataFrame, tr: float, n_frames: int) -> pd.DataFrame:
+    """One row per BOLD volume 0..n_frames-1 for a single run -- unlike
+    generate_master_spreadsheet.py's own windowed rows, nothing is excluded
+    and no hemodynamic_lag is applied (verbatim events.tsv onset/duration
+    throughout; lag only ever matters for training/testing volume selection).
+
+    `events` is the raw events.tsv table for this run (needs onset/duration/
+    trial_type; extra columns are ignored). Each volume's trial_type/onset/
+    duration come from whichever event's [onset, onset+duration) span covers
+    it -- on overlap, the later-onset event wins. event_index is a contiguous
+    1..N id (in onset order) over every valid event, administrative rows
+    included, so rows produced by the same real event can be grouped back
+    together; a volume covered by no event gets trial_type/onset/duration/
+    event_index = NaN rather than being dropped."""
+    trial_type = np.full(n_frames, np.nan, dtype=object)
+    onset_col = np.full(n_frames, np.nan)
+    duration_col = np.full(n_frames, np.nan)
+    event_index = np.full(n_frames, np.nan)
+
+    valid = events["onset"].notna() & events["duration"].notna() & np.isfinite(events["duration"])
+    ordered = events[valid].sort_values("onset").reset_index(drop=True)
+
+    for i, row in ordered.iterrows():
+        start_vol, stop_vol = compute_volume_range(row["onset"], row["onset"] + row["duration"], tr, n_frames)
+        trial_type[start_vol:stop_vol] = row["trial_type"]
+        onset_col[start_vol:stop_vol] = row["onset"]
+        duration_col[start_vol:stop_vol] = row["duration"]
+        event_index[start_vol:stop_vol] = i + 1
+
+    return pd.DataFrame({
+        "volume_of_interest": np.arange(n_frames),
+        "trial_type": trial_type,
+        "onset": onset_col,
+        "duration": duration_col,
+        "event_index": event_index,
+    })
+
+
+def partition_into_trials(full_frame_df: pd.DataFrame, trial_start_event: dict) -> pd.DataFrame:
+    """full_frame_df (one or more boldfiles' full-frame rows, e.g. from
+    build_full_frame_table) -> same rows plus trial_index/window_index.
+
+    For a boldfile whose events.tsv includes an explicit TRIAL_START_TAG-tagged
+    row per trial, those rows are used as the anchors directly --
+    trial_start_event is only the fallback, evaluated per boldfile
+    independently, for a boldfile with no TRIAL_START_TAG rows at all (so a
+    dataset can freely mix events.tsv files that do and don't tag trial
+    starts explicitly). trial_start_event is a query-DSL node (same shape as
+    one entry of a `conditions` mapping) evaluated against each boldfile's
+    real events (one row per event_index, so a multi-TR anchor event only
+    counts once) to find trial-start anchors, in onset order. A maximal run
+    of consecutive real events that are (a) back-to-back with nothing else
+    in between and (b)
+    the exact same trial_type collapses into a single anchor at the run's
+    first event -- e.g. a block design's 12 repeated same-category stimulus
+    flashes are one trial, not 12 -- while a *change* in trial_type (even to
+    another value that also matches trial_start_event) still starts a fresh
+    one, and so does the same trial_type recurring after something else (a
+    non-matching real event) happened in between. Volumes are partitioned
+    per boldfile into [anchor_i, anchor_{i+1}) spans (the last span runs to
+    that boldfile's final volume); window_index counts up from 0 at each
+    anchor. Volumes before a boldfile's first anchor get trial_index=0 and
+    window_index = their own volume_of_interest (there's no trial start to
+    count from yet)."""
+    pieces = []
+    for boldfile, group in full_frame_df.groupby("boldfile", sort=False):
+        group = group.sort_values("volume_of_interest").reset_index(drop=True)
+        vols = group["volume_of_interest"].to_numpy()
+
+        events = group.dropna(subset=["event_index"]).drop_duplicates("event_index").sort_values("onset").reset_index(drop=True)
+        explicit_starts = events["trial_type"] == TRIAL_START_TAG
+        if explicit_starts.any():
+            anchor_mask = explicit_starts.to_numpy()
+        else:
+            anchor_mask = evaluate_query_node(trial_start_event, events).to_numpy() if len(events) else np.zeros(0, dtype=bool)
+
+        is_boundary = np.zeros(len(events), dtype=bool)
+        if len(events):
+            is_boundary[0] = anchor_mask[0]
+            if len(events) > 1:
+                trial_types = events["trial_type"].to_numpy()
+                fresh = (~anchor_mask[:-1]) | (trial_types[1:] != trial_types[:-1])
+                is_boundary[1:] = anchor_mask[1:] & fresh
+
+        boundaries = sorted(events.loc[is_boundary, "volume_of_interest"].tolist())
+
+        trial_index = np.zeros(len(group), dtype=int)
+        window_index = vols.copy()
+
+        for i, start_vol in enumerate(boundaries):
+            end_vol = boundaries[i + 1] if i + 1 < len(boundaries) else vols.max() + 1
+            in_span = (vols >= start_vol) & (vols < end_vol)
+            trial_index[in_span] = i + 1
+            window_index[in_span] = vols[in_span] - start_vol
+
+        group["trial_index"] = trial_index
+        group["window_index"] = window_index
+        pieces.append(group)
+
+    return pd.concat(pieces, ignore_index=True) if pieces else full_frame_df.copy()
+
+
+def label_rows_optional(df: pd.DataFrame, conditions: dict, label_column: str = "regressor_label") -> pd.DataFrame:
+    """Like label_rows, but rows matching no condition are kept (label_column
+    set to None) instead of dropped -- used where every row must survive
+    regardless of whether it's a scored category (e.g. continuous timecourse
+    decoding, where fixation/ITI/view-cue frames are still decoded, just not
+    scored against any trained class)."""
+    labels = pd.Series(pd.NA, index=df.index, dtype=object)
+    for name, query in conditions.items():
+        mask = evaluate_query_node(query, df) & labels.isna()
+        labels[mask] = name
+    result = df.copy()
+    result[label_column] = labels
+    return result
 
 
 def build_trial_pivot_table(df: pd.DataFrame, group_cols=("boldfile", "trial_index")) -> pd.DataFrame:
@@ -190,59 +317,15 @@ def evaluate_query_node(node, df: pd.DataFrame) -> pd.Series:
         return series.isin(node["values"])
     if match == "regex":
         pattern = re.compile(node["value"])
-        return series.apply(lambda v: pattern.fullmatch(v) is not None)
+        # a missing value (e.g. a continuous-decoding gap/rest frame with no
+        # real trial_type) never matches any pattern -- same as "exact"/"in"
+        # above, where comparing/testing membership against NaN is already
+        # safely False; astype(str) above can leave a real missing value as
+        # an actual (non-str) NaN rather than stringifying it, depending on
+        # the column's pandas dtype, so this can't just rely on fullmatch
+        # raising on the wrong type
+        return series.apply(lambda v: isinstance(v, str) and pattern.fullmatch(v) is not None)
     raise ValueError(f"Unknown match type: {match}")
-
-
-# =====================================================
-# timecourse_decoding window: {"start"/"end": {"reference", "offset_seconds"}}
-# =====================================================
-
-def validate_window_bound(bound, path) -> list:
-    errors = []
-    if not isinstance(bound, dict):
-        return [f"{path}: must be an object with 'reference' and 'offset_seconds'"]
-
-    reference = bound.get("reference")
-    if reference not in WINDOW_REFERENCES:
-        errors.append(f"{path}.reference: must be one of {sorted(WINDOW_REFERENCES)}, got {reference!r}")
-
-    offset = bound.get("offset_seconds", 0)
-    if not isinstance(offset, (int, float)) or isinstance(offset, bool):
-        errors.append(f"{path}.offset_seconds: must be a number, got {offset!r}")
-
-    return errors
-
-
-def validate_window(window, path="timecourse_decoding.window") -> list:
-    if not isinstance(window, dict):
-        return [f"{path}: must be an object with 'start' and 'end'"]
-
-    errors = []
-    for bound_name in ("start", "end"):
-        if bound_name not in window:
-            errors.append(f"{path}.{bound_name}: required")
-        else:
-            errors.extend(validate_window_bound(window[bound_name], f"{path}.{bound_name}"))
-
-    if not errors:
-        start, end = window["start"], window["end"]
-        if start["reference"] == end["reference"] and end["offset_seconds"] <= start["offset_seconds"]:
-            errors.append(
-                f"{path}: end offset ({end['offset_seconds']}s from {end['reference']}) must be later than "
-                f"start offset ({start['offset_seconds']}s from {start['reference']})"
-            )
-
-    return errors
-
-
-def resolve_window_times(window: dict, onset: float, duration: float):
-    """Return (start_time, stop_time) in seconds for a window spec against one event."""
-    def resolve(bound):
-        base = onset if bound["reference"] == "onset" else onset + duration
-        return base + bound.get("offset_seconds", 0)
-
-    return resolve(window["start"]), resolve(window["end"])
 
 
 # =====================================================
@@ -555,35 +638,44 @@ def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str = 
     return X, Y, idx, masker
 
 
-def build_timecourse_instructions(labeled_df: pd.DataFrame, window: dict) -> pd.DataFrame:
-    """One row per source event in labeled_df (grouped by boldfile+trial_index),
-    re-expanded into fresh volume_of_interest rows per `window`, tagged with a
-    window_index (position within that event's recomputed window)."""
+def qualifying_boldfiles(full_frame_df: pd.DataFrame, timecourse_conditions: dict) -> set:
+    """A boldfile "qualifies" for continuous timecourse decoding if ANY of its
+    real rows match ANY of timecourse_conditions' queries -- this is how a
+    task/run restriction inside a condition (e.g. {"and": [{"column": "run",
+    "match": "in", "values": [...]}, ...]}) still scopes *which runs* get
+    decoded at all, even though conditions no longer gate individual frames
+    within a qualifying boldfile (see build_timecourse_instructions). task/run
+    are constant per boldfile, so this reproduces exactly the same run/task
+    restriction a condition used to enforce per-row, just resolved once per
+    boldfile instead of once per frame."""
+    matches_any = pd.Series(False, index=full_frame_df.index)
+    for query in timecourse_conditions.values():
+        matches_any |= evaluate_query_node(query, full_frame_df)
+    return set(full_frame_df.loc[matches_any, "boldfile"])
 
-    rows = []
-    for (boldfile, trial_index), group in labeled_df.groupby(["boldfile", "trial_index"], sort=False):
-        first = group.iloc[0]
-        tr, n_frames = get_bold_header_info(boldfile)
 
-        start_time, stop_time = resolve_window_times(window, first["onset"], first["duration"])
-        start_vol, stop_vol = compute_volume_range(start_time, stop_time, tr, n_frames)
+def build_timecourse_instructions(full_frame_df: pd.DataFrame, timecourse_conditions: dict, trial_start_event: dict) -> pd.DataFrame:
+    """Every volume of every *qualifying* boldfile (qualifying_boldfiles) in
+    full_frame_df gets decoded -- nothing is subset or skipped within a
+    qualifying boldfile, and a boldfile with no matching row at all is
+    excluded entirely (e.g. a training-only run in a same-task, run-split
+    design). Rows are partitioned into trials by partition_into_trials, keyed
+    on trial_start_event (window_index resets to 0 at each anchor and counts
+    up until the next one). trial_type is left as the REAL event active at
+    that frame (not the anchor's); regressor_label is filled in only for rows
+    whose real trial_type matches one of timecourse_conditions (first match
+    wins, same as label_rows) -- everything else still comes out (fixation/
+    view-cue/ITI/... frames), just with regressor_label=None, so they're
+    decoded but excluded from accuracy/summary scoring until the caller
+    filters by regressor_label."""
+    scoped = full_frame_df[full_frame_df["boldfile"].isin(qualifying_boldfiles(full_frame_df, timecourse_conditions))]
+    trials = partition_into_trials(scoped, trial_start_event)
+    trials = label_rows_optional(trials, timecourse_conditions, label_column="regressor_label")
 
-        for vol in range(start_vol, stop_vol):
-            rows.append({
-                "subject": first["subject"],
-                "session": first["session"],
-                "task": first["task"],
-                "run": first["run"],
-                "trial_type": first["trial_type"],
-                "trial_index": trial_index,
-                "regressor_label": first["regressor_label"],
-                "regressor": first["regressor"],
-                "boldfile": boldfile,
-                "volume_of_interest": vol,
-                "window_index": vol - start_vol,
-            })
-
-    return pd.DataFrame(rows)
+    return trials[[
+        "subject", "session", "task", "run", "trial_type", "trial_index",
+        "regressor_label", "boldfile", "volume_of_interest", "window_index",
+    ]].reset_index(drop=True)
 
 
 # =====================================================

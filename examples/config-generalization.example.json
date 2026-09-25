@@ -8,7 +8,8 @@
     "events_glob": "**/*_events.tsv",
     "hemodynamic_lag": 4.6,
     "output_file": "master_spreadsheet.csv",
-    "expected_events_file": "examples/expected_events.example.json"
+    "expected_events_file": "examples/expected_events.example.json",
+    "full_frame_output_file": "master_spreadsheet_full.csv"
   },
 
   "model_conditions": {
@@ -63,9 +64,10 @@
           ]
         }
       },
-      "window": {
-        "start": {"reference": "onset", "offset_seconds": 0},
-        "end": {"reference": "offset_end", "offset_seconds": 10}
+      "trial_start_event": {"column": "trial_type", "match": "regex", "value": "view_.*"},
+      "annotation_labels": {
+        "operation": ["maintain_face", "suppress_face", "track_face", "breath_face",
+                       "maintain_place", "suppress_place", "track_place", "breath_place"]
       },
       "overlay": {
         "maintain": {"column": "trial_type", "match": "regex", "value": ".*maintain.*"},
