@@ -424,6 +424,33 @@ explicitly can point it at anything reasonable -- it will simply never be
 consulted. A dataset can freely mix events.tsv files that do and don't tag
 trial starts explicitly; each boldfile is resolved independently.
 
+**`trial_end_event`** -- *(optional)* a single query, same shape as
+`trial_start_event`, that closes a trial early -- at the first matching
+event's own start -- whenever one occurs before that trial's natural end
+(the next `trial_start_event`/`trial_start` anchor, or the boldfile's last
+volume):
+
+```json
+"trial_end_event": {"column": "trial_type", "match": "exact", "value": "EndFixation"}
+```
+
+Without it, a trial always runs anchor-to-anchor, however long that gap
+turns out to be -- fine for an ordinary short inter-trial fixation/ITI (its
+evidence keeps plotting as part of the preceding trial, which is what you
+want), but not for an occasional long block-boundary rest period: since
+`generate_report.py` broadcasts a trial's one overlay/regressor label across
+its *entire* window so the line doesn't cut off early, a long rest period
+swept into whichever condition happened to precede it will stretch that
+condition's timecourse line noticeably farther than the others, purely
+because of which condition's trials happen to sit at the end of a block.
+`trial_end_event` fixes this at the source: volumes from the matching event
+onward are left outside any active trial (`trial_index=0`, same convention
+as a boldfile's leading pre-anchor frames) instead of being attributed to
+the trial before it. Set it to whatever your events.tsv calls that
+block-boundary rest, if it has one distinct from ordinary trial-ending
+fixation; leave it unset if every trial's own gap before the next anchor is
+short and meaningful to keep.
+
 **`annotation_labels`** -- *(optional)* a friendly display name for a group
 of mutually exclusive `trial_type` values, read only by `generate_report.py`
 for the timecourse page's per-event annotations (see
@@ -447,6 +474,17 @@ it); the first matching group wins, in config order. A position where every
 trial agrees on one single real value is never relabeled this way, even if
 that value happens to appear in a configured group -- grouping only ever
 replaces the auto-joined fallback for genuinely mixed positions.
+
+Two cases are handled automatically, with no config needed: any observed
+value containing `"nan"` (e.g. `view_nan`, from a malformed trial with a
+missing/undefined item logged verbatim in events.tsv) is dropped before a
+position's values are matched against `annotation_labels`, so a rare
+malformed trial can't force the auto-joined fallback at an otherwise
+consistent position; and a position whose real value(s) are *all*
+administrative/excluded content (`is_excluded_trial_type` --
+fixation/`trial_fixation`/`EndFixation`/`postrt`/...) is left unlabeled
+(blank text, boundary still drawn) rather than printing a raw value like
+`"trial_fixation"` as if it were a real condition.
 
 **`overlay`** -- *(optional)* only read by `generate_report.py`, not by
 either workflow script. Same name-to-query shape as `conditions` -- each

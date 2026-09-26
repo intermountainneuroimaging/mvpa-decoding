@@ -56,7 +56,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
-from utils.mvpa_common import label_rows, label_rows_optional, get_bold_header_info, quick_safe, impa_tag, partition_into_trials, qualifying_boldfiles
+from utils.mvpa_common import label_rows, label_rows_optional, get_bold_header_info, quick_safe, impa_tag, partition_into_trials, qualifying_boldfiles, is_excluded_trial_type
 
 
 # =====================================================
@@ -392,7 +392,7 @@ def resolve_marker_label(distinct_types: list, annotation_labels: dict = None, m
     return "/".join(shown) + ("/..." if len(distinct_types) > max_label_values else "")
 
 
-def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, timecourse_conditions: dict = None, annotation_labels: dict = None, min_frequency: float = 0.5, max_label_values: int = 4):
+def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, trial_end_event: dict = None, timecourse_conditions: dict = None, annotation_labels: dict = None, min_frequency: float = 0.5, max_label_values: int = 4):
     """Returns a list of {"trial_type", "mean_start", "std_start", "mean_duration"}
     (all in window_index/TR units), one per real *ordinal position* (1st real
     sub-event in the trial, 2nd, 3rd, ...) observed often enough (>=
@@ -419,8 +419,26 @@ def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, 
     shows *where* that position falls even when *what* happens there varies
     trial to trial.
 
-    Frames before a boldfile's first anchor (trial_index == 0) aren't part
-    of any real trial and are excluded. timecourse_conditions, when given,
+    Any observed trial_type containing "nan" (case-insensitive -- e.g.
+    "view_nan" from a malformed trial with a missing/undefined item) is
+    dropped before resolve_marker_label runs, so annotation_labels groups
+    only need to cover the real values, not every "_nan" variant, and a
+    lone malformed instance can't force an auto-joined fallback label at an
+    otherwise-consistent position.
+
+    A position whose real value(s) are *all* administrative/excluded
+    content (is_excluded_trial_type -- fixation/trial_fixation/EndFixation/
+    postrt/.../) gets label="" (no text drawn, see draw_event_annotations)
+    instead of resolve_marker_label's usual result -- a rest/gap marker
+    isn't a condition worth naming, whether it's one consistent value
+    ("trial_fixation" every time) or several ("fixation"/"EndFixation"
+    mixed). This is unconditional, not something annotation_labels needs to
+    configure.
+
+    Frames outside any active trial (trial_index == 0 -- a boldfile's
+    leading frames before its first anchor, and/or a trial's tail truncated
+    early by trial_end_event, see partition_into_trials) aren't part of any
+    real trial and are excluded. timecourse_conditions, when given,
     scopes full_frame_df to the same qualifying boldfiles
     build_timecourse_instructions would actually decode (see
     qualifying_boldfiles) -- so annotation reflects only the runs really in
@@ -429,7 +447,7 @@ def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, 
         full_frame_df = full_frame_df[full_frame_df["boldfile"].isin(
             qualifying_boldfiles(full_frame_df, timecourse_conditions)
         )]
-    trials = partition_into_trials(full_frame_df, trial_start_event)
+    trials = partition_into_trials(full_frame_df, trial_start_event, trial_end_event)
     trials = trials[trials["trial_index"] > 0]
     if trials.empty:
         return []
@@ -470,7 +488,24 @@ def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, 
         if frequency < min_frequency:
             continue
         distinct_types = sorted(group["trial_type"].unique())
-        label = resolve_marker_label(distinct_types, annotation_labels, max_label_values)
+        # a "_nan"/"nan_..." trial_type (an events.tsv row logged with a
+        # missing/undefined item -- e.g. a malformed final trial) is noise at
+        # the label level, not a real condition to cover or display: drop it
+        # from consideration before resolving a name, unless doing so would
+        # leave nothing (a position that is *only* ever malformed still needs
+        # some label rather than none)
+        real_types = [t for t in distinct_types if "nan" not in str(t).lower()] or distinct_types
+        # a position that is *only* ever administrative/excluded content
+        # (is_excluded_trial_type -- fixation/trial_fixation/EndFixation/...)
+        # is a rest/gap marker, not a condition worth naming -- leave it
+        # unlabeled regardless of whether it's one consistent value or a
+        # mix, rather than requiring an explicit annotation_labels entry
+        # (or, worse, printing a raw value like "trial_fixation" as if it
+        # were a real condition)
+        if all(is_excluded_trial_type(t) for t in real_types):
+            label = ""
+        else:
+            label = resolve_marker_label(real_types, annotation_labels, max_label_values)
         markers.append({
             "trial_type": label,
             "mean_start": float(group["start"].mean()),
@@ -514,6 +549,7 @@ def load_annotation_info(config_path, master_spreadsheet_path):
         return [], None, {}
 
     trial_start_event = tc_cfg.get("trial_start_event")
+    trial_end_event = tc_cfg.get("trial_end_event")
     timecourse_conditions = tc_cfg.get("conditions", {})
     overlay_conditions = tc_cfg.get("overlay", {})
     annotation_labels = tc_cfg.get("annotation_labels", {})
@@ -522,7 +558,7 @@ def load_annotation_info(config_path, master_spreadsheet_path):
         master_spreadsheet_path, dtype={"subject": str, "session": str, "task": str, "trial_type": str}
     )
     event_markers = (
-        compute_event_markers(full_frame, trial_start_event, timecourse_conditions, annotation_labels)
+        compute_event_markers(full_frame, trial_start_event, trial_end_event, timecourse_conditions, annotation_labels)
         if trial_start_event else []
     )
 
@@ -959,9 +995,19 @@ def broadcast_trial_label(df: pd.DataFrame, label_col: str, trial_cols=("boldfil
     same as before -- there's nothing to plot it as). A trial with more than
     one *distinct* non-null value is unexpected (conditions should partition
     trials, not split one down the middle) and prints a warning; the
-    alphabetically-first value wins for that trial, deterministically."""
+    alphabetically-first value wins for that trial, deterministically.
+
+    trial_index == 0 rows (outside any active trial -- a boldfile's leading
+    frames before its first anchor, and/or a trial's tail truncated early by
+    trial_end_event, see partition_into_trials) are left exactly as they are
+    and never enter this broadcast: a boldfile can have several disjoint
+    trial_index == 0 spans that have nothing to do with each other, so
+    grouping them together as if they were one trial would broadcast a
+    label across gaps it doesn't belong to."""
+    active = df["trial_index"] != 0 if "trial_index" in df.columns else pd.Series(True, index=df.index)
+
     multi = (
-        df.groupby(list(trial_cols))[label_col]
+        df[active].groupby(list(trial_cols))[label_col]
         .agg(lambda s: s.dropna().nunique())
     )
     ambiguous = multi[multi > 1]
@@ -969,9 +1015,11 @@ def broadcast_trial_label(df: pd.DataFrame, label_col: str, trial_cols=("boldfil
         print(f"  (!) {len(ambiguous)} trial(s) have more than one distinct {label_col} value -- "
               f"using the alphabetically-first one for the timecourse plot")
 
-    ordered = df.sort_values(list(trial_cols) + [label_col], na_position="last")
+    result = df[label_col].copy()
+    ordered = df[active].sort_values(list(trial_cols) + [label_col], na_position="last")
     broadcast = ordered.groupby(list(trial_cols))[label_col].transform("first")
-    return broadcast.reindex(df.index)
+    result.loc[broadcast.index] = broadcast
+    return result
 
 
 def summarize_raw_for_timecourse(raw_df: pd.DataFrame, overlay_conditions: dict = None) -> pd.DataFrame:
@@ -1178,7 +1226,8 @@ def draw_event_annotations(ax, event_markers, tr, show_labels):
             for band, alpha in zip((0.5, 1.0, 1.5, 2.0), (0.10, 0.07, 0.05, 0.03)):
                 half_width = band * std
                 ax.axvspan(start - half_width, start + duration + half_width, color="gray", alpha=alpha, zorder=0)
-            label = f"{label} (variable timing)"
+            if label:  # a deliberately unlabeled marker (see compute_event_markers) stays blank
+                label = f"{label} (variable timing)"
 
         if show_labels:
             ax.text(start, ylim[1], label, fontsize=6.5, ha="left", va="bottom", rotation=45)

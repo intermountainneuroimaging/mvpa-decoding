@@ -145,7 +145,7 @@ def build_full_frame_table(events: pd.DataFrame, tr: float, n_frames: int) -> pd
     })
 
 
-def partition_into_trials(full_frame_df: pd.DataFrame, trial_start_event: dict) -> pd.DataFrame:
+def partition_into_trials(full_frame_df: pd.DataFrame, trial_start_event: dict, trial_end_event: dict = None) -> pd.DataFrame:
     """full_frame_df (one or more boldfiles' full-frame rows, e.g. from
     build_full_frame_table) -> same rows plus trial_index/window_index.
 
@@ -170,7 +170,19 @@ def partition_into_trials(full_frame_df: pd.DataFrame, trial_start_event: dict) 
     that boldfile's final volume); window_index counts up from 0 at each
     anchor. Volumes before a boldfile's first anchor get trial_index=0 and
     window_index = their own volume_of_interest (there's no trial start to
-    count from yet)."""
+    count from yet).
+
+    trial_end_event (optional, same query-DSL shape) closes a trial early,
+    at the first matching event's own start, whenever one occurs before that
+    trial's natural end (the next anchor, or the boldfile's last volume) --
+    e.g. a block-boundary rest period like "EndFixation" that shouldn't be
+    swept into whichever trial happened to precede it (unlike an ordinary,
+    short inter-trial "fixation"/"trial_fixation", which is deliberately
+    *not* something a caller would configure here, so it stays part of the
+    trial as before). Volumes from a trial_end_event match onward, up to
+    that trial's natural end, are left unpartitioned -- trial_index=0 and
+    window_index = their own volume_of_interest, same convention as the
+    leading before-the-first-anchor span."""
     pieces = []
     for boldfile, group in full_frame_df.groupby("boldfile", sort=False):
         group = group.sort_values("volume_of_interest").reset_index(drop=True)
@@ -193,11 +205,18 @@ def partition_into_trials(full_frame_df: pd.DataFrame, trial_start_event: dict) 
 
         boundaries = sorted(events.loc[is_boundary, "volume_of_interest"].tolist())
 
+        end_cuts = []
+        if trial_end_event is not None and len(events):
+            end_mask = evaluate_query_node(trial_end_event, events).to_numpy()
+            end_cuts = sorted(events.loc[end_mask, "volume_of_interest"].tolist())
+
         trial_index = np.zeros(len(group), dtype=int)
         window_index = vols.copy()
 
         for i, start_vol in enumerate(boundaries):
-            end_vol = boundaries[i + 1] if i + 1 < len(boundaries) else vols.max() + 1
+            natural_end = boundaries[i + 1] if i + 1 < len(boundaries) else vols.max() + 1
+            cut = next((c for c in end_cuts if start_vol < c < natural_end), None)
+            end_vol = cut if cut is not None else natural_end
             in_span = (vols >= start_vol) & (vols < end_vol)
             trial_index[in_span] = i + 1
             window_index[in_span] = vols[in_span] - start_vol
@@ -755,22 +774,23 @@ def qualifying_boldfiles(full_frame_df: pd.DataFrame, timecourse_conditions: dic
     return set(full_frame_df.loc[matches_any, "boldfile"])
 
 
-def build_timecourse_instructions(full_frame_df: pd.DataFrame, timecourse_conditions: dict, trial_start_event: dict) -> pd.DataFrame:
+def build_timecourse_instructions(full_frame_df: pd.DataFrame, timecourse_conditions: dict, trial_start_event: dict, trial_end_event: dict = None) -> pd.DataFrame:
     """Every volume of every *qualifying* boldfile (qualifying_boldfiles) in
     full_frame_df gets decoded -- nothing is subset or skipped within a
     qualifying boldfile, and a boldfile with no matching row at all is
     excluded entirely (e.g. a training-only run in a same-task, run-split
     design). Rows are partitioned into trials by partition_into_trials, keyed
     on trial_start_event (window_index resets to 0 at each anchor and counts
-    up until the next one). trial_type is left as the REAL event active at
-    that frame (not the anchor's); regressor_label is filled in only for rows
-    whose real trial_type matches one of timecourse_conditions (first match
-    wins, same as label_rows) -- everything else still comes out (fixation/
-    view-cue/ITI/... frames), just with regressor_label=None, so they're
-    decoded but excluded from accuracy/summary scoring until the caller
-    filters by regressor_label."""
+    up until the next one) and, optionally, trial_end_event (closes a trial
+    early -- see partition_into_trials). trial_type is left as the REAL event
+    active at that frame (not the anchor's); regressor_label is filled in
+    only for rows whose real trial_type matches one of timecourse_conditions
+    (first match wins, same as label_rows) -- everything else still comes
+    out (fixation/view-cue/ITI/... frames), just with regressor_label=None,
+    so they're decoded but excluded from accuracy/summary scoring until the
+    caller filters by regressor_label."""
     scoped = full_frame_df[full_frame_df["boldfile"].isin(qualifying_boldfiles(full_frame_df, timecourse_conditions))]
-    trials = partition_into_trials(scoped, trial_start_event)
+    trials = partition_into_trials(scoped, trial_start_event, trial_end_event)
     trials = label_rows_optional(trials, timecourse_conditions, label_column="regressor_label")
 
     return trials[[

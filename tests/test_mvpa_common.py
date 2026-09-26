@@ -374,6 +374,56 @@ class TestPartitionIntoTrials:
         assert (result[result["boldfile"] == "run_tagged"]["trial_index"] == 1).all()
         assert (result[result["boldfile"] == "run_untagged"]["trial_index"] == 1).all()
 
+    def test_trial_end_event_truncates_trial_before_a_long_rest_period(self):
+        # view_face -> clear (real content) -> EndFixation (a long
+        # block-boundary rest, not the next trial's own view_face for a
+        # while) -- with trial_end_event set to EndFixation, the trial must
+        # stop right there instead of running all the way to the next anchor
+        rows = [
+            (0, "view_face", 0.0, 1),
+            (1, "clear", 1.0, 2),
+            (2, "EndFixation", 2.0, 3),
+            (3, "EndFixation", 2.0, 3),
+            (4, "EndFixation", 2.0, 3),
+            (5, "view_face", 5.0, 4),
+        ]
+        df = _full_frame_df("run1", *rows)
+        end_event = {"column": "trial_type", "match": "exact", "value": "EndFixation"}
+
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR, end_event).sort_values("volume_of_interest")
+        assert result["trial_index"].tolist() == [1, 1, 0, 0, 0, 2]
+        # the EndFixation frames fall outside any active trial -- same
+        # "own volume_of_interest" convention as leading pre-anchor frames
+        assert result.loc[result["trial_type"] == "EndFixation", "window_index"].tolist() == [2, 3, 4]
+
+    def test_no_trial_end_event_behaves_exactly_as_before(self):
+        # omitting trial_end_event (the default) must reproduce the old,
+        # anchor-to-anchor-only behavior exactly -- a long rest period stays
+        # part of the preceding trial
+        rows = [
+            (0, "view_face", 0.0, 1),
+            (1, "clear", 1.0, 2),
+            (2, "EndFixation", 2.0, 3),
+            (3, "view_face", 3.0, 4),
+        ]
+        df = _full_frame_df("run1", *rows)
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR).sort_values("volume_of_interest")
+        assert result["trial_index"].tolist() == [1, 1, 1, 2]
+
+    def test_trial_end_event_past_the_natural_boundary_has_no_effect(self):
+        # a trial_end_event match that falls in the *next* trial's own span
+        # must not reach backward and truncate this one
+        rows = [
+            (0, "view_face", 0.0, 1),
+            (1, "clear", 1.0, 2),
+            (2, "view_face", 2.0, 3),
+            (3, "EndFixation", 3.0, 4),
+        ]
+        df = _full_frame_df("run1", *rows)
+        end_event = {"column": "trial_type", "match": "exact", "value": "EndFixation"}
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR, end_event).sort_values("volume_of_interest")
+        assert result["trial_index"].tolist() == [1, 1, 2, 0]
+
 
 class TestLabelRowsOptional:
     def test_unmatched_rows_kept_with_none_label(self):

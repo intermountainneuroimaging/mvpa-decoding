@@ -398,6 +398,7 @@ def main(args):
     timecourse_cfg = model_conditions.get("timecourse_decoding")
     timecourse_conditions = timecourse_cfg["conditions"] if timecourse_cfg else None
     trial_start_event = timecourse_cfg["trial_start_event"] if timecourse_cfg else None
+    trial_end_event = timecourse_cfg.get("trial_end_event") if timecourse_cfg else None
 
     # class label order shared across training/testing/timecourse regressor codes
     regressor_categories = list(training_conditions.keys())
@@ -462,7 +463,7 @@ def main(args):
         if testing_conditions is not None else None
     )
     if timecourse_cfg is not None:
-        timecourse_instr = build_timecourse_instructions(subject_df, timecourse_conditions, trial_start_event)
+        timecourse_instr = build_timecourse_instructions(subject_df, timecourse_conditions, trial_start_event, trial_end_event)
         timecourse_instr = apply_regressor_codes(timecourse_instr, regressor_categories)
     else:
         timecourse_instr = None

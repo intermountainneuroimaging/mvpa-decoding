@@ -33,6 +33,17 @@ trial_start_event, with window_index counting up from 0 at each anchor.
 which real trial_type values count as a scored category (regressor_label) --
 rows matching none of them are still decoded, just left unscored.
 
+An optional "trial_end_event" (same query shape) closes a trial early, at
+the first matching event's own start, whenever one occurs before the next
+trial_start_event anchor -- e.g. a block-boundary rest period that shouldn't
+be swept into whichever trial happened to precede it:
+
+    "trial_end_event": {"column": "trial_type", "match": "exact", "value": "EndFixation"}
+
+Volumes from a trial_end_event match onward are left outside any trial
+(same as a boldfile's leading frames before its first anchor) -- still
+decoded, just excluded from timecourse plotting/scoring for that trial.
+
 Usage:
     python validate_model_config.py --config mvpa_config.json \\
         [--master-spreadsheet master_spreadsheet.csv]
@@ -102,6 +113,10 @@ def validate_config(cfg: dict, valid_columns=None, df: pd.DataFrame = None):
             else:
                 errors.extend(validate_query_node(trial_start_event, valid_columns, path=f"{prefix}.trial_start_event"))
 
+            trial_end_event = model_conditions[section].get("trial_end_event")
+            if trial_end_event is not None:
+                errors.extend(validate_query_node(trial_end_event, valid_columns, path=f"{prefix}.trial_end_event"))
+
     # cross-section condition-name consistency
     present = [s for s in SECTIONS if s in section_condition_names]
     for a, b in zip(present, present[1:]):
@@ -144,6 +159,14 @@ def validate_config(cfg: dict, valid_columns=None, df: pd.DataFrame = None):
                         errors.append(f"model_conditions.{section}.trial_start_event matches 0 rows in the master_spreadsheet")
                     else:
                         print(f"  [{section}] trial_start_event: {n} rows")
+
+                trial_end_event = model_conditions[section].get("trial_end_event")
+                if trial_end_event is not None:
+                    n = int(evaluate_query_node(trial_end_event, df).sum())
+                    if n == 0:
+                        errors.append(f"model_conditions.{section}.trial_end_event matches 0 rows in the master_spreadsheet")
+                    else:
+                        print(f"  [{section}] trial_end_event: {n} rows")
 
     return errors, warnings
 

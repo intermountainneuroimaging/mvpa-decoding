@@ -661,6 +661,21 @@ class TestBroadcastTrialLabel:
         assert (result == "face").all()  # alphabetically first
         assert "more than one distinct regressor_label" in capsys.readouterr().out
 
+    def test_trial_index_zero_rows_are_never_broadcast_into_or_out_of(self):
+        # two UNRELATED trial_index==0 gaps in the same boldfile (leading
+        # frames before the first anchor, and a later trial's tail truncated
+        # by trial_end_event) -- grouping them together as if they were one
+        # trial would wrongly spread a label across gaps that have nothing
+        # to do with each other
+        df = pd.DataFrame({
+            "boldfile": ["run1", "run1", "run1", "run1"],
+            "trial_index": [0, 1, 1, 0],
+            "regressor_label": ["stray_label", "face", None, None],
+        })
+        result = broadcast_trial_label(df, "regressor_label")
+        assert result.tolist()[:3] == ["stray_label", "face", "face"]
+        assert pd.isna(result.tolist()[3])
+
 # =====================================================
 # resolve_overlay_styles
 # =====================================================
@@ -1101,13 +1116,18 @@ class TestComputeEventMarkers:
         df = pd.DataFrame(rows)
         markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
 
-        by_type = {m["trial_type"]: m for m in markers}
-        assert set(by_type) == {"view_face", "maintain", "fixation"}
+        # "fixation" is administrative content -- its marker is real (a
+        # boundary is still drawn) but deliberately left unlabeled (see
+        # TestComputeEventMarkers' blank-label tests), so key by mean_start
+        # rather than trial_type for that one
+        by_type = {m["trial_type"]: m for m in markers if m["trial_type"]}
+        by_start = {m["mean_start"]: m for m in markers}
+        assert set(by_type) == {"view_face", "maintain"}
         assert by_type["view_face"]["mean_start"] == 0
         assert by_type["view_face"]["std_start"] == 0
         assert by_type["maintain"]["mean_start"] == 1
         assert by_type["maintain"]["mean_duration"] == 2
-        assert by_type["fixation"]["mean_start"] == 3
+        assert by_start[3]["trial_type"] == ""
 
     def test_frequency_counts_distinct_boldfile_trial_pairs_not_just_trial_index(self):
         # two trials PER boldfile (trial_index resets to 1 at each boldfile's
@@ -1181,11 +1201,14 @@ class TestComputeEventMarkers:
         df = pd.DataFrame(rows)
         markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
 
-        by_type = {m["trial_type"]: m for m in markers}
-        assert set(by_type) == {"view_face", "cat", "fixation"}
+        # "fixation" is administrative content -- deliberately unlabeled
+        # (blank trial_type), same as in test_reliable_events_get_zero_std_markers
+        by_type = {m["trial_type"]: m for m in markers if m["trial_type"]}
+        by_start = {m["mean_start"]: m for m in markers}
+        assert set(by_type) == {"view_face", "cat"}
         assert by_type["cat"]["mean_start"] == 1
         assert by_type["cat"]["mean_duration"] == 5  # all 5 flashes merged
-        assert by_type["fixation"]["mean_start"] == 6
+        assert by_start[6]["trial_type"] == ""
 
     def test_rare_event_below_frequency_threshold_is_dropped(self):
         rows = []
@@ -1226,6 +1249,69 @@ class TestComputeEventMarkers:
         markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
         by_type = {m["trial_type"]: m for m in markers}
         assert by_type["probe"]["std_start"] > 0
+
+    def test_nan_variant_is_ignored_so_the_rest_still_collapse_to_a_group(self):
+        # one malformed trial logs "view_nan" (missing/undefined item) where
+        # every other trial has "view_face"/"view_place" -- the "_nan" value
+        # must not force the auto-joined fallback once a group covers the
+        # *real* values
+        rows = [
+            _tc_row("run1", 0, "view_face", 0.0, 1),
+            _tc_row("run2", 0, "view_place", 0.0, 1),
+            _tc_row("run3", 0, "view_nan", 0.0, 1),
+        ]
+        df = pd.DataFrame(rows)
+        annotation_labels = {"view": ["view_face", "view_place"]}
+        markers = compute_event_markers(df, {"column": "trial_type", "match": "regex", "value": "view_.*"},
+                                         annotation_labels=annotation_labels)
+        assert markers[0]["trial_type"] == "view"
+
+    def test_position_that_is_only_ever_nan_still_gets_a_label(self):
+        # degenerate case: every trial's real trial_type at this position
+        # happens to be a "_nan" variant -- filtering must not leave nothing
+        # to label
+        rows = [
+            _tc_row("run1", 0, "view_face", 0.0, 1),
+            _tc_row("run1", 1, "nan_nan", 1.0, 2),
+            _tc_row("run2", 0, "view_face", 0.0, 1),
+            _tc_row("run2", 1, "nan_nan", 1.0, 2),
+        ]
+        df = pd.DataFrame(rows)
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
+        by_type = {m["trial_type"]: m for m in markers}
+        assert by_type["nan_nan"]["mean_start"] == 1
+
+    def test_position_that_is_always_the_same_fixation_value_is_left_unlabeled(self):
+        # every trial's real value at this position is literally
+        # "trial_fixation" -- a rest/gap marker, not a condition worth
+        # naming, so it must render blank even though resolve_marker_label
+        # would otherwise just return it as-is (the single-value case)
+        rows = [
+            _tc_row("run1", 0, "view_face", 0.0, 1),
+            _tc_row("run1", 1, "trial_fixation", 1.0, 2),
+            _tc_row("run2", 0, "view_face", 0.0, 1),
+            _tc_row("run2", 1, "trial_fixation", 1.0, 2),
+        ]
+        df = pd.DataFrame(rows)
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
+        by_start = {m["mean_start"]: m["trial_type"] for m in markers}
+        assert by_start[1.0] == ""
+
+    def test_position_mixing_multiple_fixation_variants_is_also_left_unlabeled(self):
+        # "fixation" and "EndFixation" both occur at this position across
+        # trials -- still all administrative, so still blank, not an
+        # auto-joined "EndFixation/fixation" and not requiring an explicit
+        # "" annotation_labels group to achieve that
+        rows = [
+            _tc_row("run1", 0, "view_face", 0.0, 1),
+            _tc_row("run1", 1, "fixation", 1.0, 2),
+            _tc_row("run2", 0, "view_face", 0.0, 1),
+            _tc_row("run2", 1, "EndFixation", 1.0, 2),
+        ]
+        df = pd.DataFrame(rows)
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
+        by_start = {m["mean_start"]: m["trial_type"] for m in markers}
+        assert by_start[1.0] == ""
 
 
 class TestResolveMarkerLabel:
@@ -1277,6 +1363,18 @@ class TestDrawEventAnnotations:
         markers = [{"trial_type": "probe", "mean_start": 1.0, "std_start": 2.0, "mean_duration": 1.0}]
         draw_event_annotations(ax, markers, tr=1.0, show_labels=False)
         assert len(ax.patches) == 4  # 4 fading bands, per the "blurry" implementation
+        plt.close(fig)
+
+    def test_deliberately_blank_marker_stays_blank_even_when_jittery(self):
+        # compute_event_markers hands back trial_type="" for a rest/gap
+        # marker (see its all-excluded-content rule) -- the "(variable
+        # timing)" suffix normally appended for a jittery marker must not
+        # turn that into a non-empty label
+        fig, ax = plt.subplots()
+        ax.plot([0, 1, 2], [0, 1, 0])
+        markers = [{"trial_type": "", "mean_start": 1.0, "std_start": 2.0, "mean_duration": 1.0}]
+        draw_event_annotations(ax, markers, tr=1.0, show_labels=True)
+        assert all(t.get_text() == "" for t in ax.texts)
         plt.close(fig)
 
 
