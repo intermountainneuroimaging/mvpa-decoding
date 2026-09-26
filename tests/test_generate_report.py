@@ -664,9 +664,9 @@ class TestBroadcastTrialLabel:
     def test_trial_index_zero_rows_are_never_broadcast_into_or_out_of(self):
         # two UNRELATED trial_index==0 gaps in the same boldfile (leading
         # frames before the first anchor, and a later trial's tail truncated
-        # by trial_end_event) -- grouping them together as if they were one
-        # trial would wrongly spread a label across gaps that have nothing
-        # to do with each other
+        # by a block-boundary marker, see is_trial_end_marker) -- grouping
+        # them together as if they were one trial would wrongly spread a
+        # label across gaps that have nothing to do with each other
         df = pd.DataFrame({
             "boldfile": ["run1", "run1", "run1", "run1"],
             "trial_index": [0, 1, 1, 0],
@@ -1375,6 +1375,24 @@ class TestDrawEventAnnotations:
         markers = [{"trial_type": "", "mean_start": 1.0, "std_start": 2.0, "mean_duration": 1.0}]
         draw_event_annotations(ax, markers, tr=1.0, show_labels=True)
         assert all(t.get_text() == "" for t in ax.texts)
+        plt.close(fig)
+
+    def test_label_is_rotated_and_anchored_inside_the_plot(self):
+        # the label must be rotated 90 degrees and anchored at the top of
+        # the axes with va="top", so it hugs the dotted boundary line and
+        # runs downward -- INTO the plot -- rather than va="bottom" (the
+        # old behavior), which grows the text upward past the axes' own
+        # top edge and outside the visible plot area
+        fig, ax = plt.subplots()
+        ax.plot([0, 1, 2], [0, 1, 0])
+        markers = [{"trial_type": "maintain", "mean_start": 1.0, "std_start": 0.0, "mean_duration": 2.0}]
+        draw_event_annotations(ax, markers, tr=1.0, show_labels=True)
+        texts = [t for t in ax.texts if t.get_text() == "maintain"]
+        assert len(texts) == 1
+        text = texts[0]
+        assert text.get_rotation() == 90
+        assert text.get_va() == "top"
+        assert text.get_position()[1] == ax.get_ylim()[1]
         plt.close(fig)
 
 

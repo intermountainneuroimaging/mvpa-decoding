@@ -16,10 +16,12 @@ from utils.mvpa_common import (
     build_full_frame_table,
     partition_into_trials,
     build_timecourse_instructions,
+    resolve_timecourse_conditions,
     qualifying_boldfiles,
     label_rows_optional,
     label_conditions_with_lag,
     is_excluded_trial_type,
+    is_trial_end_marker,
     build_trial_pivot_table,
     validate_query_node,
     evaluate_query_node,
@@ -374,11 +376,12 @@ class TestPartitionIntoTrials:
         assert (result[result["boldfile"] == "run_tagged"]["trial_index"] == 1).all()
         assert (result[result["boldfile"] == "run_untagged"]["trial_index"] == 1).all()
 
-    def test_trial_end_event_truncates_trial_before_a_long_rest_period(self):
+    def test_block_boundary_marker_truncates_trial_before_a_long_rest_period(self):
         # view_face -> clear (real content) -> EndFixation (a long
         # block-boundary rest, not the next trial's own view_face for a
-        # while) -- with trial_end_event set to EndFixation, the trial must
-        # stop right there instead of running all the way to the next anchor
+        # while) -- EndFixation is a hardcoded block-boundary marker (see
+        # is_trial_end_marker), so the trial must stop right there instead
+        # of running all the way to the next anchor -- no config needed
         rows = [
             (0, "view_face", 0.0, 1),
             (1, "clear", 1.0, 2),
@@ -388,30 +391,31 @@ class TestPartitionIntoTrials:
             (5, "view_face", 5.0, 4),
         ]
         df = _full_frame_df("run1", *rows)
-        end_event = {"column": "trial_type", "match": "exact", "value": "EndFixation"}
 
-        result = partition_into_trials(df, VIEW_FACE_ANCHOR, end_event).sort_values("volume_of_interest")
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR).sort_values("volume_of_interest")
         assert result["trial_index"].tolist() == [1, 1, 0, 0, 0, 2]
         # the EndFixation frames fall outside any active trial -- same
         # "own volume_of_interest" convention as leading pre-anchor frames
         assert result.loc[result["trial_type"] == "EndFixation", "window_index"].tolist() == [2, 3, 4]
 
-    def test_no_trial_end_event_behaves_exactly_as_before(self):
-        # omitting trial_end_event (the default) must reproduce the old,
-        # anchor-to-anchor-only behavior exactly -- a long rest period stays
-        # part of the preceding trial
+    def test_ordinary_fixation_does_not_truncate_a_trial(self):
+        # unlike EndFixation, a plain "fixation" (an ordinary short
+        # inter-trial ITI, EXCLUDED_TRIAL_TYPE_SUBSTRINGS not
+        # EXCLUDED_TRIAL_TYPE_EXACT) must NOT end a trial early -- it's
+        # meant to stay part of the trial's tail so the timecourse line
+        # keeps plotting through it (see broadcast_trial_label)
         rows = [
             (0, "view_face", 0.0, 1),
             (1, "clear", 1.0, 2),
-            (2, "EndFixation", 2.0, 3),
+            (2, "fixation", 2.0, 3),
             (3, "view_face", 3.0, 4),
         ]
         df = _full_frame_df("run1", *rows)
         result = partition_into_trials(df, VIEW_FACE_ANCHOR).sort_values("volume_of_interest")
         assert result["trial_index"].tolist() == [1, 1, 1, 2]
 
-    def test_trial_end_event_past_the_natural_boundary_has_no_effect(self):
-        # a trial_end_event match that falls in the *next* trial's own span
+    def test_block_boundary_marker_past_the_natural_boundary_has_no_effect(self):
+        # a block-boundary marker that falls in the *next* trial's own span
         # must not reach backward and truncate this one
         rows = [
             (0, "view_face", 0.0, 1),
@@ -420,8 +424,7 @@ class TestPartitionIntoTrials:
             (3, "EndFixation", 3.0, 4),
         ]
         df = _full_frame_df("run1", *rows)
-        end_event = {"column": "trial_type", "match": "exact", "value": "EndFixation"}
-        result = partition_into_trials(df, VIEW_FACE_ANCHOR, end_event).sort_values("volume_of_interest")
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR).sort_values("volume_of_interest")
         assert result["trial_index"].tolist() == [1, 1, 2, 0]
 
 
@@ -444,13 +447,30 @@ class TestLabelRowsOptional:
 # =====================================================
 
 class TestIsExcludedTrialType:
-    @pytest.mark.parametrize("trial_type", ["fixation", "Fixation", "start_block", "end_block", "postrt", "trial_postrt_x"])
+    @pytest.mark.parametrize("trial_type", ["fixation", "Fixation", "start_block", "end_block", "endfixation", "EndFixation", "postrt", "trial_postrt_x"])
     def test_excluded_types(self, trial_type):
         assert is_excluded_trial_type(trial_type) is True
 
     @pytest.mark.parametrize("trial_type", ["face", "place", "view_face", "suppress_place"])
     def test_non_excluded_types(self, trial_type):
         assert is_excluded_trial_type(trial_type) is False
+
+
+# =====================================================
+# is_trial_end_marker
+# =====================================================
+
+class TestIsTrialEndMarker:
+    @pytest.mark.parametrize("trial_type", ["start_block", "end_block", "endfixation", "EndFixation"])
+    def test_block_boundary_markers_end_a_trial(self, trial_type):
+        assert is_trial_end_marker(trial_type) is True
+
+    @pytest.mark.parametrize("trial_type", ["fixation", "trial_fixation", "postrt", "face", "view_face"])
+    def test_ordinary_content_does_not_end_a_trial(self, trial_type):
+        # narrower than is_excluded_trial_type on purpose: an ordinary
+        # within-trial administrative event (fixation/trial_fixation/postrt)
+        # must stay part of its trial, not close it early
+        assert is_trial_end_marker(trial_type) is False
 
 
 # =====================================================
@@ -487,8 +507,10 @@ class TestLabelConditionsWithLag:
 
         result = label_conditions_with_lag(df, conditions, hemodynamic_lag=2.0)
 
-        # start = onset(2.0) + lag(2.0) = 4.0 -> vol 4; 3.0s duration / 1.0s TR = 3 volumes
-        assert result["volume_of_interest"].tolist() == [4, 5, 6]
+        # withlag: start = onset(2.0) + lag(2.0) = 4.0 -> vol 4; 3.0s duration / 1.0s TR = 3 volumes
+        assert result["volume_of_interest_withlag"].tolist() == [4, 5, 6]
+        # plain volume_of_interest stays the event's own real, unshifted position
+        assert result["volume_of_interest"].tolist() == [2, 3, 4]
         assert (result["regressor_label"] == "maintain").all()
         assert (result["trial_type"] == "maintain_face").all()  # real, unshifted label
         assert (result["trial_index"] == 1).all()
@@ -520,6 +542,8 @@ class TestLabelConditionsWithLag:
 
         result = label_conditions_with_lag(df, conditions, hemodynamic_lag=0.0)
         assert result["volume_of_interest"].tolist() == [5, 6]
+        # zero lag -- both columns agree
+        assert result["volume_of_interest_withlag"].tolist() == [5, 6]
 
     def test_events_overwritten_in_the_dense_table_are_still_selected(self, tmp_path, monkeypatch):
         # regression: two real events close enough together that a dense,
@@ -549,6 +573,43 @@ class TestLabelConditionsWithLag:
 
         assert set(result["regressor_label"]) == {"maintain", "suppress"}
         assert (result[result["regressor_label"] == "maintain"]["volume_of_interest"] == 0).all()
+
+
+class TestResolveTimecourseConditions:
+    def test_uses_its_own_conditions_when_present(self):
+        model_conditions = {
+            "testing": {"conditions": {"face": {"column": "trial_type", "match": "exact", "value": "view_face"}}},
+            "timecourse_decoding": {"conditions": {"face": {"column": "trial_type", "match": "exact", "value": "clear_face"}}},
+        }
+        # explicit timecourse_decoding.conditions overrides the fallback --
+        # a project deliberately scoring the timecourse page differently
+        # from testing (e.g. the operate period) must not be silently
+        # overridden by testing's own definition
+        assert resolve_timecourse_conditions(model_conditions) == {
+            "face": {"column": "trial_type", "match": "exact", "value": "clear_face"}
+        }
+
+    def test_falls_back_to_testing_conditions_when_omitted(self):
+        model_conditions = {
+            "testing": {"conditions": {"face": {"column": "trial_type", "match": "exact", "value": "view_face"}}},
+            "timecourse_decoding": {"trial_start_event": {"column": "trial_type", "match": "regex", "value": "view_.*"}},
+        }
+        assert resolve_timecourse_conditions(model_conditions) == {
+            "face": {"column": "trial_type", "match": "exact", "value": "view_face"}
+        }
+
+    def test_falls_back_when_conditions_is_an_empty_object(self):
+        model_conditions = {
+            "testing": {"conditions": {"face": {"column": "trial_type", "match": "exact", "value": "view_face"}}},
+            "timecourse_decoding": {"conditions": {}},
+        }
+        assert resolve_timecourse_conditions(model_conditions) == {
+            "face": {"column": "trial_type", "match": "exact", "value": "view_face"}
+        }
+
+    def test_returns_none_when_neither_is_available(self):
+        model_conditions = {"timecourse_decoding": {"trial_start_event": {}}}
+        assert resolve_timecourse_conditions(model_conditions) is None
 
 
 class TestQualifyingBoldfiles:
@@ -885,6 +946,24 @@ class TestLoadImagesAndMask:
         df = _labeled_df(synthetic_bold_file, subject="load_test_real_mask")
         X, Y, idx, masker = load_images_and_mask(df, mask_pattern_template=str(mask_path))
         assert X.shape == (3, 75)
+
+    def test_prefers_volume_of_interest_withlag_when_present(self, synthetic_bold_file):
+        # label_conditions_with_lag's output carries both columns -- the
+        # lag-shifted one must be what actually selects BOLD frames, not
+        # plain volume_of_interest (the event's real, unshifted position).
+        # Compare against a plain volume_of_interest-only call for the same
+        # target frames, rather than reimplementing NiftiMasker's own
+        # voxel ordering here.
+        reference_df = _labeled_df(synthetic_bold_file, subject="load_test_withlag_ref")
+        reference_df["volume_of_interest"] = [7, 8, 9]
+        X_reference, _, _, _ = load_images_and_mask(reference_df, mask_pattern_template=None)
+
+        withlag_df = _labeled_df(synthetic_bold_file, subject="load_test_withlag")
+        withlag_df["volume_of_interest"] = [0, 0, 0]  # must NOT be what gets used
+        withlag_df["volume_of_interest_withlag"] = [7, 8, 9]  # must be what's actually used
+        X_withlag, _, _, _ = load_images_and_mask(withlag_df, mask_pattern_template=None)
+
+        assert np.allclose(X_withlag, X_reference)
 
 
 # =====================================================

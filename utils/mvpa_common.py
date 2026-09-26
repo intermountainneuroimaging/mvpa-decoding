@@ -46,7 +46,7 @@ BOOL_KEYS = {"and", "or", "not"}
 # these out (generate_master_spreadsheet.py keeps every real event, admin
 # rows included, for continuous timecourse decoding) -- label_conditions_with_lag
 # is what actually excludes them, at training/testing selection time.
-EXCLUDED_TRIAL_TYPE_EXACT = ("start_block", "end_block")
+EXCLUDED_TRIAL_TYPE_EXACT = ("start_block", "end_block", "endfixation")
 EXCLUDED_TRIAL_TYPE_SUBSTRINGS = ("fixation", "postrt")
 
 
@@ -55,6 +55,23 @@ def is_excluded_trial_type(trial_type) -> bool:
     if tt in EXCLUDED_TRIAL_TYPE_EXACT:
         return True
     return any(s in tt for s in EXCLUDED_TRIAL_TYPE_SUBSTRINGS)
+
+
+def is_trial_end_marker(trial_type) -> bool:
+    """True for an administrative event that marks a block/run boundary --
+    a trial containing one should end there (see partition_into_trials)
+    rather than continuing through it. Deliberately narrower than
+    is_excluded_trial_type: only EXCLUDED_TRIAL_TYPE_EXACT's block-boundary
+    markers (start_block, end_block, endfixation) qualify. An ordinary
+    short administrative event that legitimately occurs *within* a trial
+    (fixation/trial_fixation/postrt -- EXCLUDED_TRIAL_TYPE_SUBSTRINGS) does
+    NOT end a trial; it's meant to stay part of it so the timecourse line
+    keeps plotting through it instead of cutting off early (see
+    broadcast_trial_label in generate_report.py). Hardcoded rather than a
+    config option, since which events are block-boundary markers vs.
+    ordinary trial content is the same blanket policy as
+    is_excluded_trial_type, not a per-project choice."""
+    return str(trial_type).lower() in EXCLUDED_TRIAL_TYPE_EXACT
 
 
 # reserved trial_type value: an events.tsv that emits an explicit row tagged
@@ -145,7 +162,7 @@ def build_full_frame_table(events: pd.DataFrame, tr: float, n_frames: int) -> pd
     })
 
 
-def partition_into_trials(full_frame_df: pd.DataFrame, trial_start_event: dict, trial_end_event: dict = None) -> pd.DataFrame:
+def partition_into_trials(full_frame_df: pd.DataFrame, trial_start_event: dict) -> pd.DataFrame:
     """full_frame_df (one or more boldfiles' full-frame rows, e.g. from
     build_full_frame_table) -> same rows plus trial_index/window_index.
 
@@ -172,15 +189,16 @@ def partition_into_trials(full_frame_df: pd.DataFrame, trial_start_event: dict, 
     window_index = their own volume_of_interest (there's no trial start to
     count from yet).
 
-    trial_end_event (optional, same query-DSL shape) closes a trial early,
-    at the first matching event's own start, whenever one occurs before that
-    trial's natural end (the next anchor, or the boldfile's last volume) --
-    e.g. a block-boundary rest period like "EndFixation" that shouldn't be
-    swept into whichever trial happened to precede it (unlike an ordinary,
-    short inter-trial "fixation"/"trial_fixation", which is deliberately
-    *not* something a caller would configure here, so it stays part of the
-    trial as before). Volumes from a trial_end_event match onward, up to
-    that trial's natural end, are left unpartitioned -- trial_index=0 and
+    A trial also closes early, at the first is_trial_end_marker match's own
+    start, whenever one occurs before that trial's natural end (the next
+    anchor, or the boldfile's last volume) -- a block-boundary rest period
+    (start_block/end_block/EndFixation) shouldn't be swept into whichever
+    trial happened to precede it, unlike an ordinary short inter-trial
+    "fixation"/"trial_fixation"/"postrt", which deliberately keeps its own
+    trial's tail continuing through it (see broadcast_trial_label in
+    generate_report.py). This is hardcoded, not configurable -- see
+    is_trial_end_marker. Volumes from such a match onward, up to that
+    trial's natural end, are left unpartitioned -- trial_index=0 and
     window_index = their own volume_of_interest, same convention as the
     leading before-the-first-anchor span."""
     pieces = []
@@ -206,8 +224,8 @@ def partition_into_trials(full_frame_df: pd.DataFrame, trial_start_event: dict, 
         boundaries = sorted(events.loc[is_boundary, "volume_of_interest"].tolist())
 
         end_cuts = []
-        if trial_end_event is not None and len(events):
-            end_mask = evaluate_query_node(trial_end_event, events).to_numpy()
+        if len(events):
+            end_mask = events["trial_type"].apply(is_trial_end_marker).to_numpy()
             end_cuts = sorted(events.loc[end_mask, "volume_of_interest"].tolist())
 
         trial_index = np.zeros(len(group), dtype=int)
@@ -428,7 +446,19 @@ def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hem
     hemodynamic_lag) -- since the BOLD response to a real-world event peaks
     several seconds after it, not during it; independent of what
     full_frame_df's own (unshifted, single-winner-per-volume) trial_type says
-    is "really" happening there at that moment."""
+    is "really" happening there at that moment.
+
+    Two volume columns come out, deliberately not one: "volume_of_interest"
+    is the event's own real, unshifted position (same meaning everywhere
+    else in this codebase -- build_full_frame_table, timecourse decoding),
+    while "volume_of_interest_withlag" is the lag-shifted position actually
+    used to pull BOLD data for training/testing (see load_images_and_mask,
+    which prefers this column when present). Keeping both, under different
+    names, means a reader of model/<subject>_cv_results.csv can't mistake
+    one for the other -- previously this table only ever had a single
+    "volume_of_interest" column holding the shifted value, silently
+    inconsistent with every other output's use of that same name for the
+    real, unshifted position."""
     non_event_cols = {"volume_of_interest", "trial_type", "onset", "duration", "event_index"}
 
     rows = []
@@ -466,10 +496,15 @@ def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hem
             start_time = ev["onset"] + hemodynamic_lag
             stop_time = start_time + ev["duration"]
             start_vol, stop_vol = compute_volume_range(start_time, stop_time, tr, n_frames)
+            # the event's own real, unshifted start volume -- purely for
+            # labeling clarity alongside volume_of_interest_withlag below;
+            # not clipped to n_frames (never used to index into BOLD data)
+            raw_start_vol = int(math.floor(ev["onset"] / tr))
             base = ev.to_dict()
-            for vol in range(start_vol, stop_vol):
+            for i, vol in enumerate(range(start_vol, stop_vol)):
                 row = dict(base)
-                row["volume_of_interest"] = vol
+                row["volume_of_interest"] = raw_start_vol + i
+                row["volume_of_interest_withlag"] = vol
                 rows.append(row)
 
     return pd.DataFrame(rows)
@@ -666,7 +701,12 @@ _masker_cache = {}
 
 def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str = None):
     """Load BOLD patterns for every (subject, session, boldfile) group in
-    labeled_df, z-score, and slice to each row's volume_of_interest.
+    labeled_df, z-score, and slice to each row's actual BOLD frame -- its
+    volume_of_interest_withlag when that column is present (training/testing/
+    model.kfold_cv rows, from label_conditions_with_lag -- the
+    hemodynamic_lag-shifted frame), otherwise its plain volume_of_interest
+    (timecourse_decoding rows, which never apply lag -- see
+    build_timecourse_instructions).
 
     mask_pattern_template is the full path to the mask -- absolute, or
     relative to wherever the workflow script is run from (same convention
@@ -724,9 +764,14 @@ def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str = 
         z_patterns = StandardScaler().fit_transform(masked_data)
         z_patterns = np.nan_to_num(z_patterns)
 
-        # crop data to selected volumes
+        # crop data to selected volumes -- volume_of_interest_withlag (from
+        # label_conditions_with_lag's training/testing/kfold rows) is the
+        # actual, hemodynamic_lag-shifted BOLD frame to pull; a row without
+        # it (e.g. timecourse_decoding's, which never applies lag) uses
+        # plain volume_of_interest, unshifted, exactly as before
+        vol_column = "volume_of_interest_withlag" if "volume_of_interest_withlag" in group.columns else "volume_of_interest"
         vols = (
-            pd.to_numeric(group["volume_of_interest"], errors="raise")
+            pd.to_numeric(group[vol_column], errors="raise")
             .astype(int)
             .to_numpy()
         )
@@ -758,6 +803,29 @@ def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str = 
     return X, Y, idx, masker
 
 
+def resolve_timecourse_conditions(model_conditions: dict):
+    """model_conditions.timecourse_decoding.conditions, falling back to
+    model_conditions.testing.conditions when the former is omitted (or an
+    empty object) -- the two would otherwise be two independently-maintained
+    copies of the same "which real event is true to this trained category"
+    query, with nothing keeping them in sync. That's a real bug this project
+    hit: a config's timecourse_decoding.conditions matched the operate
+    period while testing.conditions correctly matched the view period, so
+    the timecourse page's "true: face"/"true: place" scoring silently
+    disagreed with what the classifier was actually trained/tested to
+    detect. An explicit timecourse_decoding.conditions still overrides this
+    fallback, for a project that deliberately wants the timecourse page
+    scored against something other than testing's own definition (e.g.
+    the operate period, to track evidence persistence after encoding).
+    Returns None if neither is available -- the caller decides how loudly
+    to fail in that case."""
+    tc_cfg = model_conditions.get("timecourse_decoding") or {}
+    conditions = tc_cfg.get("conditions")
+    if conditions:
+        return conditions
+    return model_conditions.get("testing", {}).get("conditions") or None
+
+
 def qualifying_boldfiles(full_frame_df: pd.DataFrame, timecourse_conditions: dict) -> set:
     """A boldfile "qualifies" for continuous timecourse decoding if ANY of its
     real rows match ANY of timecourse_conditions' queries -- this is how a
@@ -774,23 +842,23 @@ def qualifying_boldfiles(full_frame_df: pd.DataFrame, timecourse_conditions: dic
     return set(full_frame_df.loc[matches_any, "boldfile"])
 
 
-def build_timecourse_instructions(full_frame_df: pd.DataFrame, timecourse_conditions: dict, trial_start_event: dict, trial_end_event: dict = None) -> pd.DataFrame:
+def build_timecourse_instructions(full_frame_df: pd.DataFrame, timecourse_conditions: dict, trial_start_event: dict) -> pd.DataFrame:
     """Every volume of every *qualifying* boldfile (qualifying_boldfiles) in
     full_frame_df gets decoded -- nothing is subset or skipped within a
     qualifying boldfile, and a boldfile with no matching row at all is
     excluded entirely (e.g. a training-only run in a same-task, run-split
     design). Rows are partitioned into trials by partition_into_trials, keyed
     on trial_start_event (window_index resets to 0 at each anchor and counts
-    up until the next one) and, optionally, trial_end_event (closes a trial
-    early -- see partition_into_trials). trial_type is left as the REAL event
-    active at that frame (not the anchor's); regressor_label is filled in
-    only for rows whose real trial_type matches one of timecourse_conditions
-    (first match wins, same as label_rows) -- everything else still comes
-    out (fixation/view-cue/ITI/... frames), just with regressor_label=None,
-    so they're decoded but excluded from accuracy/summary scoring until the
-    caller filters by regressor_label."""
+    up until the next one, or until a hardcoded block-boundary marker ends
+    it early -- see partition_into_trials/is_trial_end_marker). trial_type is
+    left as the REAL event active at that frame (not the anchor's);
+    regressor_label is filled in only for rows whose real trial_type matches
+    one of timecourse_conditions (first match wins, same as label_rows) --
+    everything else still comes out (fixation/view-cue/ITI/... frames), just
+    with regressor_label=None, so they're decoded but excluded from
+    accuracy/summary scoring until the caller filters by regressor_label."""
     scoped = full_frame_df[full_frame_df["boldfile"].isin(qualifying_boldfiles(full_frame_df, timecourse_conditions))]
-    trials = partition_into_trials(scoped, trial_start_event, trial_end_event)
+    trials = partition_into_trials(scoped, trial_start_event)
     trials = label_rows_optional(trials, timecourse_conditions, label_column="regressor_label")
 
     return trials[[

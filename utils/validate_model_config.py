@@ -7,6 +7,19 @@ either section entirely to skip that step in mvpa_workflow.py: testing
 skips the independent test-set evaluation, timecourse_decoding skips
 decoding entirely, including generate_report.py's timecourse page).
 
+timecourse_decoding's own "conditions" is optional: when omitted (or an
+empty object), it falls back to testing's "conditions" (see
+resolve_timecourse_conditions in utils/mvpa_common.py) -- a config error if
+neither is present. This is the recommended default for most configs, since
+it's what actually determines which real event each decoded volume is
+scored against for the timecourse page's "true: <category>" rows; leaving
+the two independently specified risks them drifting apart (as happened in
+practice: a config's timecourse_decoding.conditions matched the operate
+period while testing.conditions matched the view period the model was
+really trained/tested on). Set timecourse_decoding.conditions explicitly
+only when a project deliberately wants the timecourse page scored against
+something other than testing's own definition.
+
 Each section's "conditions" is a mapping of condition name -> query, where a
 query is a small recursive boolean tree over the master_spreadsheet columns:
 
@@ -33,16 +46,12 @@ trial_start_event, with window_index counting up from 0 at each anchor.
 which real trial_type values count as a scored category (regressor_label) --
 rows matching none of them are still decoded, just left unscored.
 
-An optional "trial_end_event" (same query shape) closes a trial early, at
-the first matching event's own start, whenever one occurs before the next
-trial_start_event anchor -- e.g. a block-boundary rest period that shouldn't
-be swept into whichever trial happened to precede it:
-
-    "trial_end_event": {"column": "trial_type", "match": "exact", "value": "EndFixation"}
-
-Volumes from a trial_end_event match onward are left outside any trial
-(same as a boldfile's leading frames before its first anchor) -- still
-decoded, just excluded from timecourse plotting/scoring for that trial.
+A trial also closes early, automatically, at the first block-boundary
+marker (start_block/end_block/EndFixation -- see is_trial_end_marker in
+utils/mvpa_common.py) that occurs before the next trial_start_event anchor,
+so a block-boundary rest period isn't swept into whichever trial happened
+to precede it. This isn't configurable -- it's the same hardcoded policy as
+is_excluded_trial_type, not a per-project choice.
 
 Usage:
     python validate_model_config.py --config mvpa_config.json \\
@@ -65,7 +74,7 @@ import sys
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
-from utils.mvpa_common import validate_query_node, evaluate_query_node
+from utils.mvpa_common import validate_query_node, evaluate_query_node, resolve_timecourse_conditions
 
 REQUIRED_SECTIONS = ("training",)
 SECTIONS = REQUIRED_SECTIONS + ("testing", "timecourse_decoding")
@@ -97,7 +106,18 @@ def validate_config(cfg: dict, valid_columns=None, df: pd.DataFrame = None):
             continue
         prefix = f"model_conditions.{section}"
         conditions = model_conditions[section].get("conditions")
-        if not isinstance(conditions, dict) or not conditions:
+
+        if not conditions and section == "timecourse_decoding":
+            # optional -- falls back to model_conditions.testing.conditions,
+            # see resolve_timecourse_conditions
+            conditions = resolve_timecourse_conditions(model_conditions)
+            if not conditions:
+                errors.append(
+                    f"{prefix}.conditions: omitted, and there's no model_conditions.testing.conditions "
+                    f"to fall back to -- provide one or the other"
+                )
+                continue
+        elif not isinstance(conditions, dict) or not conditions:
             errors.append(f"{prefix}.conditions must be a non-empty object of name -> query")
             continue
 
@@ -113,10 +133,6 @@ def validate_config(cfg: dict, valid_columns=None, df: pd.DataFrame = None):
             else:
                 errors.extend(validate_query_node(trial_start_event, valid_columns, path=f"{prefix}.trial_start_event"))
 
-            trial_end_event = model_conditions[section].get("trial_end_event")
-            if trial_end_event is not None:
-                errors.extend(validate_query_node(trial_end_event, valid_columns, path=f"{prefix}.trial_end_event"))
-
     # cross-section condition-name consistency
     present = [s for s in SECTIONS if s in section_condition_names]
     for a, b in zip(present, present[1:]):
@@ -131,7 +147,9 @@ def validate_config(cfg: dict, valid_columns=None, df: pd.DataFrame = None):
         for section in SECTIONS:
             if section not in model_conditions:
                 continue
-            conditions = model_conditions[section]["conditions"]
+            conditions = model_conditions[section].get("conditions")
+            if not conditions and section == "timecourse_decoding":
+                conditions = resolve_timecourse_conditions(model_conditions)
             masks = {}
             for name, query in conditions.items():
                 mask = evaluate_query_node(query, df)
@@ -159,14 +177,6 @@ def validate_config(cfg: dict, valid_columns=None, df: pd.DataFrame = None):
                         errors.append(f"model_conditions.{section}.trial_start_event matches 0 rows in the master_spreadsheet")
                     else:
                         print(f"  [{section}] trial_start_event: {n} rows")
-
-                trial_end_event = model_conditions[section].get("trial_end_event")
-                if trial_end_event is not None:
-                    n = int(evaluate_query_node(trial_end_event, df).sum())
-                    if n == 0:
-                        errors.append(f"model_conditions.{section}.trial_end_event matches 0 rows in the master_spreadsheet")
-                    else:
-                        print(f"  [{section}] trial_end_event: {n} rows")
 
     return errors, warnings
 

@@ -410,6 +410,23 @@ extra to configure on the report side):
   `decoding_results.csv`, just with `regressor_label` blank, left for you to
   filter on afterward.
 
+`conditions` itself is **optional** here -- omit it (or leave it an empty
+object) and it falls back to `testing`'s own `conditions` (error if neither
+is present; see `resolve_timecourse_conditions` in `utils/mvpa_common.py`).
+This is the recommended default: `testing.conditions` already defines
+"which real event is true to this trained category" for the held-out test
+evaluation, and the timecourse page should normally score against that same
+definition. Keeping two separately-written copies of the same query risks
+them drifting apart with nothing to catch it -- exactly what happened in
+practice on this project (a config's `timecourse_decoding.conditions`
+matched the operate period, while `testing.conditions` correctly matched
+the view period the classifier was actually trained/tested to detect, so
+the timecourse page silently scored the wrong event). Set
+`timecourse_decoding.conditions` explicitly only when you deliberately want
+the timecourse page's "true condition" to mean something different from
+`testing`'s -- e.g. scoring evidence for the originally-viewed category
+during a later operate/manipulation period, per THEORY.md.
+
 **Marking trial starts explicitly instead of `trial_start_event`.** If your
 events.tsv generation can emit it, add a row tagged exactly `trial_start`
 (any onset/duration -- only its presence and onset matter) at the start of
@@ -424,32 +441,26 @@ explicitly can point it at anything reasonable -- it will simply never be
 consulted. A dataset can freely mix events.tsv files that do and don't tag
 trial starts explicitly; each boldfile is resolved independently.
 
-**`trial_end_event`** -- *(optional)* a single query, same shape as
-`trial_start_event`, that closes a trial early -- at the first matching
-event's own start -- whenever one occurs before that trial's natural end
-(the next `trial_start_event`/`trial_start` anchor, or the boldfile's last
-volume):
-
-```json
-"trial_end_event": {"column": "trial_type", "match": "exact", "value": "EndFixation"}
-```
-
-Without it, a trial always runs anchor-to-anchor, however long that gap
-turns out to be -- fine for an ordinary short inter-trial fixation/ITI (its
-evidence keeps plotting as part of the preceding trial, which is what you
-want), but not for an occasional long block-boundary rest period: since
-`generate_report.py` broadcasts a trial's one overlay/regressor label across
-its *entire* window so the line doesn't cut off early, a long rest period
-swept into whichever condition happened to precede it will stretch that
-condition's timecourse line noticeably farther than the others, purely
-because of which condition's trials happen to sit at the end of a block.
-`trial_end_event` fixes this at the source: volumes from the matching event
-onward are left outside any active trial (`trial_index=0`, same convention
-as a boldfile's leading pre-anchor frames) instead of being attributed to
-the trial before it. Set it to whatever your events.tsv calls that
-block-boundary rest, if it has one distinct from ordinary trial-ending
-fixation; leave it unset if every trial's own gap before the next anchor is
-short and meaningful to keep.
+**Block-boundary markers end a trial early, automatically.** A trial
+normally runs anchor-to-anchor, however long that gap turns out to be --
+fine for an ordinary short inter-trial fixation/ITI (its evidence keeps
+plotting as part of the preceding trial, which is what you want), but not
+for an occasional long block-boundary rest period: since `generate_report.py`
+broadcasts a trial's one overlay/regressor label across its *entire* window
+so the line doesn't cut off early, a long rest period swept into whichever
+condition happened to precede it would stretch that condition's timecourse
+line noticeably farther than the others, purely because of which
+condition's trials happen to sit at the end of a block. `partition_into_trials`
+fixes this at the source: any real event matching `is_trial_end_marker`
+(`utils/mvpa_common.py` -- the same hardcoded `start_block`/`end_block`/
+`EndFixation` policy `is_excluded_trial_type` already uses, not a
+per-project config option) closes the trial there instead of letting it run
+through to the next anchor; volumes from that point onward are left outside
+any active trial (`trial_index=0`, same convention as a boldfile's leading
+pre-anchor frames). An ordinary short administrative event within a trial
+(`fixation`/`trial_fixation`/`postrt`) does *not* trigger this -- it's
+deliberately narrower than `is_excluded_trial_type`, so those keep
+broadcasting as part of their trial's tail as before.
 
 **`annotation_labels`** -- *(optional)* a friendly display name for a group
 of mutually exclusive `trial_type` values, read only by `generate_report.py`
@@ -797,6 +808,13 @@ row's `model_conditions.training` match (`task`, `trial_type`, `run`,
 `boldfile`, `trial_index`, `regressor_label`, ...), then `predicted_label`,
 `correct`, `evidence_<category>`, and that fold's own feature-selection
 footprint (`threshold_p`/`selected_voxels`/`whole_voxels`/`feature_percent`).
+
+Two volume columns are carried through, deliberately distinct: `volume_of_interest`
+is the matched event's own real, unshifted position (same meaning as in
+`master_spreadsheet.csv`/`decoding_results.csv`), while `volume_of_interest_withlag`
+is the `hemodynamic_lag`-shifted frame actually fetched from the BOLD file to
+train/evaluate the classifier (see `label_conditions_with_lag`) -- don't
+confuse the two when lining this table up against event timing elsewhere.
 Since every row is scored by whichever fold held its own run out, `fold`
 plus `run` together document exactly which run was held out (and evaluated)
 in each fold -- e.g. with `"per_run"`, fold 1's rows are all the run-1 rows,

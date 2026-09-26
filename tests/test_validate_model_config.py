@@ -68,6 +68,23 @@ class TestStructuralValidation:
         errors, warnings = validate_config(cfg)
         assert errors == []
 
+    def test_timecourse_decoding_conditions_omitted_falls_back_to_testing(self):
+        # the recommended shape: timecourse_decoding.conditions itself is
+        # optional and falls back to testing.conditions -- no error
+        cfg = _minimal_config()
+        del cfg["model_conditions"]["timecourse_decoding"]["conditions"]
+        errors, warnings = validate_config(cfg)
+        assert errors == []
+
+    def test_timecourse_decoding_conditions_omitted_with_no_testing_is_error(self):
+        # neither its own conditions nor testing's to fall back to -- a real
+        # config error, not silently "no true condition at all"
+        cfg = _minimal_config()
+        del cfg["model_conditions"]["timecourse_decoding"]["conditions"]
+        del cfg["model_conditions"]["testing"]
+        errors, _ = validate_config(cfg)
+        assert any("timecourse_decoding.conditions" in e for e in errors)
+
     def test_empty_conditions_object_is_error(self):
         cfg = _minimal_config()
         cfg["model_conditions"]["training"]["conditions"] = {}

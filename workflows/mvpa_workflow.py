@@ -55,7 +55,14 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     model/<subject>_cv_results.csv                      -- raw, one row per held-out
                                                             sample across all folds (task,
                                                             trial_type, run, predicted_label,
-                                                            correct, evidence_<category>, ...)
+                                                            correct, evidence_<category>, ...).
+                                                            volume_of_interest is the event's
+                                                            own real, unshifted position;
+                                                            volume_of_interest_withlag is the
+                                                            hemodynamic_lag-shifted frame
+                                                            actually used to fit/evaluate the
+                                                            classifier -- see
+                                                            label_conditions_with_lag.
 
   model_conditions.testing configured -- one fit on all of training, evaluated
   against all of testing:
@@ -94,7 +101,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 from utils.mvpa_common import (
     build_trial_pivot_table, quick_safe, label_conditions_with_lag, label_rows_optional,
     track_runtime, load_config, apply_regressor_codes,
-    load_images_and_mask, build_timecourse_instructions,
+    load_images_and_mask, build_timecourse_instructions, resolve_timecourse_conditions,
     model_classification, model_performance, permutation_significance,
     timecourse_decoding, save_model_results, average_fold_results, impa_tag,
     build_cv_raw_results, parse_bids_entities,
@@ -396,9 +403,15 @@ def main(args):
     testing_cfg = model_conditions.get("testing")
     testing_conditions = testing_cfg["conditions"] if testing_cfg else None
     timecourse_cfg = model_conditions.get("timecourse_decoding")
-    timecourse_conditions = timecourse_cfg["conditions"] if timecourse_cfg else None
+    # falls back to testing_conditions when timecourse_decoding.conditions is
+    # omitted -- see resolve_timecourse_conditions
+    timecourse_conditions = resolve_timecourse_conditions(model_conditions) if timecourse_cfg else None
+    if timecourse_cfg and timecourse_conditions is None:
+        raise SystemExit(
+            "model_conditions.timecourse_decoding has no 'conditions', and there's no "
+            "model_conditions.testing.conditions to fall back to -- provide one or the other."
+        )
     trial_start_event = timecourse_cfg["trial_start_event"] if timecourse_cfg else None
-    trial_end_event = timecourse_cfg.get("trial_end_event") if timecourse_cfg else None
 
     # class label order shared across training/testing/timecourse regressor codes
     regressor_categories = list(training_conditions.keys())
@@ -463,7 +476,7 @@ def main(args):
         if testing_conditions is not None else None
     )
     if timecourse_cfg is not None:
-        timecourse_instr = build_timecourse_instructions(subject_df, timecourse_conditions, trial_start_event, trial_end_event)
+        timecourse_instr = build_timecourse_instructions(subject_df, timecourse_conditions, trial_start_event)
         timecourse_instr = apply_regressor_codes(timecourse_instr, regressor_categories)
     else:
         timecourse_instr = None

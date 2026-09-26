@@ -56,7 +56,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
-from utils.mvpa_common import label_rows, label_rows_optional, get_bold_header_info, quick_safe, impa_tag, partition_into_trials, qualifying_boldfiles, is_excluded_trial_type
+from utils.mvpa_common import label_rows, label_rows_optional, get_bold_header_info, quick_safe, impa_tag, partition_into_trials, qualifying_boldfiles, is_excluded_trial_type, resolve_timecourse_conditions
 
 
 # =====================================================
@@ -392,7 +392,7 @@ def resolve_marker_label(distinct_types: list, annotation_labels: dict = None, m
     return "/".join(shown) + ("/..." if len(distinct_types) > max_label_values else "")
 
 
-def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, trial_end_event: dict = None, timecourse_conditions: dict = None, annotation_labels: dict = None, min_frequency: float = 0.5, max_label_values: int = 4):
+def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, timecourse_conditions: dict = None, annotation_labels: dict = None, min_frequency: float = 0.5, max_label_values: int = 4):
     """Returns a list of {"trial_type", "mean_start", "std_start", "mean_duration"}
     (all in window_index/TR units), one per real *ordinal position* (1st real
     sub-event in the trial, 2nd, 3rd, ...) observed often enough (>=
@@ -437,8 +437,9 @@ def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, 
 
     Frames outside any active trial (trial_index == 0 -- a boldfile's
     leading frames before its first anchor, and/or a trial's tail truncated
-    early by trial_end_event, see partition_into_trials) aren't part of any
-    real trial and are excluded. timecourse_conditions, when given,
+    early by a hardcoded block-boundary marker, see
+    partition_into_trials/is_trial_end_marker) aren't part of any real trial
+    and are excluded. timecourse_conditions, when given,
     scopes full_frame_df to the same qualifying boldfiles
     build_timecourse_instructions would actually decode (see
     qualifying_boldfiles) -- so annotation reflects only the runs really in
@@ -447,7 +448,7 @@ def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, 
         full_frame_df = full_frame_df[full_frame_df["boldfile"].isin(
             qualifying_boldfiles(full_frame_df, timecourse_conditions)
         )]
-    trials = partition_into_trials(full_frame_df, trial_start_event, trial_end_event)
+    trials = partition_into_trials(full_frame_df, trial_start_event)
     trials = trials[trials["trial_index"] > 0]
     if trials.empty:
         return []
@@ -549,8 +550,9 @@ def load_annotation_info(config_path, master_spreadsheet_path):
         return [], None, {}
 
     trial_start_event = tc_cfg.get("trial_start_event")
-    trial_end_event = tc_cfg.get("trial_end_event")
-    timecourse_conditions = tc_cfg.get("conditions", {})
+    # falls back to model_conditions.testing.conditions when omitted -- see
+    # resolve_timecourse_conditions
+    timecourse_conditions = resolve_timecourse_conditions(cfg.get("model_conditions", {})) or {}
     overlay_conditions = tc_cfg.get("overlay", {})
     annotation_labels = tc_cfg.get("annotation_labels", {})
 
@@ -558,7 +560,7 @@ def load_annotation_info(config_path, master_spreadsheet_path):
         master_spreadsheet_path, dtype={"subject": str, "session": str, "task": str, "trial_type": str}
     )
     event_markers = (
-        compute_event_markers(full_frame, trial_start_event, trial_end_event, timecourse_conditions, annotation_labels)
+        compute_event_markers(full_frame, trial_start_event, timecourse_conditions, annotation_labels)
         if trial_start_event else []
     )
 
@@ -999,8 +1001,9 @@ def broadcast_trial_label(df: pd.DataFrame, label_col: str, trial_cols=("boldfil
 
     trial_index == 0 rows (outside any active trial -- a boldfile's leading
     frames before its first anchor, and/or a trial's tail truncated early by
-    trial_end_event, see partition_into_trials) are left exactly as they are
-    and never enter this broadcast: a boldfile can have several disjoint
+    a hardcoded block-boundary marker, see partition_into_trials/
+    is_trial_end_marker) are left exactly as they are and never enter this
+    broadcast: a boldfile can have several disjoint
     trial_index == 0 spans that have nothing to do with each other, so
     grouping them together as if they were one trial would broadcast a
     label across gaps it doesn't belong to."""
@@ -1211,7 +1214,14 @@ def draw_event_annotations(ax, event_markers, tr, show_labels):
     Otherwise ("blurry" -- real trial-to-trial jitter in when it starts) skip
     the crisp line/edges and instead fade several progressively wider,
     fainter bands outward from the mean start -- sized off std_start -- so
-    the boundary visibly softens rather than showing a falsely precise edge."""
+    the boundary visibly softens rather than showing a falsely precise edge.
+
+    The label is drawn rotated 90 degrees, hugging the dotted line's own
+    edge and running downward from the top of the plot -- anchored at
+    (start, top of the axes) with va="top" (rather than the boundary line's
+    va="bottom", which draws the text growing *upward*, past the top of the
+    axes and outside the visible plot area) so it stays entirely inside the
+    plot boundaries."""
     ylim = ax.get_ylim()
     for marker in event_markers:
         start = marker["mean_start"] * tr
@@ -1230,7 +1240,8 @@ def draw_event_annotations(ax, event_markers, tr, show_labels):
                 label = f"{label} (variable timing)"
 
         if show_labels:
-            ax.text(start, ylim[1], label, fontsize=6.5, ha="left", va="bottom", rotation=45)
+            ax.text(start, ylim[1], label, fontsize=6.5, ha="right", va="top",
+                     rotation=90, rotation_mode="anchor")
 
 
 def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, event_markers, tr,
