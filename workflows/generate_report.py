@@ -1207,37 +1207,31 @@ def _build_overlay_legend(cats: list, overlay_styles: dict, ncol: int, overlay_c
 
 
 def draw_event_annotations(ax, event_markers, tr, show_labels):
-    """One annotation per compute_event_markers() entry: a light shaded
-    axvspan over the event's typical [start, start+duration) plus a dotted
-    axvline at its start and a text label there, when that event reliably
-    starts at the same relative time across trials (std_start < half a TR).
-    Otherwise ("blurry" -- real trial-to-trial jitter in when it starts) skip
-    the crisp line/edges and instead fade several progressively wider,
-    fainter bands outward from the mean start -- sized off std_start -- so
-    the boundary visibly softens rather than showing a falsely precise edge.
+    """One annotation per compute_event_markers() entry: a dotted axvline at
+    its mean start plus a text label there. No background shading -- an
+    axvspan over the event's span visually competes with the plot's own
+    trial-to-trial/subject SE shading (see render_timecourse_pages), so the
+    boundary is a line only. When an event doesn't reliably start at the
+    same relative time across trials (std_start >= half a TR, real
+    trial-to-trial jitter), the label gets a "(variable timing)" suffix
+    instead of drawing anything different -- there's no crisp single instant
+    to mark precisely, but the mean start is still the best available
+    estimate, so the line is drawn there regardless.
 
     The label is drawn rotated 90 degrees, hugging the dotted line's own
     edge and running downward from the top of the plot -- anchored at
-    (start, top of the axes) with va="top" (rather than the boundary line's
-    va="bottom", which draws the text growing *upward*, past the top of the
-    axes and outside the visible plot area) so it stays entirely inside the
-    plot boundaries."""
+    (start, top of the axes) with va="top" (rather than va="bottom", which
+    draws the text growing *upward*, past the top of the axes and outside
+    the visible plot area) so it stays entirely inside the plot boundaries."""
     ylim = ax.get_ylim()
     for marker in event_markers:
         start = marker["mean_start"] * tr
-        duration = marker["mean_duration"] * tr
         std = marker["std_start"] * tr
         label = marker["trial_type"]
 
-        if std < 0.5 * tr:
-            ax.axvspan(start, start + duration, color="gray", alpha=0.12, zorder=0)
-            ax.axvline(start, color="gray", linestyle=":", linewidth=0.75, zorder=0)
-        else:
-            for band, alpha in zip((0.5, 1.0, 1.5, 2.0), (0.10, 0.07, 0.05, 0.03)):
-                half_width = band * std
-                ax.axvspan(start - half_width, start + duration + half_width, color="gray", alpha=alpha, zorder=0)
-            if label:  # a deliberately unlabeled marker (see compute_event_markers) stays blank
-                label = f"{label} (variable timing)"
+        ax.axvline(start, color="gray", linestyle=":", linewidth=0.75, zorder=0)
+        if std >= 0.5 * tr and label:  # a deliberately unlabeled marker (see compute_event_markers) stays blank
+            label = f"{label} (variable timing)"
 
         if show_labels:
             ax.text(start, ylim[1], label, fontsize=6.5, ha="right", va="top",

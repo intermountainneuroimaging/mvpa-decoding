@@ -1349,20 +1349,27 @@ class TestResolveMarkerLabel:
 
 
 class TestDrawEventAnnotations:
-    def test_reliable_marker_draws_shaded_span(self):
+    def test_reliable_marker_draws_no_shading(self):
+        # no axvspan/patches at all -- background shading was removed
+        # because it visually competed with the plot's own SE shading
         fig, ax = plt.subplots()
         ax.plot([0, 1, 2], [0, 1, 0])
         markers = [{"trial_type": "maintain", "mean_start": 1.0, "std_start": 0.0, "mean_duration": 2.0}]
         draw_event_annotations(ax, markers, tr=1.0, show_labels=True)
-        assert len(ax.patches) >= 1
+        assert len(ax.patches) == 0
+        assert len(ax.lines) >= 1  # the dotted boundary line itself
         plt.close(fig)
 
-    def test_jittery_marker_draws_multiple_fading_bands(self):
+    def test_jittery_marker_draws_a_line_not_fading_bands(self):
+        # no background bands for a jittery marker either -- just the line
+        # at its mean start, with the label conveying the uncertainty instead
         fig, ax = plt.subplots()
         ax.plot([0, 1, 2], [0, 1, 0])
         markers = [{"trial_type": "probe", "mean_start": 1.0, "std_start": 2.0, "mean_duration": 1.0}]
-        draw_event_annotations(ax, markers, tr=1.0, show_labels=False)
-        assert len(ax.patches) == 4  # 4 fading bands, per the "blurry" implementation
+        draw_event_annotations(ax, markers, tr=1.0, show_labels=True)
+        assert len(ax.patches) == 0
+        texts = [t.get_text() for t in ax.texts]
+        assert texts == ["probe (variable timing)"]
         plt.close(fig)
 
     def test_deliberately_blank_marker_stays_blank_even_when_jittery(self):
