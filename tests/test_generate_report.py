@@ -30,6 +30,7 @@ from workflows.generate_report import (
     resolve_overlay_groups,
     resolve_timecourse_groups,
     render_timecourse_pages,
+    max_reliable_window_index,
     _build_overlay_legend,
     load_annotation_info,
     compute_event_markers,
@@ -861,6 +862,46 @@ def _synthetic_timecourse_rows(overlay_trial_types, n_windows=3):
                     "boldfile": f"{true_cond}_{trial_type}.nii.gz", "trial_index": 1,
                 })
     return rows
+
+
+class TestMaxReliableWindowIndex:
+    def test_finds_the_last_window_with_full_coverage(self):
+        # 4 subjects at window 0-1, only 1 subject still has data at window 2
+        # (a variable-trial-length tail) -- window 2 must be excluded
+        rows = [{"subject": s, "regressor_label": "face", "window_index": w} for s in "1234" for w in (0, 1)]
+        rows += [{"subject": "1", "regressor_label": "face", "window_index": 2}]
+        df = pd.DataFrame(rows)
+        assert max_reliable_window_index(df, min_fraction=1.0) == 1
+
+    def test_the_weakest_combination_sets_the_cutoff(self):
+        # "face" has full coverage through window 2, but "place" already
+        # drops off at window 1 -- the cutoff reflects the weakest
+        # (regressor_label, overlay_label) combination, not the strongest
+        rows = [{"subject": s, "regressor_label": "face", "overlay_label": "pos", "window_index": w}
+                for s in "1234" for w in (0, 1, 2)]
+        rows += [{"subject": s, "regressor_label": "place", "overlay_label": "pos", "window_index": 0} for s in "1234"]
+        rows += [{"subject": "1", "regressor_label": "place", "overlay_label": "pos", "window_index": 1}]
+        df = pd.DataFrame(rows)
+        assert max_reliable_window_index(df, min_fraction=1.0) == 0
+
+    def test_single_subject_report_stops_wherever_their_own_data_ends(self):
+        # n=1 subject (a single-subject report) -- min_fraction of 1 is met
+        # wherever they have any data at all and fails only where they have
+        # none, i.e. this generalizes to "no artificial truncation" rather
+        # than needing a special case
+        rows = [{"subject": "01", "regressor_label": "face", "window_index": w} for w in range(5)]
+        df = pd.DataFrame(rows)
+        assert max_reliable_window_index(df, min_fraction=0.9) == 4
+
+    def test_no_window_meeting_threshold_falls_back_to_the_observed_max(self):
+        # a degenerate case (no window ever has all 3 subjects at once) must
+        # not raise or silently drop everything -- fall back to no truncation
+        rows = [{"subject": "1", "regressor_label": "face", "window_index": 0},
+                {"subject": "2", "regressor_label": "face", "window_index": 0},
+                {"subject": "2", "regressor_label": "face", "window_index": 1},
+                {"subject": "3", "regressor_label": "face", "window_index": 1}]
+        df = pd.DataFrame(rows)
+        assert max_reliable_window_index(df, min_fraction=1.0) == 1
 
 
 class TestRenderTimecoursePagesGroups:

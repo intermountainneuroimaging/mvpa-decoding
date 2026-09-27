@@ -21,6 +21,7 @@ from _interactive_notebooks.decoding_results_toolkit import (
     derive_label,
     aggregate_by_subject_window,
     average_across_groups,
+    max_reliable_window_index,
     subtract_baseline,
     bin_by_size,
     bin_by_edges,
@@ -221,6 +222,50 @@ class TestAverageAcrossGroups:
         result = average_across_groups({"face": face, "place": place})
         assert result.loc[("01", 0), "pos"] == pytest.approx(0.7)  # mean(0.8, 0.6)
         assert result.loc[("01", 1), "pos"] == pytest.approx(0.9)  # only face available
+
+
+# =====================================================
+# max_reliable_window_index
+# =====================================================
+
+class TestMaxReliableWindowIndex:
+    def _df(self, rows):
+        return pd.DataFrame(rows, columns=["subject", "operation", "window_index"])
+
+    def test_finds_the_last_window_with_full_coverage(self):
+        # 4 subjects at window 0-1, only 1 subject still has data at window 2
+        # (a variable-trial-length tail) -- window 2 must be excluded
+        rows = [(s, "maintain", w) for s in "1234" for w in (0, 1)]
+        rows += [("1", "maintain", 2)]
+        df = self._df(rows)
+        assert max_reliable_window_index(df, group_cols=["operation"], min_fraction=1.0) == 1
+
+    def test_the_weakest_combination_sets_the_cutoff(self):
+        # "maintain" has full coverage through window 2, but "suppress"
+        # already drops off at window 1 -- the cutoff must reflect the
+        # weakest combination, not the strongest
+        rows = [(s, "maintain", w) for s in "1234" for w in (0, 1, 2)]
+        rows += [(s, "suppress", w) for s in "1234" for w in (0,)]
+        rows += [("1", "suppress", 1)]
+        df = self._df(rows)
+        assert max_reliable_window_index(df, group_cols=["operation"], min_fraction=1.0) == 0
+
+    def test_min_fraction_allows_partial_dropout(self):
+        # 4 subjects at window 0, 3 of 4 (75%) at window 1 -- a 0.5 threshold
+        # still accepts window 1, a 0.9 threshold does not
+        rows = [(s, "maintain", 0) for s in "1234"]
+        rows += [(s, "maintain", 1) for s in "123"]
+        df = self._df(rows)
+        assert max_reliable_window_index(df, group_cols=["operation"], min_fraction=0.5) == 1
+        assert max_reliable_window_index(df, group_cols=["operation"], min_fraction=0.9) == 0
+
+    def test_raises_when_nothing_meets_the_threshold(self):
+        # 2 total subjects, but the only window_index that exists has just 1
+        # -- no window anywhere reaches the required 100% coverage
+        rows = [("1", "maintain", 0), ("2", "maintain", 1)]
+        df = self._df(rows)
+        with pytest.raises(ValueError, match="no window_index"):
+            max_reliable_window_index(df, group_cols=["operation"], min_fraction=1.0)
 
 
 # =====================================================

@@ -1238,8 +1238,49 @@ def draw_event_annotations(ax, event_markers, tr, show_labels):
                      rotation=90, rotation_mode="anchor")
 
 
+def max_reliable_window_index(combined: pd.DataFrame, min_fraction: float = 0.9) -> int:
+    """Latest window_index at which every (regressor_label, overlay_label)
+    combination actually present in `combined` (render_timecourse_pages'
+    own per-subject-tagged, already-summarized table) still has at least
+    `min_fraction` of its total subject count contributing.
+
+    A trial's real length varies (jittered ITI to the next trial's own
+    anchor), so only a shrinking handful of unusually long trials still
+    have data at the far tail of the window -- averaging just 1-2 subjects
+    there produces a single noisy, unrepresentative point. Worse,
+    summarize_raw_for_timecourse's own across-subject se falls back to 0.0
+    (not NaN) when only one subject remains, which draws a falsely tight,
+    zero-width confidence band around that single spike instead of
+    visually flagging it as unreliable.
+
+    Generalizes to a single-subject report without special-casing: with
+    exactly one subject, min_fraction of 1 is met wherever that subject has
+    any data at all (count 1) and fails only where they have none (count
+    0) -- i.e. it just stops at wherever their own trial data runs out,
+    the same as no truncation at all would. Returns combined's own actual
+    max window_index (a no-op) if nothing meets the threshold."""
+    group_cols = ["regressor_label"] + (["overlay_label"] if "overlay_label" in combined.columns else [])
+    total_subjects = combined["subject"].nunique()
+    min_n = min_fraction * total_subjects
+
+    counts = combined.groupby(group_cols + ["window_index"])["subject"].nunique()
+    # reindex to the full cross-product of every observed group_cols
+    # combination x every observed window_index, so a combination that's
+    # completely absent at a given window (not just sparse) is filled in
+    # as n=0 and correctly disqualifies that window, rather than silently
+    # vanishing from the groupby result and never being checked at all
+    observed_groups = combined[group_cols].drop_duplicates()
+    observed_windows = pd.DataFrame({"window_index": sorted(combined["window_index"].unique())})
+    full_index = pd.MultiIndex.from_frame(observed_groups.merge(observed_windows, how="cross"))
+    counts = counts.reindex(full_index, fill_value=0)
+
+    worst_per_window = counts.groupby(level="window_index").min()
+    reliable = worst_per_window[worst_per_window >= min_n]
+    return int(reliable.index.max()) if not reliable.empty else int(combined["window_index"].max())
+
+
 def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, event_markers, tr,
-                             overlay_conditions=None):
+                             overlay_conditions=None, min_subject_fraction=0.9):
     """Timecourse decoding always comes from the complete-training-set
     classifier (mvpa_workflow.py never runs it per-fold), so there's exactly
     one decoding_raw file per subject regardless of whether model.kfold_cv
@@ -1251,7 +1292,15 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, event_mark
     row's regressor_label/overlay_label across its whole trial (see
     broadcast_trial_label) -- so a trial's unlabeled fixation/rest/ITI tail
     still plots as part of its content event's own line, instead of being
-    silently cut off where the real per-frame label stops. event_markers
+    silently cut off where the real per-frame label stops. "Full trial" is
+    then trimmed once more, though: real trial length varies (jittered ITI
+    before the next trial's own anchor), so the far tail of the window is
+    only ever supported by a shrinking handful of unusually long trials --
+    min_subject_fraction (default 0.9) truncates the x-axis at the last
+    window_index where every (regressor_label, overlay_label) combination
+    still has that fraction of subjects contributing, rather than plotting
+    a single leftover trial's noisy value as if it were a real group mean
+    (see max_reliable_window_index). event_markers
     (compute_event_markers' output, via load_annotation_info) draws the
     real per-trial event timing on top -- see draw_event_annotations.
 
@@ -1278,13 +1327,23 @@ def render_timecourse_pages(pdf, analysis_output_dir, desc, subjects, event_mark
     for s in subjects:
         p = subject_paths(analysis_output_dir, desc, s)
         if os.path.exists(p["decoding_raw"]):
-            frames.append(summarize_raw_for_timecourse(pd.read_csv(p["decoding_raw"]), overlay_conditions))
+            frame = summarize_raw_for_timecourse(pd.read_csv(p["decoding_raw"]), overlay_conditions)
+            frame["subject"] = s
+            frames.append(frame)
 
     if not frames:
         print("(!) no decoding_results.csv found for the subjects in scope -- skipping timecourse page")
         return
 
     combined = pd.concat(frames, ignore_index=True)
+
+    max_window = max_reliable_window_index(combined, min_fraction=min_subject_fraction)
+    n_dropped_windows = combined["window_index"].max() - max_window
+    if n_dropped_windows > 0:
+        print(f"  (!) trial length varies -- keeping window_index <= {max_window}, dropping "
+              f"{n_dropped_windows} sparse trailing window(s) (< {min_subject_fraction:.0%} subject coverage)")
+        combined = combined[combined["window_index"] <= max_window]
+
     evidence_cols = [c for c in combined.columns if c.startswith("evidence_") and not c.endswith("_se")]
     # evidence_cols (and therefore categories) are already in config order --
     # decoding_raw writes them via regressor_categories, itself

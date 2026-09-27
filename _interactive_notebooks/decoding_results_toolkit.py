@@ -190,6 +190,44 @@ def average_across_groups(group_tables: dict) -> pd.DataFrame:
     return combined.groupby(level=combined.index.names).mean()
 
 
+def max_reliable_window_index(df: pd.DataFrame, group_cols, min_fraction: float = 0.9,
+                               subject_col: str = "subject", window_col: str = "window_index") -> int:
+    """Latest window_index at which every combination of `group_cols` (e.g.
+    stimulus x operation x valence) still has at least `min_fraction` of the
+    dataset's own total subject count contributing. A trial's real end time
+    varies (jittered ITI to the next trial's own anchor), so only a
+    shrinking handful of unusually long trials still have data at the far
+    tail of the window -- averaging just 1-2 subjects there produces a
+    noisy, unrepresentative single-point spike (and an undefined SE, since
+    a sample std needs at least 2 points). Filtering a dataframe to
+    window_index <= this value keeps every plotted/tested point supported
+    by close to the full group, instead of quietly plotting a handful of
+    outlier trials as if they were a real group average. Raises if no
+    window_index meets the threshold at all."""
+    total_subjects = df[subject_col].nunique()
+    min_n = min_fraction * total_subjects
+    group_cols = list(group_cols)
+    counts = df.groupby(group_cols + [window_col])[subject_col].nunique()
+    # reindex to the full cross-product of every observed group_cols
+    # combination x every observed window_index, so a combination that's
+    # completely absent at a given window (not just sparse -- e.g. every
+    # one of its trials ended before that point) is filled in as n=0 and
+    # correctly disqualifies that window, rather than silently vanishing
+    # from the groupby result and never being checked at all
+    observed_groups = df[group_cols].drop_duplicates()
+    observed_windows = pd.DataFrame({window_col: sorted(df[window_col].unique())})
+    full_index = pd.MultiIndex.from_frame(observed_groups.merge(observed_windows, how="cross"))
+    counts = counts.reindex(full_index, fill_value=0)
+    worst_per_window = counts.groupby(level=window_col).min()
+    reliable = worst_per_window[worst_per_window >= min_n]
+    if reliable.empty:
+        raise ValueError(
+            f"max_reliable_window_index: no window_index has >= {min_fraction:.0%} of "
+            f"{total_subjects} subjects across every {list(group_cols)} combination"
+        )
+    return int(reliable.index.max())
+
+
 # =====================================================
 # Baseline subtraction
 # =====================================================
