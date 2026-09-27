@@ -90,6 +90,23 @@ class TestSelectEvidenceValue:
         assert len(result) == 1
         assert "dropped" in capsys.readouterr().out
 
+    def test_self_value_is_numeric_dtype_with_nan_regressor_label(self):
+        # regression: a row-wise `.apply(lambda r: ... if pd.notna(...) else
+        # pd.NA)` (the pattern this function replaces in
+        # valence_evidence_by_operation.ipynb) can silently produce an
+        # object-dtype column when floats are mixed with pd.NA, which later
+        # crashes scipy.stats.ttest_1samp ("data type <class
+        # 'numpy.object_'> not inexact") -- the vectorized numpy-indexing
+        # approach here must never do that, even with real NaN present
+        # before the unknown rows are dropped
+        df = pd.DataFrame({
+            "regressor_label": ["maintain", None, "suppress"],
+            "evidence_maintain": [0.7, 0.5, 0.2],
+            "evidence_suppress": [0.3, 0.5, 0.8],
+        })
+        result = select_evidence_value(df, value="self")
+        assert pd.api.types.is_numeric_dtype(result["value"])
+
     def test_explicit_category_name(self):
         df = pd.DataFrame({"regressor_label": ["maintain"], "evidence_maintain": [0.7], "evidence_suppress": [0.3]})
         result = select_evidence_value(df, value="suppress")
