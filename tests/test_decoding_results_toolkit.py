@@ -30,6 +30,7 @@ from _interactive_notebooks.decoding_results_toolkit import (
     compare_conditions_by_bin,
     plot_conditions,
     annotate_significance,
+    mark_significance_onset,
     STAT_METHODS,
 )
 
@@ -408,3 +409,61 @@ class TestAnnotateSignificance:
         ymin, ymax_before = ax.get_ylim()
         annotate_significance(ax, bin_stats, alpha=0.05)
         assert ax.get_ylim()[1] > ymax_before
+
+
+class TestMarkSignificanceOnset:
+    def test_marks_only_the_first_bin_of_a_contiguous_significant_run(self):
+        # bins 1-2-3 all significant, back to back -- only bin 1 (the run's
+        # own onset) gets a marker, not every bin in the run
+        bin_stats = pd.DataFrame({
+            "bin": [0, 1, 2, 3, 4],
+            "tr_start": [0, 3, 6, 9, 12],
+            "mean_diff": [0.01, -0.05, -0.08, -0.10, -0.02],
+            "p_value": [0.5, 0.01, 0.02, 0.001, 0.6],
+        })
+        fig, ax = plt.subplots()
+        ax.plot([0, 12], [0, -0.1])
+        mark_significance_onset(ax, bin_stats, alpha=0.05)
+        collections = ax.collections
+        assert len(collections) == 1
+        offsets = collections[0].get_offsets()
+        assert len(offsets) == 1
+        assert offsets[0][0] == 3  # bin 1's own tr_start
+        assert offsets[0][1] == pytest.approx(-0.05)  # bin 1's own mean_diff
+        plt.close(fig)
+
+    def test_marks_each_resumption_of_a_stopped_and_restarted_run(self):
+        # significant at bins 0-1, not at bin 2, significant again at bin 3
+        # -- two onsets: bin 0 and bin 3
+        bin_stats = pd.DataFrame({
+            "bin": [0, 1, 2, 3],
+            "tr_start": [0, 3, 6, 9],
+            "mean_diff": [-0.05, -0.06, 0.0, -0.07],
+            "p_value": [0.01, 0.02, 0.5, 0.03],
+        })
+        fig, ax = plt.subplots()
+        ax.plot([0, 9], [0, -0.07])
+        mark_significance_onset(ax, bin_stats, alpha=0.05)
+        offsets = ax.collections[0].get_offsets()
+        assert sorted(x for x, y in offsets) == [0, 9]
+        plt.close(fig)
+
+    def test_no_significant_bins_draws_nothing(self):
+        bin_stats = pd.DataFrame({"bin": [0], "tr_start": [0], "mean_diff": [0.01], "p_value": [0.5]})
+        fig, ax = plt.subplots()
+        ax.plot([0, 1], [0, 1])
+        mark_significance_onset(ax, bin_stats, alpha=0.05)
+        assert len(ax.collections) == 0
+        plt.close(fig)
+
+    def test_marker_style_is_a_downward_triangle_by_default(self):
+        bin_stats = pd.DataFrame({"bin": [0], "tr_start": [0], "mean_diff": [-0.05], "p_value": [0.01]})
+        fig, ax = plt.subplots()
+        ax.plot([0, 1], [0, -0.05])
+        mark_significance_onset(ax, bin_stats, alpha=0.05)
+        paths = ax.collections[0].get_paths()
+        assert len(paths) == 1
+        # matplotlib's "v" marker path -- just confirm it's not the default circle
+        from matplotlib.markers import MarkerStyle
+        assert paths[0].vertices.shape == MarkerStyle("v").get_path().vertices.shape
+        plt.close(fig)

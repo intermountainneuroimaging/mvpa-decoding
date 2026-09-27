@@ -374,3 +374,26 @@ def annotate_significance(ax, bin_stats: pd.DataFrame, alpha: float = 0.05, colo
         ax.plot([row[tr_start_col], row[tr_end_col]], [bar_y, bar_y], color=color, linewidth=2, solid_capstyle="butt")
         ax.text((row[tr_start_col] + row[tr_end_col]) / 2, star_y, "*", ha="center", va="bottom", fontsize=14, color=color)
     ax.set_ylim(ymin, star_y + 0.08 * span)
+
+
+def mark_significance_onset(ax, bin_stats: pd.DataFrame, value_col: str = "mean_diff", alpha: float = 0.05,
+                             color: str = "black", marker: str = "v", size: float = 100,
+                             p_col: str = "p_value", bin_col: str = "bin", tr_start_col: str = "tr_start"):
+    """Marks the *onset* of each contiguous run of significant bins (p_col <
+    alpha, consecutive `bin_col` values) with a downward-pointing triangle,
+    directly on the line itself -- at that bin's own tr_start_col position
+    and value_col's value there (e.g. "mean_diff" from
+    compare_conditions_by_bin, the same per-bin group mean the plotted
+    line's curve already shows) -- rather than annotate_significance's bar
+    spanning every significant bin. Useful for a plot (e.g. a
+    baseline-subtraction plot) where "when does this line begin to
+    significantly differ" matters more than a full summary of every
+    significant window; a significant run that stops and later resumes
+    gets one marker per resumption, not one continuous span."""
+    sig = bin_stats[bin_stats[p_col] < alpha].sort_values(bin_col)
+    if sig.empty:
+        return
+    is_onset = sig[bin_col].diff() != 1
+    onsets = sig[is_onset]
+    ax.scatter(onsets[tr_start_col], onsets[value_col], marker=marker, s=size, color=color,
+               edgecolor="black", linewidth=0.5, zorder=5)
