@@ -1339,20 +1339,40 @@ class TestComputeEventMarkers:
         assert by_start[1.0] == ""
 
     def test_position_mixing_multiple_fixation_variants_is_also_left_unlabeled(self):
-        # "fixation" and "EndFixation" both occur at this position across
-        # trials -- still all administrative, so still blank, not an
-        # auto-joined "EndFixation/fixation" and not requiring an explicit
-        # "" annotation_labels group to achieve that
+        # "fixation" and "postrt" both occur at this position across trials
+        # -- still all administrative (EXCLUDED_TRIAL_TYPE_SUBSTRINGS, not a
+        # block-boundary marker -- see the dedicated test below for that
+        # case), so still blank, not an auto-joined "fixation/postrt" and not
+        # requiring an explicit "" annotation_labels group to achieve that
         rows = [
             _tc_row("run1", 0, "view_face", 0.0, 1),
             _tc_row("run1", 1, "fixation", 1.0, 2),
             _tc_row("run2", 0, "view_face", 0.0, 1),
-            _tc_row("run2", 1, "EndFixation", 1.0, 2),
+            _tc_row("run2", 1, "postrt", 1.0, 2),
         ]
         df = pd.DataFrame(rows)
         markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
         by_start = {m["mean_start"]: m["trial_type"] for m in markers}
         assert by_start[1.0] == ""
+
+    def test_block_boundary_marker_trial_excluded_from_ranking_entirely(self):
+        # an EndFixation match starts its own fresh window now (see
+        # partition_into_trials), instead of staying trial_index == 0 -- it
+        # must still be excluded from ranking here, not counted as a real
+        # "position 1" that would corrupt run2's own position-1 label
+        # (mixing "view_face" with "EndFixation")
+        rows = [
+            _tc_row("run1", 0, "view_face", 0.0, 1),
+            _tc_row("run1", 1, "maintain", 1.0, 2),
+            _tc_row("run2", 0, "view_face", 0.0, 1),
+            _tc_row("run2", 1, "maintain", 1.0, 2),
+            _tc_row("run2", 2, "EndFixation", 2.0, 3),
+        ]
+        df = pd.DataFrame(rows)
+        markers = compute_event_markers(df, VIEW_FACE_ANCHOR)
+        by_start = {m["mean_start"]: m["trial_type"] for m in markers}
+        assert by_start[0.0] == "view_face"
+        assert 2.0 not in by_start
 
 
 class TestResolveMarkerLabel:

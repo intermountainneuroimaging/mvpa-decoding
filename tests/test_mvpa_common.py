@@ -393,10 +393,28 @@ class TestPartitionIntoTrials:
         df = _full_frame_df("run1", *rows)
 
         result = partition_into_trials(df, VIEW_FACE_ANCHOR).sort_values("volume_of_interest")
-        assert result["trial_index"].tolist() == [1, 1, 0, 0, 0, 2]
-        # the EndFixation frames fall outside any active trial -- same
-        # "own volume_of_interest" convention as leading pre-anchor frames
-        assert result.loc[result["trial_type"] == "EndFixation", "window_index"].tolist() == [2, 3, 4]
+        # the EndFixation match starts its own fresh window (trial_index 2),
+        # same as any real anchor would -- the next view_face becomes trial 3
+        assert result["trial_index"].tolist() == [1, 1, 2, 2, 2, 3]
+        assert result.loc[result["trial_type"] == "EndFixation", "window_index"].tolist() == [0, 1, 2]
+
+    def test_block_boundary_marker_resets_window_index_like_any_other_anchor(self):
+        # a run made ENTIRELY of one long trial followed by a block-boundary
+        # rest period, with no further real anchor after it -- the rest
+        # period must still count up from 0 (not keep climbing/carry its own
+        # raw volume_of_interest), all the way to the boldfile's last volume
+        rows = [
+            (0, "view_face", 0.0, 1),
+            (1, "maintain", 1.0, 2),
+            (2, "EndFixation", 2.0, 3),
+            (3, "EndFixation", 2.0, 3),
+            (4, "EndFixation", 2.0, 3),
+        ]
+        df = _full_frame_df("run1", *rows)
+
+        result = partition_into_trials(df, VIEW_FACE_ANCHOR).sort_values("volume_of_interest")
+        assert result["trial_index"].tolist() == [1, 1, 2, 2, 2]
+        assert result["window_index"].tolist() == [0, 1, 0, 1, 2]
 
     def test_ordinary_fixation_does_not_truncate_a_trial(self):
         # unlike EndFixation, a plain "fixation" (an ordinary short
@@ -416,7 +434,9 @@ class TestPartitionIntoTrials:
 
     def test_block_boundary_marker_past_the_natural_boundary_has_no_effect(self):
         # a block-boundary marker that falls in the *next* trial's own span
-        # must not reach backward and truncate this one
+        # must not reach backward and truncate this one -- and, like any
+        # other end_cut, it starts its own fresh window (trial 3) rather
+        # than being left unpartitioned
         rows = [
             (0, "view_face", 0.0, 1),
             (1, "clear", 1.0, 2),
@@ -425,7 +445,7 @@ class TestPartitionIntoTrials:
         ]
         df = _full_frame_df("run1", *rows)
         result = partition_into_trials(df, VIEW_FACE_ANCHOR).sort_values("volume_of_interest")
-        assert result["trial_index"].tolist() == [1, 1, 2, 0]
+        assert result["trial_index"].tolist() == [1, 1, 2, 3]
 
 
 class TestLabelRowsOptional:

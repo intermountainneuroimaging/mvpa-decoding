@@ -197,10 +197,12 @@ def partition_into_trials(full_frame_df: pd.DataFrame, trial_start_event: dict) 
     "fixation"/"trial_fixation"/"postrt", which deliberately keeps its own
     trial's tail continuing through it (see broadcast_trial_label in
     generate_report.py). This is hardcoded, not configurable -- see
-    is_trial_end_marker. Volumes from such a match onward, up to that
-    trial's natural end, are left unpartitioned -- trial_index=0 and
-    window_index = their own volume_of_interest, same convention as the
-    leading before-the-first-anchor span."""
+    is_trial_end_marker. Each such match also starts its own fresh window,
+    exactly like a real trial anchor -- window_index resets to 0 right there
+    and counts up until the next anchor, end_marker, or the boldfile's last
+    volume, and trial_index increments same as any other trial. Only volumes
+    before a boldfile's very first anchor or end_marker have no window to
+    belong to at all, and keep trial_index=0/window_index=own volume_of_interest."""
     pieces = []
     for boldfile, group in full_frame_df.groupby("boldfile", sort=False):
         group = group.sort_values("volume_of_interest").reset_index(drop=True)
@@ -228,13 +230,18 @@ def partition_into_trials(full_frame_df: pd.DataFrame, trial_start_event: dict) 
             end_mask = events["trial_type"].apply(is_trial_end_marker).to_numpy()
             end_cuts = sorted(events.loc[end_mask, "volume_of_interest"].tolist())
 
+        # an end_cut both truncates whichever trial precedes it AND starts
+        # its own fresh window from that point on -- folding it into the
+        # same sorted list of "starts" as real anchors gets both for free:
+        # each span still runs only until the next entry in this list,
+        # whether that next entry is a real anchor or another end_cut.
+        starts = sorted(set(boundaries) | set(end_cuts))
+
         trial_index = np.zeros(len(group), dtype=int)
         window_index = vols.copy()
 
-        for i, start_vol in enumerate(boundaries):
-            natural_end = boundaries[i + 1] if i + 1 < len(boundaries) else vols.max() + 1
-            cut = next((c for c in end_cuts if start_vol < c < natural_end), None)
-            end_vol = cut if cut is not None else natural_end
+        for i, start_vol in enumerate(starts):
+            end_vol = starts[i + 1] if i + 1 < len(starts) else vols.max() + 1
             in_span = (vols >= start_vol) & (vols < end_vol)
             trial_index[in_span] = i + 1
             window_index[in_span] = vols[in_span] - start_vol

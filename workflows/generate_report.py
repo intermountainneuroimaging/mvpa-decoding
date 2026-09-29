@@ -56,7 +56,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
-from utils.mvpa_common import label_rows, label_rows_optional, get_bold_header_info, quick_safe, impa_tag, partition_into_trials, qualifying_boldfiles, is_excluded_trial_type, resolve_timecourse_conditions
+from utils.mvpa_common import label_rows, label_rows_optional, get_bold_header_info, quick_safe, impa_tag, partition_into_trials, qualifying_boldfiles, is_excluded_trial_type, is_trial_end_marker, resolve_timecourse_conditions
 
 
 # =====================================================
@@ -436,10 +436,13 @@ def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, 
     configure.
 
     Frames outside any active trial (trial_index == 0 -- a boldfile's
-    leading frames before its first anchor, and/or a trial's tail truncated
-    early by a hardcoded block-boundary marker, see
-    partition_into_trials/is_trial_end_marker) aren't part of any real trial
-    and are excluded. timecourse_conditions, when given,
+    leading frames before its very first anchor or block-boundary marker,
+    see partition_into_trials) aren't part of any real trial and are
+    excluded. So is a trial_index that a block-boundary marker itself
+    started (its own fresh window, per partition_into_trials/
+    is_trial_end_marker) rather than a real trial_start_event anchor --
+    administrative filler, not a trial worth its own ranked position.
+    timecourse_conditions, when given,
     scopes full_frame_df to the same qualifying boldfiles
     build_timecourse_instructions would actually decode (see
     qualifying_boldfiles) -- so annotation reflects only the runs really in
@@ -450,6 +453,21 @@ def compute_event_markers(full_frame_df: pd.DataFrame, trial_start_event: dict, 
         )]
     trials = partition_into_trials(full_frame_df, trial_start_event)
     trials = trials[trials["trial_index"] > 0]
+    if trials.empty:
+        return []
+
+    # a trial_index whose own first frame is itself a block-boundary marker
+    # was created by an end_cut resetting the window (see
+    # partition_into_trials), not by a real trial_start_event anchor -- it's
+    # administrative filler, not a trial, so it must not contribute its own
+    # "position 1" to the ranking below (unlike before partition_into_trials
+    # gave these their own window: back then trial_index == 0 already
+    # excluded them above).
+    first_frame = trials.loc[trials["window_index"] == 0, ["boldfile", "trial_index", "trial_type"]]
+    admin_keys = first_frame.loc[first_frame["trial_type"].apply(is_trial_end_marker), ["boldfile", "trial_index"]]
+    if not admin_keys.empty:
+        trials = trials.merge(admin_keys.assign(_admin=True), on=["boldfile", "trial_index"], how="left")
+        trials = trials[trials["_admin"].isna()].drop(columns="_admin")
     if trials.empty:
         return []
 
@@ -1000,9 +1018,8 @@ def broadcast_trial_label(df: pd.DataFrame, label_col: str, trial_cols=("boldfil
     alphabetically-first value wins for that trial, deterministically.
 
     trial_index == 0 rows (outside any active trial -- a boldfile's leading
-    frames before its first anchor, and/or a trial's tail truncated early by
-    a hardcoded block-boundary marker, see partition_into_trials/
-    is_trial_end_marker) are left exactly as they are and never enter this
+    frames before its very first anchor or block-boundary marker, see
+    partition_into_trials) are left exactly as they are and never enter this
     broadcast: a boldfile can have several disjoint
     trial_index == 0 spans that have nothing to do with each other, so
     grouping them together as if they were one trial would broadcast a
