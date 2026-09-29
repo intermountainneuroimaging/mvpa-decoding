@@ -1,0 +1,557 @@
+---
+title: "Category evidence by operation and valence"
+output: html_notebook
+---
+
+Simple, direct version: load the full `decoding_results.csv` table (raw, one row
+per decoded TR), add a few columns to make filtering easy, then use plain
+dplyr/ggplot2 to plot. No abstraction layer beyond a handful of small helper
+functions -- every plot below is a short, self-contained function you can copy
+and adapt.
+
+For the item/category classifier (`regressor_label` -- whichever of
+face/place/item this classifier actually decodes; see below): each row's own
+**self-evidence** (`evidence_<its own true category>`) is the value plotted
+throughout -- "how much did the classifier believe this trial was its own true
+category".
+
+Ported from `valence_evidence_by_operation.ipynb` (the Python/Jupyter version
+in this same directory) -- logic is a faithful port, not a line-by-line
+translation. Two places lean on R's own idioms instead of copying Python's:
+
+  - **Shared legends are automatic.** `ggplot2` gives every facet of a plot one
+    shared legend for free (`facet_wrap()` + `theme(legend.position = "bottom")`),
+    so there's no need for the Python version's own `add_shared_legend()` helper.
+  - **Significance markers keep the Python version's two styles, purpose-fit
+    to what each plot is showing.** Plot 2 (raw pos vs. neg lines) marks each
+    significant bin with a "*" above the "combined" panel -- there's no single
+    line to anchor a marker to, since pos and neg are two separate lines.
+    Plot 3 (an operation-minus-maintain *difference* line) marks the onset of
+    each significant run with a downward triangle directly on that line, at
+    its own value -- there, the marker can sit on the thing being tested.
+
+```{r setup, message=FALSE}
+# tidyverse bundles dplyr/tidyr/ggplot2/readr/purrr/stringr/tibble -- everything
+# used below -- in one library() call.
+library(tidyverse)
+```
+
+## Configuration -- edit these
+
+```{r config}
+# -- where the data is -- two options:
+# (1) a single already-merged CSV (e.g. generate_report.py's own
+#     <desc>_group_decoding_results.csv, or any decoding_results.csv) --
+#     set group_csv_path and leave the rest alone.
+# (2) load + concatenate each subject's own decoding_results.csv straight
+#     from the cluster's output tree -- leave group_csv_path = NULL and set
+#     analysis_output_dir/desc/subjects instead.
+group_csv_path <- NULL  # e.g. "/path/to/vvps_category_loc2WM_timecourse_classifier_group_decoding_results.csv"
+
+analysis_output_dir <- "/pl/active/banich/studies/Clearvale/analysis/mvpa-decoding/"
+desc <- "vvps_category_loc2WM_timecourse_classifier"
+subjects <- "/pl/active/banich/studies/Clearvale/scripts/mvpa-decoding/configs/subject-list.txt"  # character vector of subject IDs, a subject-list.txt path, or NULL for everyone
+
+# per-operation colors -- matching this project's established color coding
+operation_colors <- c(maintain = "green", switch = "blue", suppress = "red", clear = "orange")
+valence_colors <- c(pos = "red", neg = "blue")
+
+tr_seconds <- 0.460  # seconds per TR -- x-axis everywhere below is window_index * tr_seconds
+
+# friendly name for a group of mutually-exclusive real trial_type values, for
+# the event markers computed below (see compute_marker_positions) -- same
+# shape/values as this classifier's own
+# model_conditions.timecourse_decoding.annotation_labels; a position not
+# covered by any group here just falls back to auto-joining its own distinct
+# values instead
+annotation_labels <- list(
+  view = c("view_face", "view_place"),
+  operation = c(
+    "maintain_face", "suppress_face", "switch_face", "clear_face",
+    "maintain_place", "suppress_place", "switch_place", "clear_place"
+  )
+)
+
+# generic y-axis label for all plots below.
+y_label <- "vvps category classifier evidence\ntrained on localizer task"
+
+output_dir <- "./category_evidence_analysis"
+
+# -- stats: pos vs. neg (within operation), and operation vs. maintain (within valence) --
+baseline_operation <- "maintain"
+bin_size <- 3       # TRs per non-overlapping stat window
+alpha <- 0.05
+
+# a trial's real length varies (jittered ITI before the next trial's own
+# anchor) -- only a shrinking handful of unusually long trials still have data
+# at the far tail of the window, so the x-axis is truncated once subject
+# coverage for any (category, operation, valence) combination drops below this
+# fraction of the full group, rather than plotting a handful of outlier trials
+# as if they were a real group average.
+min_subject_fraction <- 0.9
+```
+
+## Load data + add a few columns for easy filtering
+
+```{r load}
+col_spec <- cols(subject = col_character(), trial_type = col_character(), .default = col_guess())
+
+# subjects accepts either a literal comma-separated list ("1,2,3") or a path
+# to a text file listing subject IDs -- one per line, comma-separated on one
+# line, or a mix of both -- blank lines and surrounding whitespace ignored
+# either way, matching generate_report.py's own parse_subjects_arg.
+parse_subjects_arg <- function(value) {
+  text <- if (file.exists(value)) paste(readLines(value), collapse = "\n") else value
+  parts <- str_trim(str_split(text, "[,\n]")[[1]])
+  parts[parts != ""]
+}
+
+if (!is.null(group_csv_path)) {
+  df <- read_csv(group_csv_path, col_types = col_spec)
+  cat(sprintf("Loaded %d rows from %s -- %d subject(s)\n", nrow(df), group_csv_path, n_distinct(df$subject)))
+} else {
+  subject_dirs <- if (!is.null(subjects)) parse_subjects_arg(subjects) else list.dirs(file.path(analysis_output_dir, desc), recursive = FALSE, full.names = FALSE)
+  df <- map_dfr(subject_dirs, function(s) {
+    path <- file.path(analysis_output_dir, desc, s, "decoding", paste0(s, "_decoding_results.csv"))
+    if (file.exists(path)) read_csv(path, col_types = col_spec) else NULL
+  })
+  cat(sprintf("Loaded %d rows from %d subject(s)\n", nrow(df), length(subject_dirs)))
+}
+
+# label_col's values, broadcast across every row of the same (boldfile,
+# trial_index) trial -- regressor_label/operation are each only ever set on
+# the specific real event a query targets (e.g. the view period, not the
+# later operate period), so grouping/filtering directly on them would drop
+# every other frame of the trial. trial_index == 0 rows (outside any active
+# trial -- leading frames before a boldfile's first anchor, or a trial's tail
+# truncated by a block-boundary marker) are left untouched, same as
+# generate_report.py's own broadcast_trial_label.
+broadcast_trial_label <- function(data, label_col) {
+  data %>%
+    group_by(boldfile, trial_index) %>%
+    mutate("{label_col}" := {
+      if (trial_index[1] == 0) {
+        .data[[label_col]]
+      } else {
+        nn <- sort(unique(na.omit(.data[[label_col]])))
+        if (length(nn) == 0) rep(NA_character_, n()) else rep(nn[1], n())
+      }
+    }) %>%
+    ungroup()
+}
+
+df <- df %>% broadcast_trial_label("regressor_label")
+
+df <- df %>%
+  mutate(
+    valence = case_when(task == "WMpos" ~ "pos", task == "WMneg" ~ "neg", TRUE ~ NA_character_),
+    object = regressor_label,  # face / place / item (whichever this classifier decodes) -- NA on unscored frames
+    operation = str_extract(trial_type, "maintain|suppress|switch|clear")
+  ) %>%
+  broadcast_trial_label("operation") %>%
+  mutate(time_sec = window_index * tr_seconds)
+
+# self-evidence: this row's own evidence_<its own true category> column,
+# picked via vectorized matrix indexing (not a row-by-row loop) -- a row
+# whose object doesn't match any evidence_ column (an unqualified/excluded
+# trial, or a genuinely unscored frame) gets NA and is dropped below, exactly
+# like Python's select_evidence_value.
+evidence_cols <- names(df)[str_starts(names(df), "evidence_")]
+categories_all <- str_remove(evidence_cols, "^evidence_")
+evidence_matrix <- as.matrix(df[evidence_cols])
+col_idx <- match(paste0("evidence_", df$object), evidence_cols)
+df$value <- evidence_matrix[cbind(seq_len(nrow(df)), col_idx)]
+
+n_dropped <- sum(is.na(col_idx))
+cat(sprintf("%d row(s) had no matching evidence_ column -- dropped\n", n_dropped))
+df <- df %>% filter(!is.na(value))
+
+# Latest window_index at which every (object, operation, valence) combination
+# still has at least min_fraction of the dataset's own total subject count
+# contributing -- see max_reliable_window_index's docstring in
+# generate_report.py/decoding_results_toolkit.py for the full reasoning
+# (variable trial length means the far tail is only ever supported by a
+# shrinking handful of unusually long trials).
+max_reliable_window_index <- function(data, group_cols, min_fraction = 0.9) {
+  total_subjects <- n_distinct(data$subject)
+  min_n <- min_fraction * total_subjects
+
+  counts <- data %>%
+    distinct(subject, across(all_of(group_cols)), window_index) %>%
+    count(across(all_of(group_cols)), window_index, name = "n")
+
+  full_grid <- data %>%
+    distinct(across(all_of(group_cols))) %>%
+    crossing(window_index = sort(unique(data$window_index)))
+
+  worst_per_window <- full_grid %>%
+    left_join(counts, by = c(group_cols, "window_index")) %>%
+    mutate(n = replace_na(n, 0)) %>%
+    group_by(window_index) %>%
+    summarise(worst_n = min(n), .groups = "drop")
+
+  reliable <- worst_per_window %>% filter(worst_n >= min_n)
+  if (nrow(reliable) == 0) return(max(data$window_index))
+  max(reliable$window_index)
+}
+
+max_window <- max_reliable_window_index(df, c("object", "operation", "valence"), min_subject_fraction)
+n_dropped_tail <- sum(df$window_index > max_window)
+cat(sprintf("keeping window_index <= %d (%d row(s) beyond it dropped as too sparse)\n", max_window, n_dropped_tail))
+df <- df %>% filter(window_index <= max_window)
+
+categories <- sort(unique(na.omit(df$object)))
+operations <- names(operation_colors)[names(operation_colors) %in% unique(df$operation)]
+non_baseline_operations <- setdiff(operations, baseline_operation)
+cat("categories found:", categories, "\n")
+cat("operations found:", operations, "\n")
+
+df %>% select(subject, object, operation, valence, time_sec, value) %>% head()
+```
+
+## Event markers -- where the view/operate/fixation periods actually fall
+
+Same idea as `generate_report.py`'s own timecourse annotations
+(`compute_event_markers`/`draw_event_annotations`), computed directly from
+this dataframe's own real (un-broadcast) `trial_type` and `window_index` -- no
+`master_spreadsheet.csv` or config file needed, since `window_index` here is
+already relative to trial start and `trial_type` is already each frame's
+real, per-frame value.
+
+```{r markers}
+is_excluded_trial_type <- function(trial_type) {
+  tt <- tolower(trial_type)
+  tt %in% c("start_block", "end_block", "endfixation") | str_detect(tt, "fixation|postrt")
+}
+
+resolve_marker_label <- function(distinct_types, annotation_labels, max_label_values = 4) {
+  if (length(distinct_types) == 1) return(distinct_types[1])
+  for (name in names(annotation_labels)) {
+    if (all(distinct_types %in% annotation_labels[[name]])) return(name)
+  }
+  shown <- head(distinct_types, max_label_values)
+  label <- paste(shown, collapse = "/")
+  if (length(distinct_types) > max_label_values) label <- paste0(label, "/...")
+  label
+}
+
+compute_marker_positions <- function(data, annotation_labels = list(), min_frequency = 0.5, max_label_values = 4) {
+  events <- data %>%
+    distinct(boldfile, trial_index, window_index, trial_type) %>%
+    filter(!is.na(trial_type)) %>%  # a frame with no real event covering it is a gap, not its own ordinal position
+    arrange(boldfile, trial_index, window_index)
+
+  # merge consecutive same-trial_type rows within a trial into one sub-event
+  # -- a repeated run of the same real value is one occurrence, not one per TR
+  events <- events %>%
+    group_by(boldfile, trial_index) %>%
+    mutate(new_run = row_number() == 1 | trial_type != lag(trial_type)) %>%
+    ungroup() %>%
+    mutate(run_id = cumsum(new_run))
+
+  merged <- events %>%
+    group_by(run_id) %>%
+    summarise(boldfile = first(boldfile), trial_index = first(trial_index),
+              trial_type = first(trial_type), start = min(window_index), .groups = "drop") %>%
+    group_by(boldfile, trial_index) %>%
+    mutate(position = row_number()) %>%
+    ungroup()
+
+  n_trials <- merged %>% distinct(boldfile, trial_index) %>% nrow()
+
+  markers <- list()
+  for (pos in sort(unique(merged$position))) {
+    group <- merged %>% filter(position == pos)
+    frequency <- (group %>% distinct(boldfile, trial_index) %>% nrow()) / n_trials
+    if (frequency < min_frequency) next
+
+    distinct_types <- sort(unique(group$trial_type))
+    # a "_nan"/"nan_..." trial_type (a malformed trial with a missing item)
+    # is noise, not a real value worth covering or displaying
+    real_types <- distinct_types[!str_detect(tolower(distinct_types), "nan")]
+    if (length(real_types) == 0) real_types <- distinct_types
+
+    if (all(map_lgl(real_types, is_excluded_trial_type))) {
+      label <- ""  # a rest/gap marker (fixation/trial_fixation/EndFixation/...) isn't a condition worth naming
+    } else {
+      label <- resolve_marker_label(real_types, annotation_labels, max_label_values)
+    }
+
+    n <- nrow(group)
+    # population sd (ddof=0), matching Python's std(ddof=0) -- sample sd (R's
+    # default) would divide by n-1 instead of n
+    std_start <- if (n > 1) sd(group$start) * sqrt((n - 1) / n) else 0
+    markers[[length(markers) + 1]] <- tibble(trial_type = label, mean_start = mean(group$start), std_start = std_start)
+  }
+  bind_rows(markers) %>% arrange(mean_start)
+}
+
+event_markers <- compute_marker_positions(df, annotation_labels)
+event_markers
+
+# ggplot layers (vline + rotated label) marking each event -- since this data
+# frame carries no faceting variable, ggplot2 draws it identically on every
+# facet automatically, unlike the Python version's per-axes loop.
+event_marker_layers <- function(markers, tr) {
+  if (nrow(markers) == 0) return(list())
+  marker_df <- markers %>%
+    mutate(
+      start_sec = mean_start * tr,
+      std_sec = std_start * tr,
+      label = if_else(std_sec >= 0.5 * tr & trial_type != "", paste0(trial_type, " (variable timing)"), trial_type)
+    )
+  list(
+    geom_vline(data = marker_df, aes(xintercept = start_sec), inherit.aes = FALSE,
+               color = "gray40", linetype = "dotted", linewidth = 0.4),
+    geom_text(data = marker_df, aes(x = start_sec, y = Inf, label = label), inherit.aes = FALSE,
+              angle = 90, hjust = 1.05, vjust = -0.3, size = 2.5, color = "gray20")
+  )
+}
+```
+
+## Plot 1: category evidence by operation, one figure per valence
+
+One panel per category found above, each overlaying every operation
+(`operation_colors`) -- separate figures for pos and neg trials. One shared
+legend below each figure (`facet_wrap()` + `theme(legend.position = "bottom")`).
+
+```{r plot1, fig.width=10, fig.height=4.5}
+plot_categories_by_operation <- function(data, title) {
+  # per-subject mean first (so the SE band reflects between-subject
+  # variability, not raw single-trial noise), then mean +/- SE across subjects
+  plot_data <- data %>%
+    group_by(subject, object, operation, time_sec) %>%
+    summarise(value = mean(value), .groups = "drop") %>%
+    group_by(object, operation, time_sec) %>%
+    summarise(mean = mean(value), se = sd(value) / sqrt(n()), .groups = "drop")
+
+  ggplot(plot_data, aes(time_sec, mean, color = operation, fill = operation)) +
+    geom_ribbon(aes(ymin = mean - se, ymax = mean + se), alpha = 0.2, color = NA) +
+    geom_line(linewidth = 1) +
+    event_marker_layers(event_markers, tr_seconds) +
+    facet_wrap(~object, nrow = 1) +
+    scale_color_manual(values = operation_colors) +
+    scale_fill_manual(values = operation_colors) +
+    labs(title = title, x = "Time (s)", y = y_label) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+}
+
+for (val in c("pos", "neg")) {
+  print(plot_categories_by_operation(df %>% filter(valence == val),
+                                      sprintf("%s: category evidence by operation -- %s", desc, val)))
+}
+```
+
+## Statistics: pos vs. neg (within operation), and operation vs. maintain (within valence)
+
+Non-overlapping `bin_size`-TR windows; a paired t-test on each subject's own
+(a - b) difference score, run per bin. Both comparisons are collapsed across
+category (face/place/item pooled -- self-evidence already normalizes each
+trial to its own true category, so pooling is meaningful).
+
+```{r stats}
+# one row per bin -- paired t-test on the per-subject (cond_a - cond_b)
+# difference score, mirroring decoding_results_toolkit.py's
+# compare_conditions_by_bin / ttest_1samp_diff
+compare_conditions_by_bin <- function(data, group_col, cond_a, cond_b, bin_size, alternative = "two.sided") {
+  wide <- data %>%
+    mutate(bin = window_index %/% bin_size) %>%
+    group_by(subject, bin, .data[[group_col]]) %>%
+    summarise(value = mean(value), .groups = "drop") %>%
+    pivot_wider(names_from = all_of(group_col), values_from = value)
+
+  if (!all(c(cond_a, cond_b) %in% names(wide))) return(tibble())
+
+  wide %>%
+    filter(!is.na(.data[[cond_a]]), !is.na(.data[[cond_b]])) %>%
+    group_by(bin) %>%
+    filter(n() >= 2) %>%
+    summarise(
+      n = n(),
+      mean_diff = mean(.data[[cond_a]] - .data[[cond_b]]),
+      sd_diff = sd(.data[[cond_a]] - .data[[cond_b]]),
+      p_value = t.test(.data[[cond_a]], .data[[cond_b]], paired = TRUE, alternative = alternative)$p.value,
+      stat = unname(t.test(.data[[cond_a]], .data[[cond_b]], paired = TRUE, alternative = alternative)$statistic),
+      .groups = "drop"
+    ) %>%
+    mutate(tr_start = bin * bin_size, tr_end = bin * bin_size + bin_size - 1)
+}
+
+pos_vs_neg_stats <- function(op) {
+  compare_conditions_by_bin(df %>% filter(operation == op), "valence", "pos", "neg", bin_size) %>%
+    mutate(operation = op, .before = 1)
+}
+
+operation_vs_maintain_stats <- function(val) {
+  data <- df %>% filter(valence == val)
+  map_dfr(non_baseline_operations, function(op) {
+    compare_conditions_by_bin(data, "operation", op, baseline_operation, bin_size) %>%
+      mutate(operation = op, .before = 1)
+  }) %>%
+    mutate(valence = val, .before = 1)
+}
+
+pos_vs_neg <- map_dfr(operations, pos_vs_neg_stats)
+operation_vs_maintain <- map_dfr(c("pos", "neg"), operation_vs_maintain_stats)
+
+cat("pos vs. neg:\n")
+print(pos_vs_neg)
+cat("operation vs. maintain:\n")
+print(operation_vs_maintain)
+
+# onset (not every significant bin) of each contiguous run of p < alpha bins
+# -- one marker per divergence, matching mark_significance_onset
+significance_onsets <- function(bin_stats, alpha, tr) {
+  if (nrow(bin_stats) == 0) return(tibble(time_sec = numeric(0), mean_diff = numeric(0)))
+  sig <- bin_stats %>% filter(p_value < alpha) %>% arrange(bin)
+  if (nrow(sig) == 0) return(tibble(time_sec = numeric(0), mean_diff = numeric(0)))
+  sig %>%
+    mutate(is_onset = bin != lag(bin, default = -Inf) + 1) %>%
+    filter(is_onset) %>%
+    mutate(time_sec = tr_start * tr)
+}
+```
+
+## Plot 2: pos vs. neg, one figure per operation
+
+One panel per category found above, plus "combined" (face + place averaged
+together, equal weight regardless of trial-count imbalance -- valence only
+applies to face/place trials in this task, so item is left out). A "*" above
+the combined panel marks each bin where pos and neg significantly differ.
+
+```{r plot2, fig.width=12, fig.height=4.5}
+plot_valence_by_category <- function(data, title, sig_stats = NULL) {
+  valence_categories <- setdiff(categories, "item")
+
+  per_category <- data %>%
+    filter(object %in% valence_categories) %>%
+    group_by(subject, object, valence, time_sec) %>%
+    summarise(value = mean(value), .groups = "drop")
+
+  combined <- data %>%
+    filter(object %in% valence_categories) %>%
+    group_by(subject, valence, time_sec) %>%
+    summarise(value = mean(value), .groups = "drop") %>%
+    mutate(object = "combined")
+
+  plot_data <- bind_rows(per_category, combined) %>%
+    mutate(object = factor(object, levels = c(valence_categories, "combined"))) %>%
+    group_by(object, valence, time_sec) %>%
+    summarise(mean = mean(value), se = sd(value) / sqrt(n()), .groups = "drop")
+
+  p <- ggplot(plot_data, aes(time_sec, mean, color = valence, fill = valence)) +
+    geom_ribbon(aes(ymin = mean - se, ymax = mean + se), alpha = 0.2, color = NA) +
+    geom_line(linewidth = 1) +
+    event_marker_layers(event_markers, tr_seconds) +
+    facet_wrap(~object, nrow = 1) +
+    scale_color_manual(values = valence_colors) +
+    scale_fill_manual(values = valence_colors) +
+    labs(title = title, x = "Time (s)", y = y_label) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+
+  if (!is.null(sig_stats) && nrow(sig_stats) > 0) {
+    sig <- sig_stats %>%
+      filter(p_value < alpha) %>%
+      mutate(mid_sec = (tr_start + tr_end) / 2 * tr_seconds, object = factor("combined", levels = levels(plot_data$object)))
+    if (nrow(sig) > 0) {
+      # evidence is a probability-like value in [0, 1] -- 0.95 is a simple,
+      # fixed placement near the top rather than dynamically measuring each
+      # panel's own y-range
+      p <- p + geom_text(data = sig, aes(x = mid_sec, y = 0.95, label = "*"), inherit.aes = FALSE, size = 5)
+    }
+  }
+  p
+}
+
+for (op in operations) {
+  print(plot_valence_by_category(df %>% filter(operation == op), sprintf("%s: %s -- pos vs. neg", desc, op),
+                                  sig_stats = pos_vs_neg %>% filter(operation == op)))
+}
+```
+
+## Plot 3: operation minus maintain (subtraction), with significance
+
+Single panel per valence, collapsed across category -- each non-baseline
+operation's evidence with `baseline_operation` (maintain)'s own subject- and
+window-matched evidence subtracted out first, so **y=0 is maintain's own
+response** and every plotted line shows how that operation's evidence differs
+from maintain at each timepoint. A downward triangle, in that operation's own
+color, marks the onset of each contiguous window where it significantly
+differs from 0 at `alpha`.
+
+```{r plot3, fig.width=7, fig.height=4.5}
+plot_operations_minus_maintain <- function(val, sig_stats = NULL) {
+  per_subject <- df %>%
+    filter(valence == val) %>%
+    group_by(subject, operation, window_index) %>%
+    summarise(value = mean(value), .groups = "drop") %>%
+    pivot_wider(names_from = operation, values_from = value)
+
+  diffs <- per_subject %>%
+    pivot_longer(all_of(non_baseline_operations), names_to = "operation", values_to = "diff") %>%
+    mutate(diff = diff - .data[[baseline_operation]], time_sec = window_index * tr_seconds) %>%
+    group_by(operation, time_sec) %>%
+    summarise(mean = mean(diff, na.rm = TRUE), se = sd(diff, na.rm = TRUE) / sqrt(sum(!is.na(diff))), .groups = "drop")
+
+  # maintain's own flat 0 line, folded into the same table/color scale/legend
+  # instead of a separate geom_hline with its own manual legend entry
+  maintain_flat <- diffs %>% distinct(time_sec) %>% mutate(operation = baseline_operation, mean = 0, se = 0)
+  diffs <- bind_rows(diffs, maintain_flat) %>%
+    mutate(operation = factor(operation, levels = c(non_baseline_operations, baseline_operation)))
+
+  p <- ggplot(diffs, aes(time_sec, mean, color = operation, fill = operation)) +
+    geom_ribbon(aes(ymin = mean - se, ymax = mean + se), alpha = 0.2, color = NA) +
+    geom_line(linewidth = 1) +
+    event_marker_layers(event_markers, tr_seconds) +
+    scale_color_manual(values = operation_colors) +
+    scale_fill_manual(values = operation_colors) +
+    labs(title = sprintf("%s: operation minus %s -- %s", desc, baseline_operation, val),
+         x = "Time (s)", y = paste0(y_label, "\n(operation minus ", baseline_operation, ")")) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+
+  if (!is.null(sig_stats) && nrow(sig_stats) > 0) {
+    onsets <- map_dfr(non_baseline_operations, function(op) {
+      significance_onsets(sig_stats %>% filter(operation == op), alpha, tr_seconds) %>% mutate(operation = op)
+    })
+    if (nrow(onsets) > 0) {
+      onsets <- onsets %>% mutate(operation = factor(operation, levels = levels(diffs$operation)))
+      p <- p + geom_point(data = onsets, aes(x = time_sec, y = mean_diff, fill = operation),
+                           shape = 25, color = "black", size = 3, show.legend = FALSE)
+    }
+  }
+  p
+}
+
+for (val in c("pos", "neg")) {
+  print(plot_operations_minus_maintain(val, operation_vs_maintain %>% filter(valence == val)))
+}
+```
+
+## Save outputs (optional)
+
+```{r save}
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+pdf_path <- file.path(output_dir, paste0(desc, "_category_evidence.pdf"))
+
+pdf(pdf_path, width = 12, height = 4.5)
+for (val in c("pos", "neg")) {
+  print(plot_categories_by_operation(df %>% filter(valence == val),
+                                      sprintf("%s: category evidence by operation -- %s", desc, val)))
+}
+for (op in operations) {
+  print(plot_valence_by_category(df %>% filter(operation == op), sprintf("%s: %s -- pos vs. neg", desc, op),
+                                  sig_stats = pos_vs_neg %>% filter(operation == op)))
+}
+for (val in c("pos", "neg")) {
+  print(plot_operations_minus_maintain(val, operation_vs_maintain %>% filter(valence == val)))
+}
+dev.off()
+cat("PDF written to:", pdf_path, "\n")
+
+write_csv(pos_vs_neg, file.path(output_dir, paste0(desc, "_pos_vs_neg_stats.csv")))
+write_csv(operation_vs_maintain, file.path(output_dir, paste0(desc, "_operation_vs_maintain_stats.csv")))
+cat("Stats written to:", output_dir, "\n")
+```
