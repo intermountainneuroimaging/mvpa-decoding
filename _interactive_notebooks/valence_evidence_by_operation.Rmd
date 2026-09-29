@@ -89,6 +89,17 @@ alpha <- 0.05
 # fraction of the full group, rather than plotting a handful of outlier trials
 # as if they were a real group average.
 min_subject_fraction <- 0.9
+
+# how many extra TRs to extend each trial's own window past that reliable
+# cutoff -- by absolute volume_of_interest from the trial's own start, not by
+# filtering the natural window_index column, so a short trial's extension
+# keeps going even once it's crossed into what's officially the next trial
+# (borrowing its fixation tail and/or the next trial's own view period,
+# whichever comes next -- see the load chunk below). Deliberately
+# double-dipping a frame into two trials' own windows there, rather than
+# cutting off cleanly at whatever trial boundary happens to be nearby.
+# Set to 0 to stop exactly at the reliable cutoff, no borrowing.
+extra_trailing_trs <- 6
 ```
 
 ## Load data + add a few columns for easy filtering
@@ -148,23 +159,24 @@ df <- df %>%
     object = regressor_label,  # face / place / item (whichever this classifier decodes) -- NA on unscored frames
     operation = str_extract(trial_type, "maintain|suppress|switch|clear")
   ) %>%
-  broadcast_trial_label("operation") %>%
-  mutate(time_sec = window_index * tr_seconds)
+  broadcast_trial_label("operation")
 
 # self-evidence: this row's own evidence_<its own true category> column,
 # picked via vectorized matrix indexing (not a row-by-row loop) -- a row
 # whose object doesn't match any evidence_ column (an unqualified/excluded
-# trial, or a genuinely unscored frame) gets NA and is dropped below, exactly
-# like Python's select_evidence_value.
-evidence_cols <- names(df)[str_starts(names(df), "evidence_")]
-categories_all <- str_remove(evidence_cols, "^evidence_")
-evidence_matrix <- as.matrix(df[evidence_cols])
-col_idx <- match(paste0("evidence_", df$object), evidence_cols)
-df$value <- evidence_matrix[cbind(seq_len(nrow(df)), col_idx)]
-
-n_dropped <- sum(is.na(col_idx))
-cat(sprintf("%d row(s) had no matching evidence_ column -- dropped\n", n_dropped))
-df <- df %>% filter(!is.na(value))
+# trial, or a genuinely unscored frame) gets NA and is dropped, exactly like
+# Python's select_evidence_value. Used twice below (once on each row's own
+# natural trial, once on the OWNING trial after the window is extended), so
+# it's a function rather than inline code.
+select_self_evidence <- function(data) {
+  evidence_cols <- names(data)[str_starts(names(data), "evidence_")]
+  evidence_matrix <- as.matrix(data[evidence_cols])
+  col_idx <- match(paste0("evidence_", data$object), evidence_cols)
+  data$value <- evidence_matrix[cbind(seq_len(nrow(data)), col_idx)]
+  n_dropped <- sum(is.na(col_idx))
+  cat(sprintf("%d row(s) had no matching evidence_ column -- dropped\n", n_dropped))
+  data %>% filter(!is.na(value))
+}
 
 # Latest window_index at which every (object, operation, valence) combination
 # still has at least min_fraction of the dataset's own total subject count
@@ -195,10 +207,49 @@ max_reliable_window_index <- function(data, group_cols, min_fraction = 0.9) {
   max(reliable$window_index)
 }
 
-max_window <- max_reliable_window_index(df, c("object", "operation", "valence"), min_subject_fraction)
-n_dropped_tail <- sum(df$window_index > max_window)
-cat(sprintf("keeping window_index <= %d (%d row(s) beyond it dropped as too sparse)\n", max_window, n_dropped_tail))
-df <- df %>% filter(window_index <= max_window)
+# self-evidence using each row's OWN natural trial -- only to find the
+# reliable per-trial cutoff; the actually-plotted "value" gets recomputed
+# per the OWNING trial once the window is extended below, since a borrowed
+# tail frame's evidence must be judged against the trial it was borrowed
+# FROM, not whatever trial that frame's own content belongs to.
+natural <- select_self_evidence(df)
+max_window <- max_reliable_window_index(natural, c("object", "operation", "valence"), min_subject_fraction)
+n_dropped_tail <- sum(natural$window_index > max_window)
+cat(sprintf("reliable per-trial coverage extends to window_index <= %d (%d row(s) beyond it too sparse under each trial's own natural length)\n", max_window, n_dropped_tail))
+window_len <- max_window + 1 + extra_trailing_trs
+
+# real trial starts only: window_index == 0 AND a genuine anchor match --
+# regressor_label is never set on a trial an end_cut started, only a real
+# trial_start_event anchor gets its own extended window here.
+trial_starts <- df %>%
+  filter(window_index == 0, !is.na(regressor_label)) %>%
+  select(boldfile, owner_trial_index = trial_index, start_vol = volume_of_interest,
+         owner_object = object, owner_operation = operation, owner_valence = valence)
+
+# for each real trial, pull every row within window_len TRs of ITS OWN start
+# -- by absolute volume_of_interest, not the natural window_index column, so
+# a short trial's window keeps counting even once volume_of_interest has
+# moved into what's officially the next trial (or a block-boundary rest
+# period). One exact-match join per offset (not a full cross join) keeps
+# this cheap: output size is n_real_trials * window_len, not
+# n_real_trials * nrow(df); a frame two trials' windows both reach lands in
+# the output twice, once per owner -- the intended double-dip.
+df <- map_dfr(0:(window_len - 1), function(offset) {
+  probe <- trial_starts %>% mutate(volume_of_interest = start_vol + offset)
+  inner_join(df, probe, by = c("boldfile", "volume_of_interest")) %>%
+    mutate(window_index = offset)
+})
+
+# every plotted row is now keyed on the OWNING trial's own true category --
+# not necessarily this row's own natural trial, for a borrowed tail frame --
+# so a borrowed frame's evidence_<> lookup reflects "how much did the
+# classifier still believe this was the ORIGINATING trial's category", not
+# whatever trial the frame's own real content actually belongs to.
+df <- df %>%
+  mutate(trial_index = owner_trial_index, regressor_label = owner_object,
+         object = owner_object, operation = owner_operation, valence = owner_valence) %>%
+  select_self_evidence() %>%
+  mutate(time_sec = window_index * tr_seconds)
 
 categories <- sort(unique(na.omit(df$object)))
 operations <- names(operation_colors)[names(operation_colors) %in% unique(df$operation)]
@@ -222,6 +273,14 @@ real, per-frame value.
 is_excluded_trial_type <- function(trial_type) {
   tt <- tolower(trial_type)
   tt %in% c("start_block", "end_block", "endfixation") | str_detect(tt, "fixation|postrt")
+}
+
+# narrower than is_excluded_trial_type: only the block-boundary markers that
+# partition_into_trials treats as starting their own fresh window (see
+# utils/mvpa_common.py) -- an ordinary "fixation"/"postrt" stays part of the
+# trial it occurs in and never gets its own trial_index.
+is_trial_end_marker <- function(trial_type) {
+  tolower(trial_type) %in% c("start_block", "end_block", "endfixation")
 }
 
 resolve_marker_label <- function(distinct_types, annotation_labels, max_label_values = 4) {
@@ -256,6 +315,16 @@ compute_marker_positions <- function(data, annotation_labels = list(), min_frequ
     group_by(boldfile, trial_index) %>%
     mutate(position = row_number()) %>%
     ungroup()
+
+  # a trial_index whose own first frame is itself a block-boundary marker
+  # was created by partition_into_trials' end_cut resetting the window, not
+  # by a real trial anchor -- it's administrative filler, not a trial, and
+  # must not contribute its own "position 1" here (mixing with a real
+  # trial's own position 1 and corrupting resolve_marker_label's result there)
+  admin_trials <- merged %>%
+    filter(position == 1, map_lgl(trial_type, is_trial_end_marker)) %>%
+    distinct(boldfile, trial_index)
+  merged <- merged %>% anti_join(admin_trials, by = c("boldfile", "trial_index"))
 
   n_trials <- merged %>% distinct(boldfile, trial_index) %>% nrow()
 
