@@ -1,0 +1,162 @@
+{
+  "config_version": "1.0",
+  "created_by": "AKH",
+  "notes": "Report-only alternate view of config-timecourse.clearvale-category (2).json's timecourse page: operation still gets its own color (0-3), but valence (pos/neg) is now placed in its own contiguous block of rows (with its own legend) via overlay's \"group\" key instead of a dashed line -- one report, two blocks (pos, then neg), rather than one shared legend for the whole page. model.desc is intentionally identical to config-timecourse.clearvale-category (2).json, so `generate_report.py --config config-timecourse.clearvale-category-valence-groups.json ...` reads the SAME already-computed <analysis-output-dir>/vvps_category_loc2WM_timecourse_classifier/ output and just re-renders the timecourse page with this overlay instead -- no need to rerun mvpa_workflow.py for this alternate report. MVPA operation (face/place/item) timecourse classifier; masking on vvps.",
+
+  "event_extraction": {
+    "bids_root": "/pl/active/banich/studies/Clearvale/bids/",
+    "events_glob": "**/*_events.tsv",
+    "derivatives_root": "/pl/active/banich/studies/Clearvale/analysis/bids-hcp/",
+    "bold_glob": "sub-{subject}/ses-{session}/func/sub-{subject}_ses-{session}_task-{task}_dir-{dir}_run-{run}_space-MNI152NLin6Asym_desc-preproc_bold.nii.gz",
+    "hemodynamic_lag": 4.6,
+    "output_file": "master_spreadsheet.csv"
+  },
+"model_conditions": {
+    "training": {
+      "conditions": {
+        "face": {
+          "and": [
+            {"column": "task", "match": "exact", "value": "loc"},
+            {"column": "trial_type", "match": "regex", "value": ".*face.*"}
+          ]
+        },
+        "place": {
+          "and": [
+            {"column": "task", "match": "exact", "value": "loc"},
+            {"column": "trial_type", "match": "regex", "value": ".*place.*"}
+          ]
+        },
+        "item": {
+          "and": [
+            {"column": "task", "match": "exact", "value": "loc"},
+            {"column": "trial_type", "match": "regex", "value": ".*item.*"}
+          ]
+        }
+      }
+    },
+
+    "testing": {
+      "conditions": {
+        "face": {
+          "and": [
+            {"column": "task", "match": "regex", "value": "^WM.*"},
+            {"column": "trial_type", "match": "regex", "value": "view_face"}
+          ]
+        },
+        "place": {
+          "and": [
+            {"column": "task", "match": "regex", "value": "^WM.*"},
+            {"column": "trial_type", "match": "regex", "value": "view_place"}
+          ]
+        }
+      }
+    },
+
+    "timecourse_decoding": {
+      "trial_start_event": {"column": "trial_type", "match": "regex", "value": "view_.*"},
+      "annotation_labels": {
+        "view": ["view_face", "view_place"],
+        "operation": ["maintain_face", "suppress_face", "switch_face", "clear_face", "maintain_place", "suppress_place", "switch_place", "clear_place"]
+      },
+      "overlay": {
+        "maintain_pos": {
+          "and": [
+            {"column": "trial_type", "match": "regex", "value": ".*maintain.*"},
+            {"column": "task", "match": "exact", "value": "WMpos"}
+          ],
+          "color": "green", "group": "pos"
+        },
+        "maintain_neg": {
+          "and": [
+            {"column": "trial_type", "match": "regex", "value": ".*maintain.*"},
+            {"column": "task", "match": "exact", "value": "WMneg"}
+          ],
+          "color": "green", "group": "neg"
+        },
+        "suppress_pos": {
+          "and": [
+            {"column": "trial_type", "match": "regex", "value": ".*suppress.*"},
+            {"column": "task", "match": "exact", "value": "WMpos"}
+          ],
+          "color": "red", "group": "pos"
+        },
+        "suppress_neg": {
+          "and": [
+            {"column": "trial_type", "match": "regex", "value": ".*suppress.*"},
+            {"column": "task", "match": "exact", "value": "WMneg"}
+          ],
+          "color": "red", "group": "neg"
+        },
+        "switch_pos": {
+          "and": [
+            {"column": "trial_type", "match": "regex", "value": ".*switch.*"},
+            {"column": "task", "match": "exact", "value": "WMpos"}
+          ],
+          "color": "blue", "group": "pos"
+        },
+        "switch_neg": {
+          "and": [
+            {"column": "trial_type", "match": "regex", "value": ".*switch.*"},
+            {"column": "task", "match": "exact", "value": "WMneg"}
+          ],
+          "color": "blue", "group": "neg"
+        },
+        "clear_pos": {
+          "and": [
+            {"column": "trial_type", "match": "regex", "value": ".*clear.*"},
+            {"column": "task", "match": "exact", "value": "WMpos"}
+          ],
+          "color": "orange", "group": "pos"
+        },
+        "clear_neg": {
+          "and": [
+            {"column": "trial_type", "match": "regex", "value": ".*clear.*"},
+            {"column": "task", "match": "exact", "value": "WMneg"}
+          ],
+          "color": "orange", "group": "neg"
+        }
+      }
+    }
+  },
+
+
+  "model": {
+    "desc": "vvps_category_loc2WM_timecourse_classifier",
+    "mnispace": true,
+    "mask": {
+      "mask_pattern": "/pl/active/banich/studies/Clearvale/masks/mask_vvps_temporal_3mm.nii.gz"
+    },
+    "featureSelection": {
+      "model": "ANOVA",
+      "feat_p": 0.05
+    },
+    "classifier": {
+      "name": "sklearn.linear_model.LogisticRegression",
+      "params": {
+        "penalty": "l2",
+        "C": 50,
+        "solver": "liblinear",
+        "max_iter": 10000,
+        "class_weight": "balanced",
+        "random_state": 6100
+      },
+      "one_vs_rest": true
+    },
+    "kfold_cv": {
+      "strategy": "per_run"
+    },
+    "permutation_test": {
+      "n_permutations": 1000,
+      "random_state": 0
+    }
+  },
+
+  "pipeline": {
+    "scripts_dir": "/pl/active/banich/studies/Clearvale/scripts/mvpa-decoding",
+    "bids_hcp_root": "/pl/active/banich/studies/Clearvale/analysis/bids-hcp",
+    "hcppipe_root": "/pl/active/banich/studies/Clearvale/analysis/HCPPipe",
+    "group_gm_mask": "/pl/active/banich/studies/Clearvale/analysis/feat/group-analyses/bin_wager_gm_mask.nii.gz",
+    "output_dir": "/pl/active/banich/studies/Clearvale/analysis/mvpa-decoding",
+    "master_spreadsheet": "/pl/active/banich/studies/Clearvale/analysis/mvpa-decoding/master_spreadsheet.csv"
+  }
+}

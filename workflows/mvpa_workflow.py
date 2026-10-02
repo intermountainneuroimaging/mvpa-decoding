@@ -255,7 +255,7 @@ def _acquisition_name(boldfile: str) -> str:
 def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_filename_tag,
               analysis_output_dir, model_descr, subject_id, regressor_categories,
               feature_selection_cfg, classifier_name, classifier_params,
-              training_df, training_data, training_labels):
+              training_df, training_data, training_labels, one_vs_rest=False):
     """Repeatedly hold out a group of runs from model_conditions.training: train on
     the rest, evaluate on the held-out group, then aggregate. Per-fold outputs are
     also saved -- for transparency, and so generate_report.py can detect and
@@ -306,7 +306,8 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
         fold_test_data = training_data[test_mask]
         fold_test_labels = training_labels[test_mask]
 
-        xclf = model_classification(fold_train_data, fold_train_labels, feature_selection_cfg, classifier_name, classifier_params)
+        xclf = model_classification(fold_train_data, fold_train_labels, feature_selection_cfg, classifier_name, classifier_params,
+                                    one_vs_rest=one_vs_rest)
         xout, impa = model_performance(xclf, fold_test_data, fold_test_labels)
 
         # per-held-out-sample detail (task/trial_type/run/boldfile plus
@@ -347,6 +348,7 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
             fold_permutation_results = permutation_significance(
                 fold_train_data, fold_train_labels, fold_test_data, fold_test_labels,
                 n_permutations, random_state, feature_selection_cfg, classifier_name, classifier_params,
+                one_vs_rest=one_vs_rest,
             )
             fold_permutation_file = os.path.join(
                 analysis_output_dir, model_descr, subject_id, "model",
@@ -420,10 +422,12 @@ def main(args):
     model_cfg = full_cfg["model"]
     model_descr = quick_safe(model_cfg["desc"])
     mask_pattern_template = model_cfg.get("mask", {}).get("mask_pattern")
+    mask_detrend = model_cfg.get("mask", {}).get("detrend", True)
     impa_filename_tag = impa_tag(model_cfg.get("mnispace", False))
     feature_selection_cfg = model_cfg["featureSelection"]
     classifier_name = model_cfg["classifier"]["name"]
     classifier_params = model_cfg["classifier"]["params"]
+    classifier_one_vs_rest = model_cfg["classifier"].get("one_vs_rest", False)
     permutation_test_cfg = model_cfg.get("permutation_test")
 
     # optional escape hatch for the double-dipping guard below -- see
@@ -598,12 +602,14 @@ def main(args):
     trial_pivot.to_csv(output_file, index=False)
     print(f"Trial pivot table (sanity check) saved to: {output_file}")
 
-    training_data, training_labels, training_ids, masker = load_images_and_mask(training_df, mask_pattern_template)
+    training_data, training_labels, training_ids, masker = load_images_and_mask(
+        training_df, mask_pattern_template, detrend=mask_detrend)
     training_df = training_df.loc[training_ids, :]
     training_labels = training_labels.ravel()
 
     if testing_df is not None and run_test_evaluation:
-        testing_data, testing_labels, testing_ids, masker = load_images_and_mask(testing_df, mask_pattern_template)
+        testing_data, testing_labels, testing_ids, masker = load_images_and_mask(
+            testing_df, mask_pattern_template, detrend=mask_detrend)
         testing_df = testing_df.loc[testing_ids, :]
         testing_labels = testing_labels.ravel()
     else:
@@ -613,7 +619,8 @@ def main(args):
         testing_data = testing_labels = None
 
     if timecourse_instr is not None and not skip_timecourse:
-        timecourse_data, timecourse_labels, timecourse_ids, masker = load_images_and_mask(timecourse_instr, mask_pattern_template)
+        timecourse_data, timecourse_labels, timecourse_ids, masker = load_images_and_mask(
+            timecourse_instr, mask_pattern_template, detrend=mask_detrend)
         timecourse_instr = timecourse_instr.loc[timecourse_ids, :]
         timecourse_labels = timecourse_labels.ravel()
     else:
@@ -631,7 +638,8 @@ def main(args):
     # -------------------------------------------------
 
     print("Training classifier on full training set...")
-    xclf_full = model_classification(training_data, training_labels, feature_selection_cfg, classifier_name, classifier_params)
+    xclf_full = model_classification(training_data, training_labels, feature_selection_cfg, classifier_name, classifier_params,
+                                     one_vs_rest=classifier_one_vs_rest)
 
     # -------------------------------------------------
     # K-Fold Cross-Validation (optional -- model.kfold_cv)
@@ -645,7 +653,7 @@ def main(args):
             kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_filename_tag,
             analysis_output_dir, model_descr, subject_id, regressor_categories,
             feature_selection_cfg, classifier_name, classifier_params,
-            training_df, training_data, training_labels,
+            training_df, training_data, training_labels, one_vs_rest=classifier_one_vs_rest,
         )
 
         output_pattern = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}" + "_model_results_{metric}.csv")
@@ -689,7 +697,7 @@ def main(args):
             print(f"Permutation testing ({n_permutations} permutations)...")
             permutation_results = permutation_significance(
                 training_data, training_labels, testing_data, testing_labels, n_permutations, random_state,
-                feature_selection_cfg, classifier_name, classifier_params,
+                feature_selection_cfg, classifier_name, classifier_params, one_vs_rest=classifier_one_vs_rest,
             )
             permutation_file = os.path.join(
                 analysis_output_dir, model_descr, subject_id, "test", f"{subject_id}_permutation_test.csv"

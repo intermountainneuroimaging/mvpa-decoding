@@ -32,6 +32,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import f_classif, GenericUnivariateSelect
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.model_selection import PredefinedSplit, permutation_test_score
+from sklearn.multiclass import OneVsRestClassifier
 from sklearn.pipeline import Pipeline
 
 BIDS_ENTITY_RE = re.compile(r"(?:^|_)(?P<key>[a-zA-Z]+)-(?P<val>[^_.]+)")
@@ -706,7 +707,7 @@ class ShapeError(Exception):
 _masker_cache = {}
 
 
-def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str = None):
+def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str = None, detrend: bool = True):
     """Load BOLD patterns for every (subject, session, boldfile) group in
     labeled_df, z-score, and slice to each row's actual BOLD frame -- its
     volume_of_interest_withlag when that column is present (training/testing/
@@ -732,7 +733,15 @@ def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str = 
     including background/non-brain voxels). A *configured* mask_pattern
     that matches no file is still a hard error (get_single_match raises) --
     optional-and-unset and configured-but-missing are different failure
-    modes, only the former is a fallback."""
+    modes, only the former is a fallback.
+
+    detrend (default True) is nilearn's own NiftiMasker linear detrending,
+    applied before the StandardScaler z-score below -- on by default since a
+    real analysis almost always wants slow scanner/physiological drift
+    removed before standardizing. Set model.mask.detrend=false to turn it
+    off; doing so prints a warning per (subject, session), the same way an
+    unset mask_pattern does, since skipping detrending is the unusual case
+    worth flagging in the logs rather than a silent default."""
 
     matrices = []
     labels = []
@@ -761,7 +770,11 @@ def load_images_and_mask(labeled_df: pd.DataFrame, mask_pattern_template: str = 
                       f"model.mask.mask_pattern to restrict to real brain tissue.")
                 ref_img = nib.load(boldfile)
                 mask_img = nib.Nifti1Image(np.ones(ref_img.shape[:3], dtype=np.uint8), ref_img.affine)
-            _masker_cache[mask_key] = NiftiMasker(mask_img=mask_img, standardize=False, detrend=False, t_r=bold_tr)
+            if not detrend:
+                print(f"  (!) model.mask.detrend=false for subject={subject!r}, session={session!r} -- "
+                      f"BOLD patterns will NOT be linearly detrended before z-scoring. Scanner/physiological "
+                      f"drift will remain in the data -- this is rarely what you want for a real analysis.")
+            _masker_cache[mask_key] = NiftiMasker(mask_img=mask_img, standardize=False, detrend=detrend, t_r=bold_tr)
         masker = _masker_cache[mask_key]
 
         # apply mask
@@ -1004,23 +1017,34 @@ def resolve_feature_selection_params(training_data, training_labels, feature_sel
     return "fpr", thr
 
 
-def build_classifier_pipeline(mode: str, param, classifier_name: str, classifier_params: dict) -> Pipeline:
+def build_classifier_pipeline(mode: str, param, classifier_name: str, classifier_params: dict,
+                               one_vs_rest: bool = False) -> Pipeline:
     """An unfit Pipeline(ANOVA feature selection, classifier). mode/param are
     passed straight through to GenericUnivariateSelect -- "fpr" (param=a
     p-value threshold, features with p < param) or "k_best" (param=an exact
     voxel count, the top-scoring param features by ANOVA F-score) -- the
     built-in sklearn equivalent of the manual xP < thr mask the "fpr" path
     originally used (verified to select identical voxels, including NaN
-    p-value handling for zero-variance voxels)."""
+    p-value handling for zero-variance voxels).
+
+    one_vs_rest=True wraps the classifier in sklearn's OneVsRestClassifier
+    (one independent binary classifier per class). Needed for any estimator
+    that only does binary fitting natively -- notably LogisticRegression with
+    solver="liblinear", which sklearn >= 1.8 refuses to fit on 3+ classes
+    unless wrapped like this (it used to apply one-vs-rest silently)."""
     Cls = import_from_path(classifier_name)
+    classifier = Cls(**classifier_params)
+    if one_vs_rest:
+        classifier = OneVsRestClassifier(classifier)
     return Pipeline([
         ("feature_selection", GenericUnivariateSelect(score_func=f_classif, mode=mode, param=param)),
-        ("classifier", Cls(**classifier_params)),
+        ("classifier", classifier),
     ])
 
 
 # cross_validation
-def model_classification(training_data, training_labels, feature_selection_cfg: dict, classifier_name: str, classifier_params: dict):
+def model_classification(training_data, training_labels, feature_selection_cfg: dict, classifier_name: str, classifier_params: dict,
+                          one_vs_rest: bool = False):
     """Fit an ANOVA-feature-selection + classifier Pipeline. Bundling both
     steps into one estimator -- rather than externally tracking a voxel
     boolean mask, as before -- means the whole thing can be refit as a
@@ -1030,10 +1054,30 @@ def model_classification(training_data, training_labels, feature_selection_cfg: 
     print("Training classifier...")
 
     mode, param = resolve_feature_selection_params(training_data, training_labels, feature_selection_cfg)
-    pipe = build_classifier_pipeline(mode, param, classifier_name, classifier_params)
-    pipe.fit(training_data, training_labels)
+    pipe = build_classifier_pipeline(mode, param, classifier_name, classifier_params, one_vs_rest=one_vs_rest)
+    try:
+        pipe.fit(training_data, training_labels)
+    except ValueError as exc:
+        # sklearn's own message points at OneVsRestClassifier, which isn't
+        # something a config-only user can act on directly -- translate it
+        if "liblinear" in str(exc) and "OneVsRestClassifier" in str(exc) and not one_vs_rest:
+            raise ValueError(
+                f"{exc}\n\nSet model.classifier.one_vs_rest to true in your config to apply that "
+                f"one-vs-rest wrapper automatically (see README.md, model section)."
+            ) from exc
+        raise
 
     return pipe
+
+
+def _classifier_coef(clf) -> np.ndarray:
+    """clf.coef_, or -- for a OneVsRestClassifier, which exposes no coef_ of
+    its own -- its per-class binary estimators' weights stacked in classes_
+    order. Same shape either way: (n_classes, n_features), or (1, n_features)
+    for a binary problem (OneVsRestClassifier fits a single estimator there)."""
+    if hasattr(clf, "coef_"):
+        return clf.coef_
+    return np.vstack([est.coef_ for est in clf.estimators_])
 
 
 def extract_importance_map(pipe, n_features: int) -> np.ndarray:
@@ -1044,13 +1088,14 @@ def extract_importance_map(pipe, n_features: int) -> np.ndarray:
     clf = pipe.named_steps["classifier"]
     xfeat = pipe.named_steps["feature_selection"].get_support()
     n_class = len(clf.classes_)
+    coef = _classifier_coef(clf)
 
     # special case where classifier is binary (yes/no) -- only codes one label
     if n_class == 2:
         # voxel weights -- volume 0 and volume 1 are mat*-1 of each other
-        impa = np.vstack((clf.coef_, -clf.coef_))
+        impa = np.vstack((coef, -coef))
     else:
-        impa = clf.coef_
+        impa = coef
 
     impa_full = np.zeros((n_class, n_features), dtype=impa.dtype)
     impa_full[:, xfeat] = impa
@@ -1194,7 +1239,8 @@ def _partial_roc_auc_ovr(estimator, X, y):
 
 
 def permutation_significance(training_data, training_labels, testing_data, testing_labels, n_permutations, random_state,
-                              feature_selection_cfg: dict, classifier_name: str, classifier_params: dict):
+                              feature_selection_cfg: dict, classifier_name: str, classifier_params: dict,
+                              one_vs_rest: bool = False):
     """Real-vs-null significance for the held-out test evaluation, via
     sklearn.model_selection.permutation_test_score (the tool nilearn's own
     decoding docs recommend for exactly this fMRI-classification case).
@@ -1230,7 +1276,7 @@ def permutation_significance(training_data, training_labels, testing_data, testi
 
     rows = []
     for metric_name, scoring in (("accuracy", "accuracy"), ("roc_auc_ovr", _partial_roc_auc_ovr)):
-        pipe = build_classifier_pipeline(mode, param, classifier_name, classifier_params)
+        pipe = build_classifier_pipeline(mode, param, classifier_name, classifier_params, one_vs_rest=one_vs_rest)
         score, _, p_value = permutation_test_score(
             pipe, X, y, cv=cv, scoring=scoring,
             n_permutations=n_permutations, random_state=random_state, n_jobs=-1,

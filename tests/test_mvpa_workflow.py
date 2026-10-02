@@ -251,6 +251,27 @@ class TestRunKfold:
         # (per_run: fold N holds out run N)
         assert (cv_raw["fold"] == cv_raw["run"]).all()
 
+    def test_one_vs_rest_reaches_every_fold_classifier_and_permutation_test(self, tmp_path):
+        training_df, training_data, training_labels = _build_training_fold_data(n_features=30)
+        fold_groups = resolve_kfold_folds({"strategy": "per_run"}, training_df)
+
+        _, _, boldfile_to_pipe = run_kfold(
+            kfold_cv_cfg={"strategy": "per_run"},
+            fold_groups=fold_groups,
+            permutation_test_cfg={"n_permutations": 2, "random_state": 0},
+            masker=FakeMasker(),
+            impa_filename_tag="impa",
+            analysis_output_dir=str(tmp_path), model_descr="test_model", subject_id="01",
+            regressor_categories=["face", "place"],
+            feature_selection_cfg={"feat_p": 0.5}, classifier_name=CLASSIFIER_NAME,
+            classifier_params={"solver": "liblinear", "max_iter": 1000},
+            training_df=training_df, training_data=training_data, training_labels=training_labels,
+            one_vs_rest=True,
+        )
+
+        assert {type(p.named_steps["classifier"]).__name__ for p in boldfile_to_pipe.values()} == {"OneVsRestClassifier"}
+        assert (tmp_path / "test_model" / "01" / "model" / "01_fold1_permutation_test.csv").exists()
+
     def test_boldfile_to_pipe_groups_multi_run_folds_under_one_pipe(self, tmp_path):
         # group_kfold with n_splits=2 over 4 runs -- each fold holds out 2
         # runs at once, so their boldfiles should map to the SAME pipe object

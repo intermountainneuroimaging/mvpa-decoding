@@ -985,6 +985,18 @@ class TestLoadImagesAndMask:
 
         assert np.allclose(X_withlag, X_reference)
 
+    def test_detrend_defaults_to_true_with_no_warning(self, synthetic_bold_file, capsys):
+        df = _labeled_df(synthetic_bold_file, subject="load_test_detrend_default")
+        _, _, _, masker = load_images_and_mask(df, mask_pattern_template=None)
+        assert masker.detrend is True
+        assert "model.mask.detrend=false" not in capsys.readouterr().out
+
+    def test_detrend_false_disables_it_and_warns(self, synthetic_bold_file, capsys):
+        df = _labeled_df(synthetic_bold_file, subject="load_test_detrend_false")
+        _, _, _, masker = load_images_and_mask(df, mask_pattern_template=None, detrend=False)
+        assert masker.detrend is False
+        assert "model.mask.detrend=false" in capsys.readouterr().out
+
 
 # =====================================================
 # resolve_feature_selection_params / build_classifier_pipeline
@@ -1023,6 +1035,78 @@ class TestBuildClassifierPipeline:
         pipe = build_classifier_pipeline("k_best", 3, CLASSIFIER_NAME, CLASSIFIER_PARAMS)
         pipe.fit(X, y)
         assert int(pipe.named_steps["feature_selection"].get_support().sum()) == 3
+
+    def test_one_vs_rest_wraps_the_configured_classifier(self):
+        pipe = build_classifier_pipeline("fpr", 0.1, CLASSIFIER_NAME, CLASSIFIER_PARAMS, one_vs_rest=True)
+        clf = pipe.named_steps["classifier"]
+        assert type(clf).__name__ == "OneVsRestClassifier"
+        assert type(clf.estimator).__name__ == "LogisticRegression"
+        assert clf.estimator.get_params()["class_weight"] == "balanced"  # params reach the wrapped estimator
+
+    def test_one_vs_rest_is_off_by_default(self):
+        pipe = build_classifier_pipeline("fpr", 0.1, CLASSIFIER_NAME, CLASSIFIER_PARAMS)
+        assert type(pipe.named_steps["classifier"]).__name__ == "LogisticRegression"
+
+
+LIBLINEAR_PARAMS = {"C": 50, "solver": "liblinear", "max_iter": 10000, "class_weight": "balanced", "random_state": 6100}
+
+
+class TestOneVsRestClassification:
+    def test_liblinear_on_three_classes_fits_when_wrapped(self):
+        # the exact config combination that raises a ValueError on sklearn >= 1.8
+        # without the wrapper (liblinear can't do multiclass natively anymore)
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME,
+                                     classifier_params=LIBLINEAR_PARAMS, one_vs_rest=True)
+        assert list(pipe.named_steps["classifier"].classes_) == [1, 2, 3]
+        assert pipe.predict(X).shape == (len(y),)
+
+    def test_liblinear_on_three_classes_unwrapped_raises_with_config_hint(self):
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3)
+        with pytest.raises(ValueError, match="model.classifier.one_vs_rest"):
+            model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME,
+                                  classifier_params=LIBLINEAR_PARAMS)
+
+    def test_importance_map_stacks_per_class_weights_into_voxel_space(self):
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME,
+                                     classifier_params=LIBLINEAR_PARAMS, one_vs_rest=True)
+        impa = extract_importance_map(pipe, n_features=X.shape[1])
+        assert impa.shape == (3, X.shape[1])
+        selected = pipe.named_steps["feature_selection"].get_support()
+        estimators = pipe.named_steps["classifier"].estimators_
+        for class_row, est in enumerate(estimators):
+            np.testing.assert_allclose(impa[class_row, selected], est.coef_[0])
+            assert not impa[class_row, ~selected].any()  # unselected voxels stay zero
+
+    def test_binary_importance_map_mirrors_the_single_estimator(self):
+        # OneVsRestClassifier fits just one estimator for 2 classes -- the
+        # existing binary special case (row 1 = -row 0) must still hold
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=2)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME,
+                                     classifier_params=LIBLINEAR_PARAMS, one_vs_rest=True)
+        impa = extract_importance_map(pipe, n_features=X.shape[1])
+        assert impa.shape == (2, X.shape[1])
+        np.testing.assert_allclose(impa[0], -impa[1])
+
+    def test_performance_and_evidence_work_through_the_wrapper(self):
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME,
+                                     classifier_params=LIBLINEAR_PARAMS, one_vs_rest=True)
+        evidence = decision_evidence(pipe, X)
+        assert evidence.shape == (len(y), 3)
+        np.testing.assert_allclose(evidence.sum(axis=1), 1.0)
+        model_performance(pipe, X, y)  # smoke: no AttributeError on the wrapper
+
+    def test_permutation_significance_accepts_one_vs_rest(self):
+        X_train, y_train = _separable_data(n_per_class=8, n_features=30, n_classes=3, seed=5)
+        X_test, y_test = _separable_data(n_per_class=6, n_features=30, n_classes=3, seed=6)
+        result = permutation_significance(
+            X_train, y_train, X_test, y_test, n_permutations=3, random_state=0,
+            feature_selection_cfg={"feat_p": 0.5}, classifier_name=CLASSIFIER_NAME,
+            classifier_params=LIBLINEAR_PARAMS, one_vs_rest=True,
+        )
+        assert sorted(result["metric"].tolist()) == ["accuracy", "roc_auc_ovr"]
 
 
 # =====================================================
