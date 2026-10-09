@@ -40,6 +40,17 @@
 # --output/--error log paths above are still plain SBATCH directives (no
 # variable substitution happens in them), so they resolve relative to
 # wherever `sbatch` was invoked from regardless.
+#
+# OPTIONAL second argument (`$2`): the balanced training-trial list written by
+# 2b_sbatch_restrict_master_spreadsheet.sh (README.md section 3b), e.g.
+#   sbatch slurm/3_batch_run_mvpa_workflow.sh configs/my-study.json \
+#       /path/to/master_spreadsheet_trial_restriction.csv
+# Given, it is passed to mvpa_workflow.py as --trial-restriction (overriding
+# model_conditions.training.trial_restriction if the config also sets one) and
+# restricts training -- and so model.kfold_cv -- only. Omitted, the config's own
+# trial_restriction (if any) applies, else nothing is restricted. A subject the
+# restriction step excluded (no balanced set) fails its own task with a message;
+# the other array tasks are unaffected.
 
 set -e
 umask g+w
@@ -52,7 +63,7 @@ conda activate incenv
 
 CONFIG_FILE="$1"
 if [ -z "$CONFIG_FILE" ]; then
-    echo "Usage: sbatch $(basename "$0") <config.json>" >&2
+    echo "Usage: sbatch $(basename "$0") <config.json> [trial_restriction.csv]" >&2
     exit 1
 fi
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -60,6 +71,17 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 export CONFIG_FILE
+
+# optional balanced training-trial list (see header); empty -> flag omitted below
+TRIAL_RESTRICTION="$2"
+if [ -n "$TRIAL_RESTRICTION" ] && [ ! -f "$TRIAL_RESTRICTION" ]; then
+    echo "Trial restriction file not found: $TRIAL_RESTRICTION" >&2
+    exit 1
+fi
+TRIAL_RESTRICTION_ARGS=()
+if [ -n "$TRIAL_RESTRICTION" ]; then
+    TRIAL_RESTRICTION_ARGS=(--trial-restriction "$TRIAL_RESTRICTION")
+fi
 
 # pipeline.scripts_dir, read directly rather than relying on an exported
 # SCRIPTS_DIR or the job's working directory -- sbatch copies this script
@@ -89,7 +111,8 @@ subject=`ls -d $BIDS_HCP_ROOT/sub-* | rev | cut -d"/" -f1 | rev | cut -d"-" -f2 
 # gm operation (maintain/suppress/switch/clear) classifier
 # --------------------------------------------
 python "$SCRIPTS_DIR/workflows/mvpa_workflow.py" --subject $subject --config $CONFIG_FILE \
-    --master-spreadsheet $MASTER_SPREADSHEET --analysis-output-dir $OUTPUT_DIR
+    --master-spreadsheet $MASTER_SPREADSHEET --analysis-output-dir $OUTPUT_DIR \
+    "${TRIAL_RESTRICTION_ARGS[@]}"
 
 python "$SCRIPTS_DIR/workflows/generate_report.py" --analysis-output-dir $OUTPUT_DIR --config $CONFIG_FILE \
     --master-spreadsheet $MASTER_SPREADSHEET --subject $subject

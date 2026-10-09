@@ -364,3 +364,13 @@ class TestRunKfold:
                 feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME, classifier_params=CLASSIFIER_PARAMS,
                 training_df=training_df, training_data=training_data, training_labels=training_labels,
             )
+
+
+class TestTrialRestrictionFlag:
+    def test_flag_is_optional_and_parsed(self, monkeypatch):
+        from workflows.mvpa_workflow import parse_args
+        base = ["x", "--subject", "1", "--config", "c.json", "--master-spreadsheet", "m.csv", "--analysis-output-dir", "out"]
+        monkeypatch.setattr("sys.argv", base)
+        assert parse_args().trial_restriction is None
+        monkeypatch.setattr("sys.argv", base + ["--trial-restriction", "list.csv"])
+        assert parse_args().trial_restriction == "list.csv"

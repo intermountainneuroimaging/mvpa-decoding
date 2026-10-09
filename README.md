@@ -305,6 +305,24 @@ then, in the mvpa config:
 }
 ```
 
+On the cluster, `sbatch slurm/2b_sbatch_restrict_master_spreadsheet.sh
+configs/my-study.json configs/restriction.json` runs the step with the same
+module/conda setup as the other stages (the config supplies
+`pipeline.scripts_dir` and `pipeline.master_spreadsheet`); it is not part of
+`0_submit_mvpa_pipeline.sh`, so submit it yourself between stages 2 and 3.
+Then give stage 3 the list either way:
+
+```bash
+# (a) per run, no config edit: optional second argument of stage 3
+sbatch slurm/3_batch_run_mvpa_workflow.sh configs/my-study.json \
+    /path/to/master_spreadsheet_trial_restriction.csv
+# (b) or set model_conditions.training.trial_restriction in the config and submit as usual
+sbatch slurm/3_batch_run_mvpa_workflow.sh configs/my-study.json
+```
+
+(a) is passed to `mvpa_workflow.py` as `--trial-restriction` and overrides (b)
+if both are set. The same flag works when you run `mvpa_workflow.py` directly.
+
 Leave `trial_restriction` out and nothing changes. The workflow never looks
 for the file on its own, and it stops with a message if the file is missing,
 was built for a different `hemodynamic_lag`, no longer matches the events

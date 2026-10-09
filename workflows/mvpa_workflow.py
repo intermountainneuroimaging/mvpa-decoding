@@ -142,6 +142,13 @@ def parse_args():
         help="Path to master_spreadsheet.csv produced by generate_master_spreadsheet.py"
     )
 
+    parser.add_argument(
+        "--trial-restriction",
+        default=None,
+        help="Optional balanced training-trial list from restrict_master_spreadsheet.py; same as, and overrides, "
+             "model_conditions.training.trial_restriction in the config (README.md section 3b). Training only."
+    )
+
     return parser.parse_args()
 
 
@@ -485,7 +492,7 @@ def main(args):
     # optional: restrict TRAINING to the balanced trial list written by
     # restrict_master_spreadsheet.py (testing/timecourse are never restricted)
     trial_restriction = None
-    restriction_path = model_conditions["training"].get("trial_restriction")
+    restriction_path = args.trial_restriction or model_conditions["training"].get("trial_restriction")
     if restriction_path:
         try:
             trial_restriction = load_trial_restriction(restriction_path, hemodynamic_lag)
