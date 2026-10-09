@@ -39,6 +39,7 @@ from utils.mvpa_common import (
     timecourse_decoding,
     summarize_decoding,
     permutation_significance,
+    _partial_roc_auc_ovr,
     load_images_and_mask,
     impa_tag,
     extract_importance_map,
@@ -846,6 +847,51 @@ class TestDecisionEvidence:
         evi = decision_evidence(FakeProbaClf(), rawdata=None)
         np.testing.assert_array_equal(evi, [[0.1, 0.9]])
 
+    def test_sigmoid_mode_multiclass_is_independent_per_class_and_not_normalized(self):
+        evi = decision_evidence(FakeMulticlassClf(), rawdata=None, mode="sigmoid")
+        scores = FakeMulticlassClf().decision_function(None)
+        np.testing.assert_allclose(evi, 1 / (1 + np.exp(-scores)))
+        # three independent sigmoids -- generally NOT a distribution over classes
+        assert not np.allclose(evi.sum(axis=1), 1.0)
+        assert evi[0, 0] == pytest.approx(1 / (1 + np.exp(-3.0)))
+
+    def test_sigmoid_mode_ignores_predict_proba_even_when_available(self):
+        class ProbaAndScoresClf:
+            classes_ = np.array([1, 2, 3])
+            def predict_proba(self, X):
+                return np.array([[0.2, 0.3, 0.5]])
+            def decision_function(self, X):
+                return np.array([[0.0, 0.0, 0.0]])
+        evi = decision_evidence(ProbaAndScoresClf(), rawdata=None, mode="sigmoid")
+        np.testing.assert_allclose(evi, [[0.5, 0.5, 0.5]])
+
+    def test_sigmoid_mode_binary_matches_probability_mode(self):
+        sig = decision_evidence(FakeBinaryClf(), rawdata=None, mode="sigmoid")
+        prob = decision_evidence(FakeBinaryClf(), rawdata=None, mode="probability")
+        np.testing.assert_allclose(sig, prob)
+        np.testing.assert_allclose(sig.sum(axis=1), 1.0)
+
+    def test_default_mode_is_probability(self):
+        np.testing.assert_array_equal(
+            decision_evidence(FakeMulticlassClf(), rawdata=None),
+            decision_evidence(FakeMulticlassClf(), rawdata=None, mode="probability"),
+        )
+
+    def test_unknown_mode_raises(self):
+        with pytest.raises(ValueError, match="unknown evidence mode"):
+            decision_evidence(FakeMulticlassClf(), rawdata=None, mode="softmax")
+
+    def test_sigmoid_mode_on_a_real_one_vs_rest_fit_is_the_per_class_estimators_own_sigmoid(self):
+        # "one-vs-rest sigmoid evidence" taken literally: class j's evidence is
+        # the sigmoid of the j-th binary estimator's own decision score
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME,
+                                     classifier_params={"solver": "liblinear", "max_iter": 1000}, one_vs_rest=True)
+        evi = decision_evidence(pipe, X, mode="sigmoid")
+        X_sel = pipe.named_steps["feature_selection"].transform(X)
+        for j, est in enumerate(pipe.named_steps["classifier"].estimators_):
+            np.testing.assert_allclose(evi[:, j], 1 / (1 + np.exp(-est.decision_function(X_sel))))
+
 
 # =====================================================
 # save_model_results
@@ -1175,6 +1221,85 @@ class TestModelClassificationAndPerformance:
         assert xout["whole_voxels"] == 10
         assert xout["selected_voxels"] == 4
         assert xout["feature_percent"] == pytest.approx(40.0)
+
+
+# =====================================================
+# evidence_mode threading -- one definition across every output
+# =====================================================
+
+class TestEvidenceModeThreading:
+    """The same evidence_mode must reach every consumer of decision_evidence --
+    the confusion-style evidence matrix, the per-fold cv raw table, the
+    timecourse raw table, and the permutation test's AUC scorer -- so
+    "evidence" never means two different things across outputs."""
+
+    CATEGORIES = ["a", "b", "c"]
+
+    def _fit(self):
+        X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3, seed=3)
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME,
+                                     classifier_params=LIBLINEAR_PARAMS, one_vs_rest=True)
+        return pipe, X, y
+
+    def _expected(self, pipe, X, mode):
+        return decision_evidence(pipe, X, mode)
+
+    def test_model_performance_evidence_matrix_follows_mode(self):
+        pipe, X, y = self._fit()
+        prob, _ = model_performance(pipe, X, y)  # default
+        sig, _ = model_performance(pipe, X, y, evidence_mode="sigmoid")
+        np.testing.assert_allclose(prob["evidence"].sum(axis=1), 1.0)  # normalized distribution
+        assert not np.allclose(sig["evidence"].sum(axis=1), 1.0)       # independent sigmoids
+        # row i, col j = mean evidence for class j across class-i's own rows
+        expected = self._expected(pipe, X, "sigmoid")
+        for i, cls in enumerate(pipe.named_steps["classifier"].classes_):
+            np.testing.assert_allclose(sig["evidence"][i], expected[y == cls].mean(axis=0))
+
+    def test_build_cv_raw_results_follows_mode(self):
+        pipe, X, y = self._fit()
+        held_out_df = pd.DataFrame({"run": [1] * len(y), "boldfile": ["run-1.nii.gz"] * len(y)})
+        kwargs = dict(held_out_df=held_out_df, regressor_categories=self.CATEGORIES,
+                      feature_selection_cfg={"feat_p": 0.05}, model_descr="m", fold_id=1)
+        raw_sig = build_cv_raw_results(pipe, X, y, evidence_mode="sigmoid", **kwargs)
+        raw_prob = build_cv_raw_results(pipe, X, y, **kwargs)
+        cols = [f"evidence_{c}" for c in self.CATEGORIES]
+        np.testing.assert_allclose(raw_sig[cols].to_numpy(), self._expected(pipe, X, "sigmoid"))
+        np.testing.assert_allclose(raw_prob[cols].to_numpy(), self._expected(pipe, X, "probability"))
+        # predictions never depend on the evidence definition
+        assert raw_sig["predicted_label"].tolist() == raw_prob["predicted_label"].tolist()
+
+    def test_timecourse_decoding_follows_mode(self):
+        pipe, X, y = self._fit()
+        timecourse_df = pd.DataFrame({
+            "subject": ["01"] * len(y),
+            "window_index": list(range(len(y))),
+            "regressor_label": [self.CATEGORIES[c - 1] for c in y],
+        })
+        kwargs = dict(timecourse_df=timecourse_df, regressor_categories=self.CATEGORIES,
+                      feature_selection_cfg={"feat_p": 0.05}, subject_id="01", model_descr="m")
+        raw_sig, _ = timecourse_decoding(pipe, X, y, evidence_mode="sigmoid", **kwargs)
+        raw_prob, _ = timecourse_decoding(pipe, X, y, **kwargs)
+        cols = [f"evidence_{c}" for c in self.CATEGORIES]
+        np.testing.assert_allclose(raw_sig[cols].to_numpy(), self._expected(pipe, X, "sigmoid"))
+        np.testing.assert_allclose(raw_prob[cols].to_numpy(), self._expected(pipe, X, "probability"))
+
+    def test_permutation_auc_scorer_uses_the_same_evidence_definition(self):
+        # the permutation test's "real" AUC must be built from the same evidence
+        # model_performance's own AUC uses, or the two would silently disagree
+        pipe, X, y = self._fit()
+        for mode in ("probability", "sigmoid"):
+            real_auc = float(np.nanmean(model_performance(pipe, X, y, evidence_mode=mode)[0]["auc"]))
+            assert _partial_roc_auc_ovr(pipe, X, y, evidence_mode=mode) == pytest.approx(real_auc)
+
+    def test_permutation_significance_accepts_sigmoid_mode(self):
+        X_train, y_train = _separable_data(n_per_class=8, n_features=30, n_classes=3, seed=5)
+        X_test, y_test = _separable_data(n_per_class=6, n_features=30, n_classes=3, seed=6)
+        result = permutation_significance(
+            X_train, y_train, X_test, y_test, n_permutations=3, random_state=0,
+            feature_selection_cfg={"feat_p": 0.5}, classifier_name=CLASSIFIER_NAME,
+            classifier_params=LIBLINEAR_PARAMS, one_vs_rest=True, evidence_mode="sigmoid",
+        )
+        assert sorted(result["metric"].tolist()) == ["accuracy", "roc_auc_ovr"]
 
 
 # =====================================================

@@ -102,7 +102,7 @@ from utils.mvpa_common import (
     build_trial_pivot_table, quick_safe, label_conditions_with_lag, label_rows_optional,
     track_runtime, load_config, apply_regressor_codes,
     load_images_and_mask, build_timecourse_instructions, resolve_timecourse_conditions,
-    model_classification, model_performance, permutation_significance,
+    model_classification, model_performance, permutation_significance, EVIDENCE_MODES,
     timecourse_decoding, save_model_results, average_fold_results, impa_tag,
     build_cv_raw_results, parse_bids_entities,
 )
@@ -255,7 +255,8 @@ def _acquisition_name(boldfile: str) -> str:
 def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_filename_tag,
               analysis_output_dir, model_descr, subject_id, regressor_categories,
               feature_selection_cfg, classifier_name, classifier_params,
-              training_df, training_data, training_labels, one_vs_rest=False):
+              training_df, training_data, training_labels, one_vs_rest=False,
+              evidence_mode="probability"):
     """Repeatedly hold out a group of runs from model_conditions.training: train on
     the rest, evaluate on the held-out group, then aggregate. Per-fold outputs are
     also saved -- for transparency, and so generate_report.py can detect and
@@ -308,7 +309,7 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
 
         xclf = model_classification(fold_train_data, fold_train_labels, feature_selection_cfg, classifier_name, classifier_params,
                                     one_vs_rest=one_vs_rest)
-        xout, impa = model_performance(xclf, fold_test_data, fold_test_labels)
+        xout, impa = model_performance(xclf, fold_test_data, fold_test_labels, evidence_mode)
 
         # per-held-out-sample detail (task/trial_type/run/boldfile plus
         # predicted_label/correct/evidence) -- documents exactly which run
@@ -317,7 +318,7 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
         held_out_df = training_df.loc[test_mask]
         cv_raw_frames.append(build_cv_raw_results(
             xclf, fold_test_data, fold_test_labels, held_out_df, regressor_categories,
-            feature_selection_cfg, model_descr, fold_id,
+            feature_selection_cfg, model_descr, fold_id, evidence_mode=evidence_mode,
         ))
 
         # keyed by boldfile (not run number) -- two different tasks can reuse
@@ -348,7 +349,7 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
             fold_permutation_results = permutation_significance(
                 fold_train_data, fold_train_labels, fold_test_data, fold_test_labels,
                 n_permutations, random_state, feature_selection_cfg, classifier_name, classifier_params,
-                one_vs_rest=one_vs_rest,
+                one_vs_rest=one_vs_rest, evidence_mode=evidence_mode,
             )
             fold_permutation_file = os.path.join(
                 analysis_output_dir, model_descr, subject_id, "model",
@@ -428,6 +429,15 @@ def main(args):
     classifier_name = model_cfg["classifier"]["name"]
     classifier_params = model_cfg["classifier"]["params"]
     classifier_one_vs_rest = model_cfg["classifier"].get("one_vs_rest", False)
+    evidence_mode = model_cfg["classifier"].get("evidence", "probability")
+    if evidence_mode not in EVIDENCE_MODES:
+        raise SystemExit(f"model.classifier.evidence={evidence_mode!r} is not recognized -- "
+                         f"expected one of {list(EVIDENCE_MODES)}")
+    if evidence_mode == "sigmoid" and not classifier_one_vs_rest:
+        print("  (!) model.classifier.evidence='sigmoid' without model.classifier.one_vs_rest=true -- "
+              "the decision scores being sigmoid-transformed are not independent one-vs-rest scores "
+              "(a multinomial model's scores are softmax logits), so 'evidence' will not mean "
+              "'one-vs-rest sigmoid evidence'. Set one_vs_rest=true for that definition.")
     permutation_test_cfg = model_cfg.get("permutation_test")
 
     # optional escape hatch for the double-dipping guard below -- see
@@ -654,6 +664,7 @@ def main(args):
             analysis_output_dir, model_descr, subject_id, regressor_categories,
             feature_selection_cfg, classifier_name, classifier_params,
             training_df, training_data, training_labels, one_vs_rest=classifier_one_vs_rest,
+            evidence_mode=evidence_mode,
         )
 
         output_pattern = os.path.join(analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}" + "_model_results_{metric}.csv")
@@ -682,7 +693,7 @@ def main(args):
 
     if testing_df is not None and run_test_evaluation:
         print("Evaluating full-training classifier against model_conditions.testing...")
-        xout, importance_map = model_performance(xclf_full, testing_data, testing_labels)
+        xout, importance_map = model_performance(xclf_full, testing_data, testing_labels, evidence_mode)
 
         output_pattern = os.path.join(analysis_output_dir, model_descr, subject_id, "test", f"{subject_id}" + "_model_results_{metric}.csv")
         save_model_results(output_pattern, xout, regressor_categories)
@@ -698,6 +709,7 @@ def main(args):
             permutation_results = permutation_significance(
                 training_data, training_labels, testing_data, testing_labels, n_permutations, random_state,
                 feature_selection_cfg, classifier_name, classifier_params, one_vs_rest=classifier_one_vs_rest,
+                evidence_mode=evidence_mode,
             )
             permutation_file = os.path.join(
                 analysis_output_dir, model_descr, subject_id, "test", f"{subject_id}_permutation_test.csv"
@@ -715,6 +727,7 @@ def main(args):
             xclf_full, timecourse_data, timecourse_labels, timecourse_instr, regressor_categories,
             feature_selection_cfg, subject_id, model_descr,
             boldfile_to_pipe=kfold_boldfile_to_pipe if use_kfold_for_timecourse else None,
+            evidence_mode=evidence_mode,
         )
 
         output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "decoding", f"{subject_id}" + "_decoding_results.csv")

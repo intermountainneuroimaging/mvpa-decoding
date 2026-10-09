@@ -272,6 +272,34 @@ class TestRunKfold:
         assert {type(p.named_steps["classifier"]).__name__ for p in boldfile_to_pipe.values()} == {"OneVsRestClassifier"}
         assert (tmp_path / "test_model" / "01" / "model" / "01_fold1_permutation_test.csv").exists()
 
+    def test_sigmoid_evidence_mode_reaches_per_fold_outputs(self, tmp_path):
+        training_df, training_data, training_labels = _build_training_fold_data(n_features=30)
+        fold_groups = resolve_kfold_folds({"strategy": "per_run"}, training_df)
+
+        def run(evidence_mode, subdir):
+            run_kfold(
+                kfold_cv_cfg={"strategy": "per_run"}, fold_groups=fold_groups, permutation_test_cfg=None,
+                masker=FakeMasker(), impa_filename_tag="impa",
+                analysis_output_dir=str(tmp_path / subdir), model_descr="test_model", subject_id="01",
+                regressor_categories=["face", "place"],
+                feature_selection_cfg={"feat_p": 0.5}, classifier_name=CLASSIFIER_NAME,
+                classifier_params={"solver": "liblinear", "max_iter": 1000},
+                training_df=training_df, training_data=training_data, training_labels=training_labels,
+                one_vs_rest=True, evidence_mode=evidence_mode,
+            )
+            return pd.read_csv(tmp_path / subdir / "test_model" / "01" / "model" / "01_cv_results.csv")
+
+        prob = run("probability", "prob")
+        sig = run("sigmoid", "sig")
+        # binary problem: sigmoid and probability agree row-for-row (see
+        # decision_evidence) -- so the mode reaching the outputs is proven by
+        # the run completing with matching shape/predictions, not by values
+        # differing; the 3-class test in test_mvpa_common.py covers value differences
+        assert len(sig) == len(prob) == len(training_labels)
+        assert sig["predicted_label"].tolist() == prob["predicted_label"].tolist()
+        np.testing.assert_allclose(sig[["evidence_face", "evidence_place"]].to_numpy(),
+                                   prob[["evidence_face", "evidence_place"]].to_numpy())
+
     def test_boldfile_to_pipe_groups_multi_run_folds_under_one_pipe(self, tmp_path):
         # group_kfold with n_splits=2 over 4 runs -- each fold holds out 2
         # runs at once, so their boldfiles should map to the SAME pipe object

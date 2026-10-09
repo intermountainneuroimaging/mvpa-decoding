@@ -689,6 +689,7 @@ about *which rows* to use (that's `model_conditions`'s job):
 | `featureSelection.n_voxels` | *(optional)* Select exactly this many voxels by ANOVA F-score instead, regardless of significance (sklearn's `SelectKBest` equivalent) -- takes priority over `feat_p` when both are present. Useful for keeping feature count fixed across subjects/folds whose signal strength (and thus a p-value threshold's actual voxel count) varies. `model_results_metadata.csv` still records whichever mode was actually used: `selected_voxels` (identical to `n_voxels` here) is populated either way. |
 | `classifier` | Any importable scikit-learn-style estimator: `name` is a dotted import path, `params` are passed straight through as kwargs. |
 | `classifier.one_vs_rest` | *(optional, default `false`)* Wrap the estimator in sklearn's `OneVsRestClassifier` (one independent binary classifier per class). Required for `LogisticRegression` with `solver: "liblinear"` on 3+ classes -- scikit-learn >= 1.8 raises a `ValueError` for that combination unless wrapped (earlier versions applied one-vs-rest silently, 1.7.x with a deprecation warning). Sits next to `name`/`params`, not inside `params`. Importance maps and evidence work unchanged: weights are stacked from the per-class estimators, and evidence comes from the wrapper's `predict_proba` (per-class scores normalized to sum to 1 across classes). |
+| `classifier.evidence` | *(optional, default `"probability"`)* How the per-class "evidence" in every output is computed -- one definition, applied identically to the held-out/k-fold evidence matrices, `cv_results.csv`, the timecourse `decoding_results.csv`, the permutation test's AUC, and therefore every report plot. `"probability"` (default): the classifier's normalized class probabilities (`predict_proba`, rows sum to 1). `"sigmoid"`: an independent sigmoid of each class's one-vs-rest decision score, `1 / (1 + exp(-score))` -- not normalized across classes (rows generally don't sum to 1) and not a calibrated probability. The sigmoid is only literally a *one-vs-rest* score when the model is fit one-vs-rest (`classifier.one_vs_rest: true`); with a multinomial model the scores being transformed are softmax logits, and a warning is printed. Predictions/accuracy never depend on this setting -- only the evidence values (and the AUCs built from them) change. Sits next to `name`/`params`. |
 | `kfold_cv` | *(optional)* Cross-validates entirely within `model_conditions.training` -- see below. Omitting it entirely skips k-fold cross-validation: no `model/` output at all, no extra runtime for that step. |
 
 Omit either of `featureSelection`/`classifier` and it falls back to a
@@ -905,9 +906,10 @@ same classifier config -- `model/{subject}_fold{N}_model_results_metadata.csv`
 for a kfold fold, `test/{subject}_model_results_metadata.csv` for the
 independent test set). `roc_auc_ovr`'s `real_score` will be *close to* the
 mean of the corresponding `model_results_auc.csv`'s per-category values --
-both are one-vs-rest AUC built from the same normalized-probability evidence
-(`decision_evidence`: `predict_proba()`/softmax, rows sum to 1 -- not an
-independent per-class sigmoid), so they should agree closely; sklearn's
+both are one-vs-rest AUC built from the same evidence
+(`decision_evidence`: by default `predict_proba()`/softmax, rows sum to 1;
+an independent per-class sigmoid instead if `classifier.evidence` is
+`"sigmoid"` -- either way the same definition for both), so they should agree closely; sklearn's
 scorer averages the OvR AUCs itself while `model_results_auc.csv` reports
 them per category, so don't expect bit-identical numbers, just closely
 matching ones. `p_value` is the fraction of permuted-label refits that
@@ -1231,11 +1233,12 @@ files for any subject in scope, and a multi-subject report averages each
 family's matrices across subjects first. Every populated cell is labeled
 with its value to 2 decimal places, colored light-on-dark or dark-on-light
 depending on the cell's own intensity so the numbers stay legible against
-the `viridis` colormap underneath. Both matrices' rows sum to 1 (a genuine
-distribution over categories per true condition): Accuracy is the fraction
-of that condition's trials predicted as each category; Evidence is the mean
-`decision_evidence()` (normalized `predict_proba()`/softmax, not an
-independent per-class sigmoid) across those same trials.
+the `viridis` colormap underneath. Accuracy's rows sum to 1 (the fraction of
+that condition's trials predicted as each category); Evidence is the mean
+`decision_evidence()` across those same trials -- by default normalized
+`predict_proba()`/softmax, so its rows sum to 1 too, but with
+`classifier.evidence: "sigmoid"` they are independent per-class sigmoids and
+generally don't.
 
 **Importance maps are averaged across subjects only when they share a
 common grid.** A subject can have two independent importance-map families:

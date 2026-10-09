@@ -9,6 +9,7 @@ step) -- also used directly by generate_master_spreadsheet.py and
 validate_model_config.py.
 """
 
+import functools
 import importlib
 import json
 import math
@@ -28,6 +29,7 @@ try:
 except Exception:
     from nilearn.input_data import NiftiMasker
 
+from scipy.special import expit
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import f_classif, GenericUnivariateSelect
 from sklearn.metrics import accuracy_score, roc_auc_score
@@ -685,7 +687,37 @@ def balance(xdf: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def decision_evidence(clf, rawdata):
+EVIDENCE_MODES = ("probability", "sigmoid")
+
+
+def decision_evidence(clf, rawdata, mode: str = "probability"):
+    """Per-class "evidence" for each row of rawdata, shape (n_rows, n_classes),
+    columns in clf.classes_ order. Every output table/plot in the pipeline
+    derives its evidence from this one function, so "evidence" means the same
+    thing everywhere.
+
+    mode="probability" (default): the classifier's own normalized class
+    probabilities (predict_proba, or a softmax/sigmoid fallback) -- rows sum
+    to 1.
+
+    mode="sigmoid": an independent sigmoid of each class's one-vs-rest
+    decision score, 1 / (1 + exp(-score_j)) -- NOT normalized across classes
+    (rows generally don't sum to 1) and not a calibrated probability. The
+    "one-vs-rest" part is only literally true when the classifier was fit
+    one-vs-rest (model.classifier.one_vs_rest, or a natively one-vs-rest
+    estimator): a multinomial model's decision_function scores are softmax
+    logits, so sigmoid-ing them is a different quantity. Binary problems
+    return [sigmoid(-score), sigmoid(score)], identical to "probability" for
+    logistic regression."""
+    if mode not in EVIDENCE_MODES:
+        raise ValueError(f"unknown evidence mode {mode!r} -- expected one of {EVIDENCE_MODES}")
+
+    if mode == "sigmoid":
+        scores = np.asarray(clf.decision_function(rawdata))
+        if scores.ndim == 1:  # binary: one score, for classes_[1]; classes_[0]'s is its negation
+            scores = np.column_stack([-scores, scores])
+        return expit(scores)
+
     if hasattr(clf, "predict_proba"):
         return clf.predict_proba(rawdata)
 
@@ -1102,7 +1134,7 @@ def extract_importance_map(pipe, n_features: int) -> np.ndarray:
     return impa_full
 
 
-def model_performance(pipe, testing_data, testing_labels):
+def model_performance(pipe, testing_data, testing_labels, evidence_mode: str = "probability"):
 
     print("Testing model performance...")
 
@@ -1126,11 +1158,11 @@ def model_performance(pipe, testing_data, testing_labels):
 
     impa_full = extract_importance_map(pipe, n_features)
 
-    # evidence: same normalized-probability definition timecourse_decoding()
-    # uses (softmax/predict_proba, rows sum to 1) -- not an independent
-    # per-class sigmoid, which would let "evidence" mean two different things
-    # depending on which report page you're looking at
-    xevi = decision_evidence(pipe, testing_data)
+    # evidence: the same definition timecourse_decoding() and
+    # build_cv_raw_results() use (see decision_evidence, evidence_mode), so
+    # "evidence" never means two different things depending on which report
+    # page you're looking at
+    xevi = decision_evidence(pipe, testing_data, evidence_mode)
 
     # normalized confusion matrix, and evidence matrix
     acc_mx = np.zeros((n_class, n_class))
@@ -1182,7 +1214,8 @@ def model_performance(pipe, testing_data, testing_labels):
 
 
 def build_cv_raw_results(pipe, data, labels, held_out_df: pd.DataFrame, regressor_categories: list,
-                          feature_selection_cfg: dict, model_descr: str, fold_id: int) -> pd.DataFrame:
+                          feature_selection_cfg: dict, model_descr: str, fold_id: int,
+                          evidence_mode: str = "probability") -> pd.DataFrame:
     """One row per held-out sample in a single cross-validation fold -- same
     raw-table style as timecourse_decoding()'s output (predicted_label,
     correct, evidence_<category>, feature-selection footprint), just without
@@ -1194,7 +1227,7 @@ def build_cv_raw_results(pipe, data, labels, held_out_df: pd.DataFrame, regresso
     concatenates this across every fold into a per-subject cross-validation
     raw results table (model/<subject>_cv_results.csv)."""
     predictions = pipe.predict(data)
-    evidence = decision_evidence(pipe, data)
+    evidence = decision_evidence(pipe, data, evidence_mode)
     n_sel = int(pipe.named_steps["feature_selection"].get_support().sum())
     n_features = data.shape[1]
     code_to_label = {i + 1: cat for i, cat in enumerate(regressor_categories)}
@@ -1216,7 +1249,7 @@ def build_cv_raw_results(pipe, data, labels, held_out_df: pd.DataFrame, regresso
     return raw[other_cols + evidence_cols]
 
 
-def _partial_roc_auc_ovr(estimator, X, y):
+def _partial_roc_auc_ovr(estimator, X, y, evidence_mode: str = "probability"):
     """One-vs-rest macro-average AUC, tolerant of a y that doesn't contain
     every class the estimator was fit on -- e.g. model_conditions.testing
     deliberately querying fewer categories than model_conditions.training
@@ -1228,7 +1261,7 @@ def _partial_roc_auc_ovr(estimator, X, y):
     count to equal the estimator's fitted class count, which this fixed
     train/test partition can never satisfy when testing is a strict subset
     of training's categories."""
-    proba = estimator.predict_proba(X)
+    proba = decision_evidence(estimator, X, evidence_mode)
     aucs = []
     for j, cls in enumerate(estimator.classes_):
         yj = (y == cls).astype(int)
@@ -1240,7 +1273,7 @@ def _partial_roc_auc_ovr(estimator, X, y):
 
 def permutation_significance(training_data, training_labels, testing_data, testing_labels, n_permutations, random_state,
                               feature_selection_cfg: dict, classifier_name: str, classifier_params: dict,
-                              one_vs_rest: bool = False):
+                              one_vs_rest: bool = False, evidence_mode: str = "probability"):
     """Real-vs-null significance for the held-out test evaluation, via
     sklearn.model_selection.permutation_test_score (the tool nilearn's own
     decoding docs recommend for exactly this fMRI-classification case).
@@ -1275,7 +1308,8 @@ def permutation_significance(training_data, training_labels, testing_data, testi
     mode, param = resolve_feature_selection_params(training_data, training_labels, feature_selection_cfg)
 
     rows = []
-    for metric_name, scoring in (("accuracy", "accuracy"), ("roc_auc_ovr", _partial_roc_auc_ovr)):
+    auc_scorer = functools.partial(_partial_roc_auc_ovr, evidence_mode=evidence_mode)
+    for metric_name, scoring in (("accuracy", "accuracy"), ("roc_auc_ovr", auc_scorer)):
         pipe = build_classifier_pipeline(mode, param, classifier_name, classifier_params, one_vs_rest=one_vs_rest)
         score, _, p_value = permutation_test_score(
             pipe, X, y, cv=cv, scoring=scoring,
@@ -1298,7 +1332,7 @@ TIMECOURSE_GROUPING = ["window_index", "regressor_label"]
 
 def timecourse_decoding(pipe, timecourse_data, timecourse_labels, timecourse_df, regressor_categories,
                          feature_selection_cfg: dict, subject_id: str, model_descr: str,
-                         boldfile_to_pipe: dict = None):
+                         boldfile_to_pipe: dict = None, evidence_mode: str = "probability"):
     """Predict the trained classifier on every already-recomputed timecourse-decoding
     volume. Returns (raw, summary):
       - raw: one row per volume actually decoded, with its own prediction and
@@ -1341,7 +1375,7 @@ def timecourse_decoding(pipe, timecourse_data, timecourse_labels, timecourse_df,
         idx = np.array([i for i, p in enumerate(pipe_for_row) if p is this_pipe])
         sub_data = timecourse_data[idx]
         predictions[idx] = this_pipe.predict(sub_data)
-        evidence[idx, :] = decision_evidence(this_pipe, sub_data)
+        evidence[idx, :] = decision_evidence(this_pipe, sub_data, evidence_mode)
         n_sel = int(this_pipe.named_steps["feature_selection"].get_support().sum())
         selected_voxels[idx] = n_sel
         whole_voxels[idx] = sub_data.shape[1]
