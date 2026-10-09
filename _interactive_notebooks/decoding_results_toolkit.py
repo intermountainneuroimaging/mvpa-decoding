@@ -580,9 +580,119 @@ def annotate_significance(ax, bin_stats: pd.DataFrame, alpha: float = 0.05, colo
     ax.set_ylim(ymin, star_y + 0.08 * span)
 
 
+def draw_significance_table(ax, rows, alpha: float = 0.05, p_col: str = "p_fdr", tr_seconds: float = 1.0,
+                            tr_start_col: str = "tr_start", tr_end_col: str = "tr_end",
+                            sig_color: str = "0.55", ns_color: str = "0.93", legend_label: str = None,
+                            label_fontsize: float = 8, window_numbers: bool = True):
+    """A graphic table of which time windows differ significantly, in the style
+    of a trajectory figure's footer: one row per comparison, one column per
+    stat window, a dark cell where the window is significant and a light one
+    where it is not.
+
+    `ax` is a dedicated axes meant to sit directly under a time-series plot
+    and share its x-axis (sharex=True): columns are drawn at their real time
+    positions, from tr_start * tr_seconds to (tr_end + 1) * tr_seconds, so each
+    cell lines up with the stretch of the plot it describes (tr_start/tr_end
+    are inclusive 0-indexed TR numbers, i.e. bin_by_size(..., tr_offset=0)).
+
+    `rows` is a list, top to bottom, of {"parts": [(text, color), ...],
+    "stats": DataFrame} -- `parts` is the row label as colored pieces (e.g.
+    [("Switch", "blue"), (" vs. ", "black"), ("Suppress", "red")]) and `stats`
+    has tr_start_col, tr_end_col and p_col, one row per window. A window with
+    a missing p is left blank. Windows are numbered 1..N under the first row's
+    columns. The axes is stripped of ticks and spines."""
+    from matplotlib.offsetbox import AnchoredOffsetbox, HPacker, TextArea
+    from matplotlib.patches import Patch, Rectangle
+
+    n = len(rows)
+    ax.set_ylim(0, n)
+    ax.set_yticks([])
+    ax.tick_params(bottom=False, labelbottom=False)
+    for side in ("top", "right", "left", "bottom"):
+        ax.spines[side].set_visible(False)
+
+    for i, row in enumerate(rows):
+        y0 = n - 1 - i
+        for _, w in row["stats"].iterrows():
+            p = w[p_col]
+            if pd.isna(p):
+                continue
+            x0 = w[tr_start_col] * tr_seconds
+            width = (w[tr_end_col] + 1 - w[tr_start_col]) * tr_seconds
+            ax.add_patch(Rectangle((x0, y0), width, 1, facecolor=sig_color if p < alpha else ns_color,
+                                   edgecolor="white", linewidth=1.5))
+        pieces = [TextArea(text, textprops=dict(color=color, fontsize=label_fontsize,
+                                                fontweight="normal" if color == "black" else "bold"))
+                  for text, color in row["parts"]]
+        box = AnchoredOffsetbox(loc="center right", child=HPacker(children=pieces, align="baseline", pad=0, sep=0),
+                                bbox_to_anchor=(-0.01, y0 + 0.5), bbox_transform=ax.get_yaxis_transform(),
+                                frameon=False, borderpad=0, pad=0)
+        ax.add_artist(box)
+
+    if window_numbers and rows and not rows[0]["stats"].empty:
+        # numbered from the first row's windows (every row of one table shares the same windows)
+        for k, (_, w) in enumerate(rows[0]["stats"].sort_values(tr_start_col).iterrows()):
+            xc = (w[tr_start_col] + w[tr_end_col] + 1) / 2 * tr_seconds
+            ax.text(xc, -0.12, str(k + 1), ha="center", va="top", fontsize=7, color="gray", clip_on=False)
+
+    label = legend_label or f"{p_col} < {alpha}"
+    ax.legend(handles=[Patch(facecolor=sig_color, label=label), Patch(facecolor=ns_color, label="n.s.")],
+              loc="upper center", bbox_to_anchor=(0.5, -0.22 if window_numbers else -0.05), ncol=2, frameon=False,
+              fontsize=8, handlelength=1.2)
+
+
+def first_significant_bin(bin_stats: pd.DataFrame, alpha: float = 0.05, p_col: str = "p_value",
+                          value_col: str = "mean_diff", direction: str = None, bin_col: str = "bin"):
+    """The earliest row of `bin_stats` (by bin_col) with p_col < alpha -- and,
+    when direction is "negative" / "positive", value_col below / above zero --
+    or None if no bin qualifies."""
+    if direction not in (None, "negative", "positive"):
+        raise ValueError(f"direction must be None, 'negative' or 'positive', got {direction!r}")
+    sig = bin_stats[bin_stats[p_col] < alpha]
+    if direction == "negative":
+        sig = sig[sig[value_col] < 0]
+    elif direction == "positive":
+        sig = sig[sig[value_col] > 0]
+    if sig.empty:
+        return None
+    return sig.sort_values(bin_col).iloc[0]
+
+
+def mark_onsets_in_rows(ax, onsets, marker: str = "v", size: float = 70, row_step: float = 0.055,
+                        label: str = None):
+    """One marker per row in a strip at the bottom of the axes, so markers for
+    different conditions can never overlap, whatever their x positions.
+
+    `onsets` is a list of (x, color) in the order the rows should appear, top
+    to bottom; x is None for a condition with nothing to mark (its row is
+    left empty, so every condition keeps the same row on every plot). Rows
+    are placed in axes-fraction coordinates (x stays in data units) and the
+    y-axis is extended downward so the strip is clear of the plotted data.
+    `label`, if given, is written small at the left of the strip."""
+    n = len(onsets)
+    if n == 0:
+        return
+    strip_top = 0.03 + n * row_step          # strip spans axes fractions [0, strip_top]
+    ymin, ymax = ax.get_ylim()
+    # new_ymin chosen so the old ymin sits at strip_top (a fraction of the NEW axis height)
+    ax.set_ylim(ymin - strip_top / (1 - strip_top) * (ymax - ymin), ymax)
+    trans = ax.get_xaxis_transform()         # x: data, y: axes fraction
+    for k, (x, color) in enumerate(onsets):
+        if x is None:
+            continue
+        y = 0.03 + (n - 1 - k + 0.5) * row_step
+        ax.scatter([x], [y], marker=marker, s=size, color=color, edgecolor="black", linewidth=0.5,
+                   zorder=5, transform=trans, clip_on=False)
+    ax.axhline(ymin, color="lightgray", linewidth=0.6, zorder=0)   # where the data area ends
+    if label:
+        ax.text(0.005, strip_top - 0.004, label, transform=ax.transAxes, fontsize=7, color="gray",
+                va="top", ha="left")
+
+
 def mark_significance_onset(ax, bin_stats: pd.DataFrame, value_col: str = "mean_diff", alpha: float = 0.05,
                              color: str = "black", marker: str = "v", size: float = 100,
-                             p_col: str = "p_value", bin_col: str = "bin", tr_start_col: str = "tr_start"):
+                             p_col: str = "p_value", bin_col: str = "bin", tr_start_col: str = "tr_start",
+                             direction: str = None, first_only: bool = False):
     """Marks the *onset* of each contiguous run of significant bins (p_col <
     alpha, consecutive `bin_col` values) with a downward-pointing triangle,
     directly on the line itself -- at that bin's own tr_start_col position
@@ -593,11 +703,29 @@ def mark_significance_onset(ax, bin_stats: pd.DataFrame, value_col: str = "mean_
     baseline-subtraction plot) where "when does this line begin to
     significantly differ" matters more than a full summary of every
     significant window; a significant run that stops and later resumes
-    gets one marker per resumption, not one continuous span."""
-    sig = bin_stats[bin_stats[p_col] < alpha].sort_values(bin_col)
+    gets one marker per resumption, not one continuous span.
+
+    direction=None (default) counts any significant bin; "negative" /
+    "positive" counts only bins whose value_col is below / above zero (e.g.
+    "negative" on an operation-minus-baseline plot: only where the
+    condition is significantly *less* than the baseline). first_only=True
+    marks just the single earliest qualifying bin instead of every run's
+    onset. The p-values are used as given: for a one-sided question, build
+    bin_stats with the matching `alternative`."""
+    if direction not in (None, "negative", "positive"):
+        raise ValueError(f"direction must be None, 'negative' or 'positive', got {direction!r}")
+    sig = bin_stats[bin_stats[p_col] < alpha]
+    if direction == "negative":
+        sig = sig[sig[value_col] < 0]
+    elif direction == "positive":
+        sig = sig[sig[value_col] > 0]
+    sig = sig.sort_values(bin_col)
     if sig.empty:
         return
-    is_onset = sig[bin_col].diff() != 1
-    onsets = sig[is_onset]
+    if first_only:
+        onsets = sig.iloc[[0]]
+    else:
+        is_onset = sig[bin_col].diff() != 1
+        onsets = sig[is_onset]
     ax.scatter(onsets[tr_start_col], onsets[value_col], marker=marker, s=size, color=color,
                edgecolor="black", linewidth=0.5, zorder=5)

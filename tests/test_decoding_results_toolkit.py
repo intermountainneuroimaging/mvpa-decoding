@@ -32,6 +32,9 @@ from _interactive_notebooks.decoding_results_toolkit import (
     plot_conditions,
     annotate_significance,
     mark_significance_onset,
+    first_significant_bin,
+    mark_onsets_in_rows,
+    draw_significance_table,
     STAT_METHODS,
     fdr_correct,
     split_half_group_difference,
@@ -732,6 +735,58 @@ class TestMarkSignificanceOnset:
         assert sorted(x for x, y in offsets) == [0, 9]
         plt.close(fig)
 
+    def _mixed_stats(self):
+        # significant ABOVE zero at bins 0-1, not at 2, significant BELOW zero at bins 3-4 and again at 6
+        return pd.DataFrame({
+            "bin": [0, 1, 2, 3, 4, 5, 6],
+            "tr_start": [0, 3, 6, 9, 12, 15, 18],
+            "mean_diff": [0.05, 0.06, 0.0, -0.07, -0.08, -0.01, -0.09],
+            "p_value": [0.01, 0.02, 0.5, 0.03, 0.01, 0.6, 0.04],
+        })
+
+    def test_direction_negative_ignores_significant_positive_bins(self):
+        fig, ax = plt.subplots()
+        ax.plot([0, 18], [0, 0])
+        mark_significance_onset(ax, self._mixed_stats(), alpha=0.05, direction="negative")
+        assert sorted(x for x, y in ax.collections[0].get_offsets()) == [9, 18]
+        plt.close(fig)
+
+    def test_direction_positive_ignores_significant_negative_bins(self):
+        fig, ax = plt.subplots()
+        ax.plot([0, 18], [0, 0])
+        mark_significance_onset(ax, self._mixed_stats(), alpha=0.05, direction="positive")
+        assert [x for x, y in ax.collections[0].get_offsets()] == [0]
+        plt.close(fig)
+
+    def test_first_only_marks_just_the_earliest_qualifying_bin(self):
+        fig, ax = plt.subplots()
+        ax.plot([0, 18], [0, 0])
+        mark_significance_onset(ax, self._mixed_stats(), alpha=0.05, direction="negative", first_only=True)
+        offsets = ax.collections[0].get_offsets()
+        assert len(offsets) == 1 and offsets[0][0] == 9 and offsets[0][1] == pytest.approx(-0.07)
+        plt.close(fig)
+
+    def test_first_only_without_direction_takes_the_first_significant_bin_of_either_sign(self):
+        fig, ax = plt.subplots()
+        ax.plot([0, 18], [0, 0])
+        mark_significance_onset(ax, self._mixed_stats(), alpha=0.05, first_only=True)
+        assert [x for x, y in ax.collections[0].get_offsets()] == [0]
+        plt.close(fig)
+
+    def test_direction_with_no_qualifying_bin_draws_nothing(self):
+        bin_stats = pd.DataFrame({"bin": [0, 1], "tr_start": [0, 3], "mean_diff": [0.05, 0.06], "p_value": [0.01, 0.02]})
+        fig, ax = plt.subplots()
+        ax.plot([0, 3], [0, 0])
+        mark_significance_onset(ax, bin_stats, alpha=0.05, direction="negative", first_only=True)
+        assert len(ax.collections) == 0
+        plt.close(fig)
+
+    def test_bad_direction_raises(self):
+        fig, ax = plt.subplots()
+        with pytest.raises(ValueError, match="direction"):
+            mark_significance_onset(ax, self._mixed_stats(), direction="down")
+        plt.close(fig)
+
     def test_no_significant_bins_draws_nothing(self):
         bin_stats = pd.DataFrame({"bin": [0], "tr_start": [0], "mean_diff": [0.01], "p_value": [0.5]})
         fig, ax = plt.subplots()
@@ -750,4 +805,158 @@ class TestMarkSignificanceOnset:
         # matplotlib's "v" marker path -- just confirm it's not the default circle
         from matplotlib.markers import MarkerStyle
         assert paths[0].vertices.shape == MarkerStyle("v").get_path().vertices.shape
+        plt.close(fig)
+
+
+class TestFirstSignificantBin:
+    STATS = pd.DataFrame({
+        "bin": [0, 1, 2, 3, 4],
+        "tr_start": [0, 3, 6, 9, 12],
+        "mean_diff": [0.05, 0.0, -0.04, -0.07, -0.08],
+        "p_value": [0.01, 0.5, 0.2, 0.03, 0.01],
+    })
+
+    def test_any_direction_returns_earliest_significant(self):
+        assert first_significant_bin(self.STATS, alpha=0.05)["bin"] == 0
+
+    def test_negative_skips_significant_positive_bins_and_nonsignificant_negatives(self):
+        row = first_significant_bin(self.STATS, alpha=0.05, direction="negative")
+        assert row["bin"] == 3 and row["tr_start"] == 9
+
+    def test_positive(self):
+        assert first_significant_bin(self.STATS, alpha=0.05, direction="positive")["bin"] == 0
+
+    def test_none_when_nothing_qualifies(self):
+        assert first_significant_bin(self.STATS, alpha=0.001, direction="negative") is None
+        assert first_significant_bin(self.STATS.iloc[0:0], alpha=0.05) is None
+
+    def test_uses_given_p_column_and_rejects_bad_direction(self):
+        stats = self.STATS.assign(p_fdr=[0.9, 0.9, 0.9, 0.9, 0.02])
+        assert first_significant_bin(stats, p_col="p_fdr", direction="negative")["bin"] == 4
+        with pytest.raises(ValueError, match="direction"):
+            first_significant_bin(stats, direction="sideways")
+
+
+class TestMarkOnsetsInRows:
+    def _axes(self):
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        ax.plot([0, 12], [-0.1, 0.1])
+        return fig, ax
+
+    def test_same_x_markers_get_distinct_rows_so_they_cannot_overlap(self):
+        fig, ax = self._axes()
+        mark_onsets_in_rows(ax, [(6.9, "blue"), (6.9, "red"), (6.9, "orange")])
+        fig.canvas.draw()
+        pts = [ax.transAxes.inverted().transform(ax.transData.transform((0, 0)))]  # force transforms to exist
+        offs = [c.get_offsets()[0] for c in ax.collections]
+        disp = np.array([ax.get_xaxis_transform().transform(o) for o in offs])
+        assert len(disp) == 3 and all(abs(disp[:, 0] - disp[0, 0]) < 1e-6)       # same time position kept
+        gaps = np.abs(np.diff(np.sort(disp[:, 1])))
+        marker_height_px = np.sqrt(70) * fig.dpi / 72                              # scatter size is area in pt^2
+        assert gaps.min() > marker_height_px
+        plt.close(fig)
+
+    def test_rows_follow_input_order_top_to_bottom_and_keep_x(self):
+        fig, ax = self._axes()
+        mark_onsets_in_rows(ax, [(3.0, "blue"), (6.0, "red")])
+        ys = [ax.get_xaxis_transform().transform(c.get_offsets()[0])[1] for c in ax.collections]
+        assert ys[0] > ys[1]      # first item is the top row
+        assert [c.get_offsets()[0][0] for c in ax.collections] == [3.0, 6.0]
+        plt.close(fig)
+
+    def test_none_leaves_its_row_empty_but_reserves_it(self):
+        fig, ax = self._axes()
+        mark_onsets_in_rows(ax, [(3.0, "blue"), (None, "red"), (6.0, "orange")])
+        assert len(ax.collections) == 2
+        ys = sorted(ax.get_xaxis_transform().transform(c.get_offsets()[0])[1] for c in ax.collections)
+        middle_row = ax.get_xaxis_transform().transform((0, 0.03 + 1.5 * 0.055))[1]
+        assert ys[0] < middle_row < ys[1]
+        plt.close(fig)
+
+    def test_strip_is_below_the_data_and_only_extends_ylim_downward(self):
+        fig, ax = self._axes()
+        ymin, ymax = ax.get_ylim()
+        mark_onsets_in_rows(ax, [(3.0, "blue"), (6.0, "red"), (9.0, "orange")])
+        new_ymin, new_ymax = ax.get_ylim()
+        assert new_ymax == ymax and new_ymin < ymin
+        top_of_strip = ax.transData.inverted().transform(ax.transAxes.transform((0, 0.03 + 3 * 0.055)))[1]
+        assert top_of_strip == pytest.approx(ymin, abs=1e-6)       # old data floor sits just above the strip
+        plt.close(fig)
+
+    def test_empty_list_does_nothing(self):
+        fig, ax = self._axes()
+        before = ax.get_ylim()
+        mark_onsets_in_rows(ax, [])
+        assert ax.get_ylim() == before and len(ax.collections) == 0
+        plt.close(fig)
+
+
+class TestDrawSignificanceTable:
+    @staticmethod
+    def _stats(p_values):
+        return pd.DataFrame({
+            "tr_start": [0, 3, 6][:len(p_values)],
+            "tr_end": [2, 5, 8][:len(p_values)],
+            "p_fdr": p_values,
+        })
+
+    def _rows(self):
+        return [
+            {"parts": [("A", "blue"), (" vs. ", "black"), ("B", "red")], "stats": self._stats([0.01, 0.5, 0.04])},
+            {"parts": [("A", "blue"), (" vs. ", "black"), ("C", "orange")], "stats": self._stats([0.9, 0.9, 0.001])},
+        ]
+
+    def _table(self, rows=None, **kw):
+        fig, (top, tab) = plt.subplots(2, 1, sharex=True)
+        top.plot([0, 9], [0, 1])
+        draw_significance_table(tab, rows or self._rows(), alpha=0.05, p_col="p_fdr", tr_seconds=2.0, **kw)
+        return fig, tab
+
+    def test_one_cell_per_window_shaded_by_significance(self):
+        fig, tab = self._table()
+        cells = [p for p in tab.patches]
+        assert len(cells) == 6
+        dark = {(p.get_x(), p.get_y()) for p in cells if p.get_facecolor()[0] < 0.7}
+        # row 0 is the TOP row (y=1): windows 0 and 2 significant; row 1 (y=0): window 2 only
+        assert dark == {(0.0, 1), (12.0, 1), (12.0, 0)}
+        plt.close(fig)
+
+    def test_cells_sit_at_their_real_time_positions(self):
+        fig, tab = self._table()
+        first_row = sorted((p.get_x(), p.get_width()) for p in tab.patches if p.get_y() == 1)
+        assert first_row == [(0.0, 6.0), (6.0, 6.0), (12.0, 6.0)]   # TRs 0-2, 3-5, 6-8 at 2 s/TR, end inclusive
+        plt.close(fig)
+
+    def test_missing_p_leaves_the_cell_blank(self):
+        rows = [{"parts": [("A", "blue")], "stats": self._stats([0.01, np.nan, 0.04])}]
+        fig, tab = self._table(rows)
+        assert len(tab.patches) == 2
+        plt.close(fig)
+
+    def test_row_labels_are_colored_pieces_in_row_order(self):
+        from matplotlib.offsetbox import AnchoredOffsetbox
+        fig, tab = self._table()
+        boxes = [a for a in tab.artists if isinstance(a, AnchoredOffsetbox)]
+        assert len(boxes) == 2
+        texts = [[t.get_text() for t in b.get_child().get_children()] for b in boxes]
+        colors = [[t._text.get_color() for t in b.get_child().get_children()] for b in boxes]
+        assert texts == [["A", " vs. ", "B"], ["A", " vs. ", "C"]]
+        assert colors == [["blue", "black", "red"], ["blue", "black", "orange"]]
+        plt.close(fig)
+
+    def test_windows_are_numbered_and_legend_names_the_threshold(self):
+        fig, tab = self._table(legend_label="FDR p < 0.05")
+        assert [t.get_text() for t in tab.texts] == ["1", "2", "3"]
+        assert [t.get_text() for t in tab.get_legend().get_texts()] == ["FDR p < 0.05", "n.s."]
+        plt.close(fig)
+
+    def test_numbers_can_be_turned_off(self):
+        fig, tab = self._table(window_numbers=False)
+        assert len(tab.texts) == 0
+        plt.close(fig)
+
+    def test_axes_is_stripped_of_ticks_and_spines(self):
+        fig, tab = self._table()
+        assert list(tab.get_yticks()) == []
+        assert not any(sp.get_visible() for sp in tab.spines.values())
         plt.close(fig)
