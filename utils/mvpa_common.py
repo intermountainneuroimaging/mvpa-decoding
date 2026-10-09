@@ -421,8 +421,70 @@ def label_rows(df: pd.DataFrame, conditions: dict, label_column: str = "regresso
     return combined[~combined.index.duplicated(keep="first")]
 
 
+def load_retained_events(eventfile: str, extra_cols: dict = None, source_row_col: str = None) -> pd.DataFrame:
+    """One run's events.tsv exactly as label_conditions_with_lag (training/
+    testing/model.kfold_cv) sees it: numeric onset/duration, sorted by onset,
+    events with a missing/non-finite onset or duration and administrative
+    events (is_excluded_trial_type) dropped, then numbered 1..N in onset order
+    as `trial_index`. extra_cols ({name: value}, typically the run's
+    per-boldfile constants -- subject/session/task/run/... -- which the raw
+    events.tsv doesn't carry) are added as constant columns.
+
+    source_row_col, if given, names an extra column holding each event's
+    0-based position among the raw file's data rows (taken before anything is
+    sorted or dropped), so a caller can map an event back to its original
+    line -- see workflows/restrict_master_spreadsheet.py. Left unset, the
+    result is identical to what label_conditions_with_lag has always used."""
+    events = pd.read_csv(eventfile, sep="\t")
+    if source_row_col:
+        events[source_row_col] = np.arange(len(events))
+    events["onset"] = pd.to_numeric(events["onset"], errors="coerce")
+    events["duration"] = pd.to_numeric(events["duration"], errors="coerce")
+    events = events.sort_values("onset").reset_index(drop=True)
+
+    valid = events["onset"].notna() & events["duration"].notna() & np.isfinite(events["duration"])
+    excluded = events["trial_type"].apply(is_excluded_trial_type)
+    events = events[valid & ~excluded].reset_index(drop=True)
+    # contiguous 1..N over every retained event, in onset order -- assigned
+    # before condition-matching, so it's the same regardless of which
+    # condition (if any) ends up matching a given event
+    events["trial_index"] = np.arange(1, len(events) + 1)
+
+    for k, v in (extra_cols or {}).items():
+        events[k] = v
+    return events
+
+
+TRIAL_RESTRICTION_COLUMNS = ("subject", "boldfile", "trial_index", "onset", "n_trs", "hemodynamic_lag")
+
+
+def load_trial_restriction(path: str, hemodynamic_lag: float) -> pd.DataFrame:
+    """Read the kept-trials file written by workflows/restrict_master_spreadsheet.py
+    (model_conditions.training.trial_restriction in the config).
+
+    One row per trial training may use: subject, boldfile, trial_index (as
+    load_retained_events numbers it), onset (a check that events.tsv hasn't
+    changed since), n_trs (the first n_trs volumes of the trial's lag-shifted
+    window are used; blank = the whole window) and the hemodynamic_lag the
+    file was built for. Raises ValueError for a file that is malformed or was
+    built for a different hemodynamic_lag, because a stale list would
+    silently select the wrong volumes."""
+    if not os.path.isfile(path):
+        raise ValueError(f"model_conditions.training.trial_restriction: file not found: {path}")
+    table = pd.read_csv(path, dtype={"subject": str, "boldfile": str})
+    missing = [c for c in TRIAL_RESTRICTION_COLUMNS if c not in table.columns]
+    if missing:
+        raise ValueError(f"trial restriction file {path} is missing column(s) {missing}")
+    lags = set(table["hemodynamic_lag"].dropna().astype(float))
+    if lags and lags != {float(hemodynamic_lag)}:
+        raise ValueError(
+            f"trial restriction file {path} was built for hemodynamic_lag={sorted(lags)} but the config uses "
+            f"{float(hemodynamic_lag)} -- rerun workflows/restrict_master_spreadsheet.py")
+    return table
+
+
 def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hemodynamic_lag: float,
-                               label_column: str = "regressor_label") -> pd.DataFrame:
+                               label_column: str = "regressor_label", trial_restriction: pd.DataFrame = None) -> pd.DataFrame:
     """model_conditions.training/testing's (and, transitively, model.kfold_cv's)
     counterpart to build_timecourse_instructions: selects which BOLD volumes
     actually get used to train/test a classifier.
@@ -468,7 +530,15 @@ def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hem
     one for the other -- previously this table only ever had a single
     "volume_of_interest" column holding the shifted value, silently
     inconsistent with every other output's use of that same name for the
-    real, unshifted position."""
+    real, unshifted position.
+
+    trial_restriction (see load_trial_restriction), if given, is the list of
+    trials that may be used: for every boldfile, an event not listed there is
+    dropped before conditions are matched (so a boldfile with no rows at all
+    contributes nothing), and a listed event with an n_trs uses only the FIRST
+    n_trs volumes of its window -- extra volumes are cut from the end. The
+    events.tsv files and the master spreadsheet are never modified. Without
+    it, every retained event is used in full."""
     non_event_cols = {"volume_of_interest", "trial_type", "onset", "duration", "event_index"}
 
     rows = []
@@ -476,21 +546,21 @@ def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hem
         first = group.iloc[0]
         extra_cols = {c: first[c] for c in group.columns if c not in non_event_cols}
 
-        events = pd.read_csv(first["eventfile"], sep="\t")
-        events["onset"] = pd.to_numeric(events["onset"], errors="coerce")
-        events["duration"] = pd.to_numeric(events["duration"], errors="coerce")
-        events = events.sort_values("onset").reset_index(drop=True)
+        events = load_retained_events(first["eventfile"], extra_cols)
 
-        valid = events["onset"].notna() & events["duration"].notna() & np.isfinite(events["duration"])
-        excluded = events["trial_type"].apply(is_excluded_trial_type)
-        events = events[valid & ~excluded].reset_index(drop=True)
-        # contiguous 1..N over every retained event, in onset order -- assigned
-        # before condition-matching, so it's the same regardless of which
-        # condition (if any) ends up matching a given event
-        events["trial_index"] = np.arange(1, len(events) + 1)
-
-        for k, v in extra_cols.items():
-            events[k] = v
+        max_trs = {}
+        if trial_restriction is not None:
+            allowed = trial_restriction[trial_restriction["boldfile"] == boldfile].drop_duplicates("trial_index")
+            events = events.merge(allowed[["trial_index", "onset", "n_trs"]].rename(columns={"onset": "_listed_onset"}),
+                                  on="trial_index", how="inner").reset_index(drop=True)
+            stale = ~np.isclose(events["onset"], events["_listed_onset"], atol=1e-6)
+            if stale.any():
+                raise ValueError(
+                    f"trial restriction does not match {first['eventfile']}: trial(s) "
+                    f"{events.loc[stale, 'trial_index'].tolist()} start at a different time than when it was built -- "
+                    f"rerun workflows/restrict_master_spreadsheet.py")
+            max_trs = dict(zip(events["trial_index"], events["n_trs"]))
+            events = events.drop(columns=["_listed_onset", "n_trs"])
 
         labels = pd.Series(pd.NA, index=events.index, dtype=object)
         for name, query in conditions.items():
@@ -506,6 +576,10 @@ def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hem
             start_time = ev["onset"] + hemodynamic_lag
             stop_time = start_time + ev["duration"]
             start_vol, stop_vol = compute_volume_range(start_time, stop_time, tr, n_frames)
+            cap = max_trs.get(ev["trial_index"])
+            if cap is not None and not pd.isna(cap):
+                # keep the FIRST cap volumes of the window; extras come off the end
+                stop_vol = min(stop_vol, start_vol + int(cap))
             # the event's own real, unshifted start volume -- purely for
             # labeling clarity alongside volume_of_interest_withlag below;
             # not clipped to n_frames (never used to index into BOLD data)

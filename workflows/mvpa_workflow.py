@@ -99,7 +99,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
 from utils.mvpa_common import (
-    build_trial_pivot_table, quick_safe, label_conditions_with_lag, label_rows_optional,
+    build_trial_pivot_table, quick_safe, label_conditions_with_lag, label_rows_optional, load_trial_restriction,
     track_runtime, load_config, apply_regressor_codes,
     load_images_and_mask, build_timecourse_instructions, resolve_timecourse_conditions,
     model_classification, model_performance, permutation_significance, EVIDENCE_MODES,
@@ -482,9 +482,32 @@ def main(args):
     # Load Data
     # -------------------------------------------------
 
-    training_df = apply_regressor_codes(
-        label_conditions_with_lag(subject_df, training_conditions, hemodynamic_lag), regressor_categories
-    )
+    # optional: restrict TRAINING to the balanced trial list written by
+    # restrict_master_spreadsheet.py (testing/timecourse are never restricted)
+    trial_restriction = None
+    restriction_path = model_conditions["training"].get("trial_restriction")
+    if restriction_path:
+        try:
+            trial_restriction = load_trial_restriction(restriction_path, hemodynamic_lag)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
+        trial_restriction = trial_restriction[trial_restriction["subject"] == str(subject_id)]
+        if trial_restriction.empty:
+            raise SystemExit(
+                f"subject {subject_id!r} has no trials in model_conditions.training.trial_restriction "
+                f"({restriction_path}) -- it was excluded by restrict_master_spreadsheet.py (no balanced set) or is not in it")
+        if not set(subject_df["boldfile"]) & set(trial_restriction["boldfile"]):
+            raise SystemExit(
+                f"none of subject {subject_id!r}'s boldfiles appear in {restriction_path} -- was it built from this master spreadsheet?")
+        print(f"Training restricted to {len(trial_restriction)} listed trial(s) from {restriction_path}")
+
+    try:
+        training_df = apply_regressor_codes(
+            label_conditions_with_lag(subject_df, training_conditions, hemodynamic_lag, trial_restriction=trial_restriction),
+            regressor_categories,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc))
     testing_df = (
         apply_regressor_codes(label_conditions_with_lag(subject_df, testing_conditions, hemodynamic_lag), regressor_categories)
         if testing_conditions is not None else None
