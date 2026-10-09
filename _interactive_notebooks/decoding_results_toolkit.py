@@ -30,14 +30,21 @@ configurable pipeline, so a new analysis picks just the pieces it needs:
                                                explicit list of (start, end)
                                                TR ranges)
   stats:        compare_conditions_by_bin,     one row per bin; STAT_METHODS
-                STAT_METHODS                   is swappable/extensible, or
-                                                pass your own callable
+                STAT_METHODS, fdr_correct      is swappable/extensible, or
+                                                pass your own callable; each
+                                                comparison's p-values also get
+                                                an FDR-adjusted p_fdr column
+  reliability:  split_half_group_difference    how reproducible a group-level mean
+                                                difference between two conditions
+                                                is when every participant's own
+                                                trials are randomly halved
   plotting:     plot_conditions                one line + SE-across-subjects
                                                 band per condition, onto a
                                                 given axes
 """
 
 import os
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -336,15 +343,43 @@ STAT_METHODS = {
 }
 
 
+FDR_METHODS = ("bh", "by")
+
+
+def fdr_correct(p_values, method: str = "bh") -> np.ndarray:
+    """False-discovery-rate adjusted p-values (q-values), same order and
+    length as `p_values`. "bh" is Benjamini-Hochberg (valid for independent
+    or positively-dependent tests); "by" is the more conservative
+    Benjamini-Yekutieli (valid under any dependence). NaN p-values pass
+    through as NaN and don't count towards the number of tests. Thresholding
+    the result at alpha controls the expected fraction of false discoveries
+    among the bins called significant at alpha."""
+    if method not in FDR_METHODS:
+        raise ValueError(f"unknown FDR method {method!r} -- expected one of {FDR_METHODS}")
+    p = np.asarray(p_values, dtype=float)
+    out = np.full(p.shape, np.nan)
+    ok = np.isfinite(p)
+    if ok.any():
+        out[ok] = scipy_stats.false_discovery_control(p[ok], method=method)
+    return out
+
+
 def compare_conditions_by_bin(per_subject_bin: pd.DataFrame, cond_a: str, cond_b: str,
                                method="ttest_1samp_diff", alternative: str = "greater",
-                               bins_meta: pd.DataFrame = None) -> pd.DataFrame:
+                               bins_meta: pd.DataFrame = None, fdr: str = "bh") -> pd.DataFrame:
     """One row per bin -- `method` is a name in STAT_METHODS (swap the test
     with one line), or your own callable(a_vals, b_vals, alternative) -> dict
     with at least {"stat", "p_value"}. A bin with fewer than 2 subjects
     having both conditions is skipped (can't test a single point).
     `bins_meta` (from bin_by_size/bin_by_edges), if given, is merged in for
-    tr_start/tr_end columns."""
+    tr_start/tr_end columns.
+
+    Every bin of one call is one *family* of tests (one condition contrast
+    across the time windows): `p_value` is the raw per-bin p, and `p_fdr`
+    (inserted right after it) is that family's FDR-adjusted p -- see
+    fdr_correct. Call this once per contrast (e.g. once per operation, or
+    per valence x operation) so each contrast is corrected on its own.
+    Pass fdr=None for raw p-values only (no p_fdr column)."""
     test_fn = STAT_METHODS[method] if isinstance(method, str) else method
 
     rows = []
@@ -357,9 +392,140 @@ def compare_conditions_by_bin(per_subject_bin: pd.DataFrame, cond_a: str, cond_b
         rows.append(result)
 
     out = pd.DataFrame(rows)
+    if fdr and not out.empty:
+        out.insert(out.columns.get_loc("p_value") + 1, "p_fdr", fdr_correct(out["p_value"], fdr))
     if bins_meta is not None and not out.empty:
         out = out.merge(bins_meta, on="bin", how="left")
     return out
+
+
+# =====================================================
+# Split-half reliability of a group-level finding
+# =====================================================
+
+def _split_masks(n_units: int, n_splits: int, rng) -> tuple:
+    """(mask_a, mask_b), boolean (n_splits, n_units): every row is an
+    independent random split of the units into two equal halves (with an odd
+    count, one random unit is left out of both)."""
+    half = n_units // 2
+    ranks = rng.random((n_splits, n_units)).argsort(axis=1).argsort(axis=1)
+    return ranks < half, (ranks >= half) & (ranks < 2 * half)
+
+
+def _half_means(matrix: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """NaN-aware mean of `matrix` (units x timepoints) over each row of
+    `mask` (n_splits x units) -> (n_splits, timepoints)."""
+    valid = np.isfinite(matrix)
+    sums = mask.astype(float) @ np.where(valid, matrix, 0.0)
+    counts = mask.astype(float) @ valid.astype(float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(counts > 0, sums / counts, np.nan)
+
+
+def split_half_group_difference(df: pd.DataFrame, condition_col: str, cond_a: str, cond_b: str,
+                                 bin_size: int = 3, value_col: str = "value", subject_col: str = "subject",
+                                 time_col: str = "window_index", trial_cols=("boldfile", "trial_index"),
+                                 tr_offset: int = 0, n_splits: int = 1000, seed: int = 0,
+                                 min_trials: int = 2) -> pd.DataFrame:
+    """If the same participants were run again, how reliable is the group-level
+    finding "condition a differs from condition b" in each time bin?
+
+    `df` is long-format, one row per (subject, trial_cols..., timepoint), and
+    should already be the data subset for this contrast -- e.g. only maintain
+    trials for a maintain pos-vs-neg comparison; only rows whose
+    `condition_col` is cond_a or cond_b are used. It mirrors the statistics'
+    own pipeline exactly: a subject's value for a condition and bin is the mean
+    over the bin's timepoints of the mean over trials at each timepoint (as
+    aggregate_by_subject_window + bin_by_size build it), and the group
+    difference is the mean over subjects of (a - b). `full_mean_diff` is
+    therefore the same number compare_conditions_by_bin reports as mean_diff.
+
+    Then, n_splits times: every subject's trials in each of the two conditions
+    are randomly cut into two equal halves (separately per condition, an odd
+    trial left out), the group mean difference is computed in each half, and
+    the halves are compared. Subjects need at least `min_trials` (>= 2) trials
+    in BOTH conditions to take part; the rest are left out of every split and
+    of full_mean_diff (n_subjects counts those who took part).
+
+    Returns one row per bin: bin, tr_start/tr_end (as bin_by_size), n_subjects,
+    full_mean_diff, half_ci_low/half_ci_high (2.5/97.5th percentile of the
+    half-split group differences, A and B halves pooled), p_half_a_gt_b (share
+    of half-splits showing a > b), p_same_direction (share showing the
+    full-data direction), p_halves_agree (share of splits where half A and
+    half B agree on direction), and n_splits (splits with both halves
+    estimable). Because the random halves are exchangeable, p_halves_agree =
+    2 * p_same_direction - 1 exactly -- one piece of information, shown two
+    ways.
+
+    How to read them -- carefully. The two halves partition the same data, so
+    both inherit its realized noise and their estimates sit symmetrically
+    around full_mean_diff. The probabilities are therefore a transformation of
+    how many trial-to-trial standard errors full_mean_diff sits from zero,
+    not independent evidence that an effect is real: a bin with NO true effect
+    still averages p_same_direction ~0.75 (never below 0.5), and its
+    p_halves_agree is spread roughly uniformly over 0-1, so only values near 1
+    mean much (p_halves_agree >= 0.95 is about as unusual as p = 0.05). Each
+    half also holds only half of every subject's trials, so a half-sized study
+    replicates less often than the full one would; and the same participants
+    sit in both halves, so this says nothing about new participants."""
+    trial_cols = list(trial_cols)
+    min_trials = max(int(min_trials), 2)
+    sub = df[df[condition_col].isin([cond_a, cond_b])]
+    if sub.empty:
+        return pd.DataFrame()
+    rng = np.random.default_rng(seed)
+    wide = sub.pivot_table(index=[subject_col, condition_col] + trial_cols, columns=time_col,
+                           values=value_col, aggfunc="mean")
+    times = wide.columns.to_numpy()
+    bins = np.unique(times // bin_size)
+    bin_matrix = ((times[:, None] // bin_size) == bins[None, :]).astype(float)  # (timepoints, bins)
+
+    def bin_means(x):  # NaN-aware mean over each bin's timepoints: (..., timepoints) -> (..., bins)
+        valid = np.isfinite(x).astype(float)
+        counts = valid @ bin_matrix
+        with np.errstate(invalid="ignore", divide="ignore"):
+            return np.where(counts > 0, (np.where(valid > 0, x, 0.0) @ bin_matrix) / counts, np.nan)
+
+    full_diffs, half_a, half_b = [], [], []
+    for _, g in wide.groupby(level=subject_col, sort=False):
+        conds = g.index.get_level_values(condition_col)
+        values = g.to_numpy(dtype=float)
+        ma, mb = values[conds == cond_a], values[conds == cond_b]
+        if len(ma) < min_trials or len(mb) < min_trials:
+            continue
+        full_diffs.append((bin_means(_half_means(ma, np.ones((1, len(ma)), dtype=bool)))
+                           - bin_means(_half_means(mb, np.ones((1, len(mb)), dtype=bool))))[0])
+        (a1, a2), (b1, b2) = _split_masks(len(ma), n_splits, rng), _split_masks(len(mb), n_splits, rng)
+        half_a.append(bin_means(_half_means(ma, a1)) - bin_means(_half_means(mb, b1)))
+        half_b.append(bin_means(_half_means(ma, a2)) - bin_means(_half_means(mb, b2)))
+    if not full_diffs:
+        return pd.DataFrame()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        full = np.nanmean(np.vstack(full_diffs), axis=0)                  # (bins,)
+        group_a, group_b = np.nanmean(np.stack(half_a), axis=0), np.nanmean(np.stack(half_b), axis=0)  # (n_splits, bins)
+    pooled = np.concatenate([group_a, group_b], axis=0)
+
+    rows = []
+    for j, bin_id in enumerate(bins):
+        h = pooled[:, j][np.isfinite(pooled[:, j])]
+        both = np.isfinite(group_a[:, j]) & np.isfinite(group_b[:, j])
+        have_full = np.isfinite(full[j]) and full[j] != 0 and h.size > 0
+        rows.append({
+            "bin": int(bin_id),
+            "tr_start": int(bin_id * bin_size + tr_offset),
+            "tr_end": int(bin_id * bin_size + bin_size - 1 + tr_offset),
+            "n_subjects": len(full_diffs),
+            "full_mean_diff": float(full[j]),
+            "half_ci_low": float(np.percentile(h, 2.5)) if h.size else np.nan,
+            "half_ci_high": float(np.percentile(h, 97.5)) if h.size else np.nan,
+            "p_half_a_gt_b": float((h > 0).mean()) if h.size else np.nan,
+            "p_same_direction": float((np.sign(h) == np.sign(full[j])).mean()) if have_full else np.nan,
+            "p_halves_agree": float((np.sign(group_a[both, j]) == np.sign(group_b[both, j])).mean()) if both.any() else np.nan,
+            "n_splits": int(both.sum()),
+        })
+    return pd.DataFrame(rows)
 
 
 # =====================================================
