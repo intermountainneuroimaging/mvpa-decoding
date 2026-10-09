@@ -11,13 +11,13 @@ in a directory listing too).
 **The only required input is your config JSON.** Every stage script takes
 it as a required first argument and reads all of its study-specific paths
 (dataset roots, output/spreadsheet locations, the MNI template) from a
-`"pipeline"` section in that same file -- there's no separate bash file to
+`"master"` section in that same file -- there's no separate bash file to
 hand-edit for a new study/config anymore, and no risk of the four stage
 scripts silently disagreeing about which study they're pointed at, since
 they all read the exact same config path:
 
 ```json
-"pipeline": {
+"master": {
   "scripts_dir": "/path/to/mvpa-decoding",
   "bids_hcp_root": "/path/to/study/bids-hcp",
   "hcppipe_root": "/path/to/study/HCPPipe",
@@ -27,6 +27,10 @@ they all read the exact same config path:
   "mni_template": "/path/to/MNI152_T1_2mm_brain.nii.gz"
 }
 ```
+
+> This section was called `pipeline` in earlier versions. A config that still has a
+> `pipeline` section is refused with a message asking you to rename it to `master`;
+> the fields are unchanged.
 
 | Field | Required by | Meaning |
 |---|---|---|
@@ -65,7 +69,7 @@ script's own location (`${BASH_SOURCE[0]}`) never points back at the real
 repo the way it reliably does for `0_` (which is invoked directly via
 `bash`, never through `sbatch`) -- and a stage script's working directory
 is just wherever `sbatch` happened to be invoked from unless `--chdir` is
-passed. Each of `1_`-`4_` therefore reads `pipeline.scripts_dir` out of its
+passed. Each of `1_`-`4_` therefore reads `master.scripts_dir` out of its
 config argument *before* it can even locate `resolve_pipeline_config.sh`,
 via a small bootstrap block at the top of the script (see any of `1_`-`4_`
 for the exact sequence), and passes it along as a plain shell variable from

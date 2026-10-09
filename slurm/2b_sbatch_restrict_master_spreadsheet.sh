@@ -18,13 +18,13 @@
 #   sbatch slurm/2b_sbatch_restrict_master_spreadsheet.sh configs/my-study.json configs/restriction.json
 #
 # Arguments:
-#   $1  the mvpa config -- pipeline.scripts_dir / pipeline.master_spreadsheet
+#   $1  the mvpa config -- master.scripts_dir / master.master_spreadsheet
 #       are read from it, and so is event_extraction.hemodynamic_lag (the TR
 #       counts depend on it), plus model_conditions.training, which is checked
 #       against the restriction groups
 #   $2  the supplementary restriction config (primary_groups / secondary_groups)
 #
-# Writes next to pipeline.master_spreadsheet (stem = its name without .csv):
+# Writes next to master.master_spreadsheet (stem = its name without .csv):
 #   <stem>_trial_restriction.csv          -- the list stage 3 reads
 #   <stem>_trial_restriction_summary.csv  -- trials / TRs per subject and group, excluded subjects
 #   <stem>_trial_restriction_audit.csv    -- every governed trial and whether it was kept
@@ -36,7 +36,7 @@
 # Rerun whenever hemodynamic_lag, the restriction groups, the events files or
 # the master spreadsheet change (stage 3 also checks the lag and trial onsets).
 # Fully standalone, like the other stages: `$1` is the only config it needs to
-# find the repo, via pipeline.scripts_dir (see resolve_pipeline_config.sh).
+# find the repo, via master.scripts_dir (see resolve_pipeline_config.sh).
 
 set -e
 umask g+w
@@ -63,17 +63,17 @@ if [ ! -f "$RESTRICTION_CONFIG" ]; then
 fi
 export CONFIG_FILE
 
-# pipeline.scripts_dir, read directly rather than relying on an exported
+# master.scripts_dir, read directly rather than relying on an exported
 # SCRIPTS_DIR or the job's working directory -- sbatch copies this script
 # into its own spool file before running it, so neither is reliable here
 # (see resolve_pipeline_config.sh's own header comment for the full reasoning)
 SCRIPTS_DIR=$(python3 -c "
 import json, sys
 with open('$CONFIG_FILE') as f:
-    print(json.load(f).get('pipeline', {}).get('scripts_dir', ''))
+    print(json.load(f).get('master', {}).get('scripts_dir', ''))
 ")
 if [ -z "$SCRIPTS_DIR" ]; then
-    echo "$(basename "$0"): $CONFIG_FILE's \"pipeline\" section is missing required field: scripts_dir" >&2
+    echo "$(basename "$0"): $CONFIG_FILE's \"master\" section is missing required field: scripts_dir (a config from before the section was renamed calls it \"pipeline\" -- rename it to \"master\")" >&2
     exit 1
 fi
 export SCRIPTS_DIR

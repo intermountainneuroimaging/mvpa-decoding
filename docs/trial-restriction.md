@@ -32,7 +32,7 @@ then, in the mvpa config:
 On the cluster, `sbatch slurm/2b_sbatch_restrict_master_spreadsheet.sh
 configs/my-study.json configs/restriction.json` runs the step with the same
 module/conda setup as the other stages (the config supplies
-`pipeline.scripts_dir` and `pipeline.master_spreadsheet`); it is not part of
+`master.scripts_dir` and `master.master_spreadsheet`); it is not part of
 `0_submit_mvpa_pipeline.sh`, so submit it yourself between stages 2 and 3.
 Then give stage 3 the list either way:
 

@@ -246,7 +246,7 @@ next to it for your own analysis. Details: [docs/reports.md](docs/reports.md).
 
 ### On a SLURM cluster
 
-Add a `pipeline` section to your config file with the study's paths (dataset
+Add a `master` section to your config file with the study's paths (dataset
 roots, output folder, master spreadsheet location; see
 [docs/slurm-pipeline.md](docs/slurm-pipeline.md)), then submit the stages in
 order. Each stage script takes the config file path as its first argument and
@@ -401,7 +401,7 @@ the pipeline:
 | [running-the-workflow](docs/running-the-workflow.md) | What `mvpa_workflow.py` does for each subject, the double-dipping guard, every output file |
 | [reports](docs/reports.md) | The PDF reports |
 | [resampling](docs/resampling.md) | Moving brain maps between MNI and native space |
-| [slurm-pipeline](docs/slurm-pipeline.md) | The cluster pipeline and the `pipeline` config section |
+| [slurm-pipeline](docs/slurm-pipeline.md) | The cluster pipeline and the `master` config section |
 
 ## Testing the code
 
@@ -430,7 +430,7 @@ shape of a file and which settings exist, then set every value yourself.
 | Start from | When it fits |
 |---|---|
 | [`tutorial/config-haxby.example.json`](tutorial/config-haxby.example.json) | You want a complete working example: train on some acquisitions, test on others (used by the tutorial) |
-| [`examples/config-kfold.example.json`](examples/config-kfold.example.json) | You want cross-validation within your data, holding out one acquisition at a time, with a `pipeline` section for the cluster |
+| [`examples/config-kfold.example.json`](examples/config-kfold.example.json) | You want cross-validation within your data, holding out one acquisition at a time, with a `master` section for the cluster |
 | [`examples/config-generalization.example.json`](examples/config-generalization.example.json) | You want to train on one task and test on another |
 | [`examples/config-generalization-template.example.json`](examples/config-generalization-template.example.json) | The same, written as a fill-in-your-own-paths template |
 | [`examples/config-restriction.example.json`](examples/config-restriction.example.json) | The separate small file that defines groups for [trial balancing](docs/trial-restriction.md) (step 4) |
@@ -464,7 +464,7 @@ complete working file, so start from one of the examples above:
     "kfold_cv": {"strategy": "per_run"}
   },
 
-  "pipeline": { "...": "cluster paths, only used by the slurm/ scripts" }
+  "master": { "...": "cluster paths, only used by the slurm/ scripts" }
 }
 ```
 
@@ -475,7 +475,7 @@ What each section is for:
 | `event_extraction` | Where the events files are (`bids_root`, `events_glob`), where the BOLD files are if they are somewhere else (`derivatives_root`, `bold_glob`), the hemodynamic lag, and where to save the master spreadsheet (`output_file`) | [docs/event-extraction.md](docs/event-extraction.md) |
 | `model_conditions` | The conditions, as queries on the master spreadsheet's columns. `training` is required. Add `testing` for a held-out test and `timecourse_decoding` for timecourse decoding | [docs/model-conditions.md](docs/model-conditions.md) |
 | `model` | `desc` (the name of the output folder), the brain mask, voxel selection, the classifier, and optionally cross-validation (`kfold_cv`) and a permutation test (`permutation_test`) | [docs/model-config.md](docs/model-config.md) |
-| `pipeline` | The study's absolute paths for the SLURM scripts. Not needed if you execute the Python scripts directly | [docs/slurm-pipeline.md](docs/slurm-pipeline.md) |
+| `master` | The study's absolute paths for the SLURM scripts. Not needed if you execute the Python scripts directly | [docs/slurm-pipeline.md](docs/slurm-pipeline.md) |
 
 Two settings are worth a moment of thought before you start. `model.kfold_cv.strategy`
 chooses how data is held out: `per_run` leaves one acquisition out at a time (the

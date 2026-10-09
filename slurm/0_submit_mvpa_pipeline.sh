@@ -15,7 +15,7 @@
 # the first.
 #
 # The only required input is a single config JSON -- event_extraction/
-# model_conditions/model as usual, plus a "pipeline" section (dataset paths,
+# model_conditions/model as usual, plus a "master" section (dataset paths,
 # output dirs, MNI template) that every stage script reads via
 # slurm/resolve_pipeline_config.sh instead of a separately-hand-edited bash file. This
 # script requires that config path as its own argument and forwards it,
@@ -41,7 +41,7 @@
 # in any way: sbatch copies a batch script into its own spool file before
 # running it, so a stage script's own location and this export would both
 # be unreliable for it anyway -- instead, every stage script reads
-# pipeline.scripts_dir out of the config itself (see
+# master.scripts_dir out of the config itself (see
 # resolve_pipeline_config.sh), making each one independently runnable with
 # nothing but its own config-path argument, whether launched by this
 # orchestrator or `sbatch`'d directly on its own.

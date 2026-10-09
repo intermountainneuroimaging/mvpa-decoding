@@ -28,7 +28,7 @@
 # 0_ having run first or exported anything: submit directly with
 # `sbatch slurm/1_batch_resample_native_mask.sh configs/my-study.json` from
 # anywhere. The config path (`$1`) is the only required input; its
-# pipeline.scripts_dir is how this script locates the rest of the repo (see
+# master.scripts_dir is how this script locates the rest of the repo (see
 # resolve_pipeline_config.sh) -- --output/--error log paths above are still
 # plain SBATCH directives (no variable substitution happens in them), so
 # they resolve relative to wherever `sbatch` was invoked from regardless.
@@ -53,24 +53,24 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 export CONFIG_FILE
 
-# pipeline.scripts_dir, read directly rather than relying on an exported
+# master.scripts_dir, read directly rather than relying on an exported
 # SCRIPTS_DIR or the job's working directory -- sbatch copies this script
 # into its own spool file before running it, so neither is reliable here
 # (see resolve_pipeline_config.sh's own header comment for the full reasoning)
 SCRIPTS_DIR=$(python3 -c "
 import json, sys
 with open('$CONFIG_FILE') as f:
-    print(json.load(f).get('pipeline', {}).get('scripts_dir', ''))
+    print(json.load(f).get('master', {}).get('scripts_dir', ''))
 ")
 if [ -z "$SCRIPTS_DIR" ]; then
-    echo "$(basename "$0"): $CONFIG_FILE's \"pipeline\" section is missing required field: scripts_dir" >&2
+    echo "$(basename "$0"): $CONFIG_FILE's \"master\" section is missing required field: scripts_dir (a config from before the section was renamed calls it \"pipeline\" -- rename it to \"master\")" >&2
     exit 1
 fi
 export SCRIPTS_DIR
 
 # this stage builds the per-subject/session native mask, so it needs the
 # study's HCP derivatives root, the group MNI mask to resample, and where
-# to write the result -- everything else in "pipeline" is irrelevant here
+# to write the result -- everything else in "master" is irrelevant here
 export REQUIRED_PIPELINE_FIELDS="bids_hcp_root hcppipe_root group_gm_mask"
 source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 

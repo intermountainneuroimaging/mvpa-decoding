@@ -27,7 +27,7 @@
 # anything: submit directly with
 # `sbatch slurm/4_sbatch_generate_report.sh configs/my-study.json` from
 # anywhere. The config path (`$1`) is the only required input; its
-# pipeline.scripts_dir is how this script locates the rest of the repo (see
+# master.scripts_dir is how this script locates the rest of the repo (see
 # resolve_pipeline_config.sh) -- --output/--error log paths above are still
 # plain SBATCH directives (no variable substitution happens in them), so
 # they resolve relative to wherever `sbatch` was invoked from regardless.
@@ -71,17 +71,17 @@ fi
 SUBJECT_LIST="$2"
 export CONFIG_FILE
 
-# pipeline.scripts_dir, read directly rather than relying on an exported
+# master.scripts_dir, read directly rather than relying on an exported
 # SCRIPTS_DIR or the job's working directory -- sbatch copies this script
 # into its own spool file before running it, so neither is reliable here
 # (see resolve_pipeline_config.sh's own header comment for the full reasoning)
 SCRIPTS_DIR=$(python3 -c "
 import json, sys
 with open('$CONFIG_FILE') as f:
-    print(json.load(f).get('pipeline', {}).get('scripts_dir', ''))
+    print(json.load(f).get('master', {}).get('scripts_dir', ''))
 ")
 if [ -z "$SCRIPTS_DIR" ]; then
-    echo "$(basename "$0"): $CONFIG_FILE's \"pipeline\" section is missing required field: scripts_dir" >&2
+    echo "$(basename "$0"): $CONFIG_FILE's \"master\" section is missing required field: scripts_dir (a config from before the section was renamed calls it \"pipeline\" -- rename it to \"master\")" >&2
     exit 1
 fi
 export SCRIPTS_DIR
@@ -118,13 +118,13 @@ source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 # runs. If your subjects have genuinely distinct per-session registrations,
 # this silently picks the wrong one -- check applywarp's output alignment.
 #
-# HCPPIPE_ROOT is optional (see pipeline.hcppipe_root in the config) --
+# HCPPIPE_ROOT is optional (see master.hcppipe_root in the config) --
 # skipped entirely when unset, since every classifier under $OUTPUT_DIR
 # might already be model.mnispace=true (writing *_impa_mni.nii.gz directly,
 # with no plain *_impa.nii.gz ever produced to resample in the first place).
 # --------------------------------------------
 if [ -z "$HCPPIPE_ROOT" ]; then
-    echo "pipeline.hcppipe_root not set -- skipping native->MNI importance-map resample (using whatever *_impa_mni.nii.gz files already exist, e.g. from model.mnispace=true)"
+    echo "master.hcppipe_root not set -- skipping native->MNI importance-map resample (using whatever *_impa_mni.nii.gz files already exist, e.g. from model.mnispace=true)"
 else
     for subject_dir in "$OUTPUT_DIR"/*/*/; do
         subject=$(basename "$subject_dir")

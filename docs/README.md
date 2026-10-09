@@ -16,7 +16,7 @@ section or script. Read only the ones you need.
 | [running-the-workflow.md](running-the-workflow.md) | What `mvpa_workflow.py` runs, the double-dipping guard, every output file | `mvpa_workflow.py` |
 | [reports.md](reports.md) | PDF reports (single subject and group), importance maps | `generate_report.py` |
 | [resampling.md](resampling.md) | Moving maps between MNI and native space | `utils/hcp_resample.py` |
-| [slurm-pipeline.md](slurm-pipeline.md) | Running everything on a SLURM cluster; the `pipeline` config section | `slurm/*` |
+| [slurm-pipeline.md](slurm-pipeline.md) | Running everything on a SLURM cluster; the `master` config section | `slurm/*` |
 
 Other documents: [THEORY.md](../THEORY.md) (scientific background and how each
 output maps to Kim et al., 2020), [tutorial/README.md](../tutorial/README.md)

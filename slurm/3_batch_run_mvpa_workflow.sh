@@ -35,7 +35,7 @@
 # `sbatch slurm/3_batch_run_mvpa_workflow.sh configs/my-study.json` from
 # anywhere. The config path (`$1`) is the only required input -- passed to
 # every array task the same way (SLURM_ARRAY_TASK_ID is a separate env var,
-# not a positional arg); its pipeline.scripts_dir is how this script
+# not a positional arg); its master.scripts_dir is how this script
 # locates the rest of the repo (see resolve_pipeline_config.sh) --
 # --output/--error log paths above are still plain SBATCH directives (no
 # variable substitution happens in them), so they resolve relative to
@@ -83,17 +83,17 @@ if [ -n "$TRIAL_RESTRICTION" ]; then
     TRIAL_RESTRICTION_ARGS=(--trial-restriction "$TRIAL_RESTRICTION")
 fi
 
-# pipeline.scripts_dir, read directly rather than relying on an exported
+# master.scripts_dir, read directly rather than relying on an exported
 # SCRIPTS_DIR or the job's working directory -- sbatch copies this script
 # into its own spool file before running it, so neither is reliable here
 # (see resolve_pipeline_config.sh's own header comment for the full reasoning)
 SCRIPTS_DIR=$(python3 -c "
 import json, sys
 with open('$CONFIG_FILE') as f:
-    print(json.load(f).get('pipeline', {}).get('scripts_dir', ''))
+    print(json.load(f).get('master', {}).get('scripts_dir', ''))
 ")
 if [ -z "$SCRIPTS_DIR" ]; then
-    echo "$(basename "$0"): $CONFIG_FILE's \"pipeline\" section is missing required field: scripts_dir" >&2
+    echo "$(basename "$0"): $CONFIG_FILE's \"master\" section is missing required field: scripts_dir (a config from before the section was renamed calls it \"pipeline\" -- rename it to \"master\")" >&2
     exit 1
 fi
 export SCRIPTS_DIR

@@ -4,7 +4,7 @@
 # pipeline (slurm/0_-4_) needs as plain shell variables -- the repo root
 # itself, analysis output locations, HCP derivatives roots, the group GM
 # mask, the MNI template -- by reading them directly from the config's own
-# "pipeline" section. There is nothing to hand-edit in this file itself;
+# "master" section. There is nothing to hand-edit in this file itself;
 # it's a resolver, not a variables file -- the only required input to the
 # whole pipeline is the config path each stage script takes as its own
 # first argument (`sbatch slurm/N_....sh <config.json>`).
@@ -18,7 +18,7 @@
 # `bash`, where that trick is reliable), and a stage script's working
 # directory is just wherever `sbatch` happened to be invoked from unless
 # --chdir is passed. Each of 1_-4_ therefore reads CONFIG_FILE's own
-# pipeline.scripts_dir *first*, before it can even locate this file, via a
+# master.scripts_dir *first*, before it can even locate this file, via a
 # small bootstrap block -- see any of 1_-4_ for the exact sequence:
 #
 #   CONFIG_FILE="$1"                          # validated first
@@ -27,7 +27,7 @@
 #
 # -- not run directly itself, has no #SBATCH directives or steps of its own.
 #
-# "pipeline": {
+# "master": {
 #   "scripts_dir": "/path/to/mvpa-decoding",
 #   "bids_hcp_root": "/path/to/bids-hcp",
 #   "hcppipe_root": "/path/to/HCPPipe",
@@ -75,13 +75,18 @@ config_path, required_arg = sys.argv[1], sys.argv[2]
 with open(config_path) as f:
     cfg = json.load(f)
 
-pipeline = cfg.get("pipeline", {})
+if "master" not in cfg and "pipeline" in cfg:
+    print(f"resolve_pipeline_config.sh: {config_path} has an old \"pipeline\" section -- "
+          f"rename it to \"master\" (same fields)", file=sys.stderr)
+    sys.exit(1)
+
+pipeline = cfg.get("master", {})
 optional_fields = ["bids_hcp_root", "hcppipe_root", "group_gm_mask", "output_dir", "master_spreadsheet"]
 required = required_arg.split()
 
 missing = [k for k in required if k not in pipeline]
 if missing:
-    print(f"resolve_pipeline_config.sh: {config_path}'s \"pipeline\" section is missing "
+    print(f"resolve_pipeline_config.sh: {config_path}'s \"master\" section is missing "
           f"required field(s): {missing}", file=sys.stderr)
     sys.exit(1)
 

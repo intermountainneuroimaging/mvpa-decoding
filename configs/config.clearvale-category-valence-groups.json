@@ -151,7 +151,7 @@
     }
   },
 
-  "pipeline": {
+  "master": {
     "scripts_dir": "/pl/active/banich/studies/Clearvale/scripts/mvpa-decoding",
     "bids_hcp_root": "/pl/active/banich/studies/Clearvale/analysis/bids-hcp",
     "hcppipe_root": "/pl/active/banich/studies/Clearvale/analysis/HCPPipe",

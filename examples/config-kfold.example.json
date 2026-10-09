@@ -98,7 +98,7 @@
     }
   },
 
-  "pipeline": {
+  "master": {
     "_comment": "Only read by slurm/resolve_pipeline_config.sh -- irrelevant to running mvpa_workflow.py/generate_report.py directly (as the README's Quick start does). Every path here is a full, already-resolved absolute path -- see docs/slurm-pipeline.md.",
     "scripts_dir": "/path/to/mvpa-decoding",
     "bids_hcp_root": "/path/to/study/bids-hcp",
