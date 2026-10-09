@@ -1169,7 +1169,7 @@ def model_classification(training_data, training_labels, feature_selection_cfg: 
         if "liblinear" in str(exc) and "OneVsRestClassifier" in str(exc) and not one_vs_rest:
             raise ValueError(
                 f"{exc}\n\nSet model.classifier.one_vs_rest to true in your config to apply that "
-                f"one-vs-rest wrapper automatically (see README.md, model section)."
+                f"one-vs-rest wrapper automatically (see docs/model-config.md)."
             ) from exc
         raise
 
@@ -1420,7 +1420,7 @@ def timecourse_decoding(pipe, timecourse_data, timecourse_labels, timecourse_df,
     held-out k-fold classifier when a run appears in both
     model_conditions.training and model_conditions.timecourse_decoding, so
     that run is never decoded by a classifier that was partly trained on it
-    (see README.md's double-dipping warning). Rows whose boldfile isn't in
+    (see docs/running-the-workflow.md's double-dipping warning). Rows whose boldfile isn't in
     the mapping (or when the mapping is omitted entirely) are decoded with
     `pipe` as before. Keyed by boldfile rather than run number, since two
     different tasks can reuse the same run number for genuinely different

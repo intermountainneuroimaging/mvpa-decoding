@@ -15,7 +15,7 @@
 # (native2mni via hcp_resample.py), so the group report can average them onto
 # one shared grid instead of showing one per-subject page each (space not
 # asserted) (see
-# README.md section 7, "Importance maps are averaged across subjects only
+# docs/reports.md, "Importance maps are averaged across subjects only
 # when they share a common grid"), then builds one group PDF report
 # (report_<desc>.pdf) aggregating every subject the preceding
 # 3_batch_run_mvpa_workflow.sh array job wrote output for. Expects that array
@@ -108,7 +108,7 @@ source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 # model.desc in the config. MNI_TEMPLATE is used as the --reference grid so
 # every subject's warped map lands on the exact same grid the group average
 # needs (shape-mismatched subjects are otherwise excluded with a warning,
-# not a failure -- see README.md section 7).
+# not a failure -- see docs/reports.md).
 #
 # A subject's own sessions are assumed to share one native/structural
 # registration (the standard, non-longitudinal HCP Pipelines setup), so any

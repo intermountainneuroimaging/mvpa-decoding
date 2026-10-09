@@ -42,7 +42,7 @@
 # wherever `sbatch` was invoked from regardless.
 #
 # OPTIONAL second argument (`$2`): the balanced training-trial list written by
-# 2b_sbatch_restrict_master_spreadsheet.sh (README.md section 3b), e.g.
+# 2b_sbatch_restrict_master_spreadsheet.sh (docs/trial-restriction.md), e.g.
 #   sbatch slurm/3_batch_run_mvpa_workflow.sh configs/my-study.json \
 #       /path/to/master_spreadsheet_trial_restriction.csv
 # Given, it is passed to mvpa_workflow.py as --trial-restriction (overriding

@@ -50,7 +50,7 @@
 # reads before sourcing this file -- e.g. 1_batch_resample_native_mask.sh
 # and 4_sbatch_generate_report.sh's own native->MNI resample step are both
 # optional (skippable if your data's already in MNI space -- see
-# model.mnispace in README.md section 5), so a config that never runs stage
+# model.mnispace in docs/model-config.md), so a config that never runs stage
 # 1 and has no native-space importance maps to resample doesn't need to
 # supply hcppipe_root/group_gm_mask at all. Any field not in the caller's
 # required list is exported anyway if the config happens to set it, but

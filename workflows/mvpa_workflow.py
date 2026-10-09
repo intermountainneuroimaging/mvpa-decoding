@@ -21,11 +21,11 @@ only writes its own output) when its config section is present:
                                anchor. Unlike training/testing (step 2, and
                                transitively model.kfold_cv), this never applies
                                event_extraction.hemodynamic_lag -- see
-                               README.md section 4.
+                               docs/model-conditions.md.
 
 The complete-training-set classifier (step 2/3's "full model") is always fit,
 regardless of which of the above are configured, since timecourse decoding
-needs it whether or not a test set exists. See README.md sections 3-6 for the
+needs it whether or not a test set exists. See docs/event-extraction.md through docs/running-the-workflow.md for the
 config format and "Running mvpa_workflow.py" for what each step does.
 
 Double-dipping guard: a subject whose model_conditions.training shares a
@@ -33,7 +33,7 @@ bold file with testing/timecourse_decoding has its held-out test evaluation
 skipped entirely (no honest substitute classifier exists) and its
 overlapping timecourse rows decoded with their own held-out model.kfold_cv
 classifier instead of the full-training fit (or skipped too, if kfold_cv
-isn't configured) -- see boldfile_overlap() and README.md section 6's
+isn't configured) -- see boldfile_overlap() and docs/running-the-workflow.md's
 "Double-dipping guard" for the full explanation, and
 model.allow_train_test_overlap to opt out.
 
@@ -133,7 +133,7 @@ def parse_args():
         "--config",
         required=True,
         help="Path to the mvpa config JSON (event_extraction + model_conditions + model sections). "
-             "See README.md sections 3-6 and examples/config-*.example.json."
+             "See docs/event-extraction.md through docs/running-the-workflow.md and examples/config-*.example.json."
     )
 
     parser.add_argument(
@@ -146,7 +146,7 @@ def parse_args():
         "--trial-restriction",
         default=None,
         help="Optional balanced training-trial list from restrict_master_spreadsheet.py; same as, and overrides, "
-             "model_conditions.training.trial_restriction in the config (README.md section 3b). Training only."
+             "model_conditions.training.trial_restriction in the config (docs/trial-restriction.md). Training only."
     )
 
     return parser.parse_args()
@@ -274,7 +274,7 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
     model_conditions.timecourse_decoding row with a genuinely held-out classifier
     when its boldfile also appears in model_conditions.training, instead of the
     full-training classifier (which would have trained on it) -- see
-    README.md's double-dipping warning. fold_groups is resolved by the caller
+    docs/running-the-workflow.md's double-dipping warning. fold_groups is resolved by the caller
     (via resolve_kfold_folds) rather than here, so the trial-pivot-table sanity
     check can annotate rows with the exact same fold membership this function
     actually runs on."""
@@ -404,7 +404,7 @@ def main(args):
     # applied only when selecting which volumes of a matched training/testing
     # event to use (label_conditions_with_lag) -- the BOLD response peaks
     # several seconds after the real-world event, not during it.
-    # timecourse_decoding never applies this; see README.md section 4.
+    # timecourse_decoding never applies this; see docs/model-conditions.md.
     hemodynamic_lag = full_cfg.get("event_extraction", {}).get("hemodynamic_lag", 0)
 
     training_conditions = model_conditions["training"]["conditions"]
@@ -448,7 +448,7 @@ def main(args):
     permutation_test_cfg = model_cfg.get("permutation_test")
 
     # optional escape hatch for the double-dipping guard below -- see
-    # README.md's warning. Default False: independence between training and
+    # docs/running-the-workflow.md's warning. Default False: independence between training and
     # testing/timecourse is enforced automatically, not opt-in.
     allow_train_test_overlap = model_cfg.get("allow_train_test_overlap", False)
 
@@ -544,8 +544,8 @@ def main(args):
     #     configured, there's no held-out classifier to substitute, so
     #     timecourse decoding is skipped entirely.
     #   - model.allow_train_test_overlap: true disables both of the above,
-    #     restoring the original (leakage-prone) behavior -- see README.md's
-    #     warning before using this.
+    #     restoring the original (leakage-prone) behavior -- see
+    #     docs/running-the-workflow.md's warning before using this.
     # -------------------------------------------------
     run_test_evaluation = testing_df is not None
     use_kfold_for_timecourse = False  # set True below when kfold-substitution should be used
@@ -553,8 +553,8 @@ def main(args):
 
     # structured record of what (if anything) the guard did -- written to
     # <subject>_double_dipping_report.json below and read back by
-    # generate_report.py to render an in-report warning (see README.md
-    # section 6/7's "Double-dipping guard"). "handling" is one of
+    # generate_report.py to render an in-report warning (see
+    # docs/running-the-workflow.md's "Double-dipping guard"). "handling" is one of
     # "skipped" / "kfold_substitution" / "overwritten"; None means no
     # overlap was found (no report entry needed for that section).
     double_dipping_report = {}
@@ -571,7 +571,7 @@ def main(args):
                 handling = "overwritten"
             else:
                 print("  -> Skipping the held-out test evaluation for this subject (no test/ output). "
-                      "Set model.allow_train_test_overlap: true to evaluate anyway (NOT recommended -- see README.md).")
+                      "Set model.allow_train_test_overlap: true to evaluate anyway (NOT recommended -- see docs/running-the-workflow.md).")
                 run_test_evaluation = False
                 handling = "skipped"
             double_dipping_report["test"] = {
@@ -595,7 +595,7 @@ def main(args):
             else:
                 print("  -> model.kfold_cv is not configured, so there is no held-out classifier available for "
                       "these rows. Skipping timecourse decoding for this subject. Configure model.kfold_cv, or "
-                      "set model.allow_train_test_overlap: true to decode anyway (NOT recommended -- see README.md).")
+                      "set model.allow_train_test_overlap: true to decode anyway (NOT recommended -- see docs/running-the-workflow.md).")
                 skip_timecourse = True
                 handling = "skipped"
             double_dipping_report["timecourse"] = {

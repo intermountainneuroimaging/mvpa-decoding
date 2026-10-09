@@ -110,7 +110,7 @@ written under `test/` and labeled "Full" by `generate_report.py`. This
 config doesn't set `model.kfold_cv`, so it doesn't also cross-validate
 within the 9 training runs -- see
 [`config-kfold-haxby.example.json`](config-kfold-haxby.example.json) and
-[README.md section 5](../README.md#5-model) for the fold-based alternative
+[docs/model-config.md](../docs/model-config.md) for the fold-based alternative
 (`model.kfold_cv`, written under `model/` and labeled "CV"), which portions
 training data itself into successive held-out folds instead of relying on a
 single fixed split. A few configuration settings to pay attention to:
@@ -147,7 +147,7 @@ Wrote 1452 rows to master_spreadsheet_haxby.csv
 ```
 
 1452 = 12 runs x 121 volumes -- one row per BOLD volume of every run, no
-exclusions, no `hemodynamic_lag` shift (see README.md section 3). Each
+exclusions, no `hemodynamic_lag` shift (see [docs/event-extraction.md](../docs/event-extraction.md)). Each
 volume's `trial_type`/`onset`/`duration` come from whichever real event
 covers it, including the `rest` gaps between blocks (blank `trial_type`
 there, not dropped) and the individual 0.5s stimulus presentations within
@@ -183,7 +183,7 @@ these counts are each category's real per-block volume count -- close to,
 but not exactly, 108/36 for training/testing (9/3 runs x 12 stimuli) since
 this is a direct count of real per-frame `trial_type` values, not the
 `hemodynamic_lag`-shifted volume selection `mvpa_workflow.py` actually uses
-for training/testing (see README.md section 4's `label_conditions_with_lag`)
+for training/testing (see [docs/model-conditions.md](../docs/model-conditions.md)'s `label_conditions_with_lag`)
 -- a close, not exact, sanity-check proxy. `timecourse_decoding`'s own counts
 happen to match `testing`'s here only because this config's `timecourse_decoding.conditions`
 are byte-identical to `testing`'s (both real per-frame `trial_type` counts,
@@ -259,9 +259,9 @@ ventral temporal cortex carries distinguishable, distributed patterns for
 these categories. `scissors` is the weakest category (AUC 0.63), plausibly
 confusable with `chair`/other elongated-object categories (see the
 confusion matrix's `bottle`<->`scissors`/`chair`<->`shoe` cross-talk) in a
-whole-brain mask this crude. `permutation_test` (README.md section 5,
+whole-brain mask this crude. `permutation_test` ([docs/model-config.md](../docs/model-config.md),
 1000 permutations) confirms both accuracy and AUC are significant at
-p < 0.001 -- see [`generate_report.py`](../README.md#7-generating-a-report-workflowsgenerate_reportpy)
+p < 0.001 -- see [`generate_report.py`](../docs/reports.md)
 or `test/1_permutation_test.csv` for the full numbers if you run it
 yourself.
 

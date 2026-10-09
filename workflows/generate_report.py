@@ -727,7 +727,7 @@ def render_title_page(pdf, desc, subjects, config_path, output_path):
 
 def load_double_dipping_report(analysis_output_dir: str, desc: str, subject: str) -> dict:
     """Contents of <subject>_double_dipping_report.json -- written by
-    mvpa_workflow.py's double-dipping guard (README.md section 6) only when
+    mvpa_workflow.py's double-dipping guard (docs/running-the-workflow.md) only when
     it actually found model_conditions.training/testing or
     training/timecourse_decoding boldfile overlap for this subject. {} (the
     common case) means the guard found nothing to report -- training and
@@ -764,7 +764,7 @@ def _double_dipping_message(section_label: str, info: dict) -> str:
 def render_double_dipping_page(pdf, analysis_output_dir, desc, subjects):
     """A dedicated warning page -- rendered only when at least one subject in
     scope actually has a double-dipping report (mvpa_workflow.py's guard,
-    see README.md section 6's "Double-dipping guard") -- so a well-formed
+    see docs/running-the-workflow.md's "Double-dipping guard") -- so a well-formed
     config with genuinely independent training/testing/timecourse produces
     no page at all, exactly as before this guard existed."""
     reports = {s: load_double_dipping_report(analysis_output_dir, desc, s) for s in subjects}
@@ -780,7 +780,7 @@ def render_double_dipping_page(pdf, analysis_output_dir, desc, subjects):
         "model_conditions.training shared bold file(s) with testing and/or",
         "timecourse_decoding for the subject(s) below -- evaluating or decoding",
         "on data a classifier was (even partly) trained on inflates apparent",
-        "performance. See README.md section 6, \"Double-dipping guard\".",
+        "performance. See docs/running-the-workflow.md, \"Double-dipping guard\".",
         "",
     ]
     for s in subjects:
@@ -1110,7 +1110,7 @@ def resolve_overlay_styles(overlay_conditions: dict) -> dict:
         for the first color-less entry of each line_type -- so e.g. two
         conditions sharing line_type="dashed" but no explicit color still
         land on different colors, while still lining up with same-numbered
-        solid/dashed pairs that *do* share a color (see README.md section 4).
+        solid/dashed pairs that *do* share a color (see docs/model-conditions.md).
 
     Entries that never appear in the data still get resolved (harmless --
     render_timecourse_pages only ever looks up categories actually present)."""

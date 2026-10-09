@@ -11,8 +11,7 @@
 #SBATCH --mem=8G
 #
 # OPTIONAL single (non-array) job between stages 2 and 3: builds the balanced
-# training-trial list (workflows/restrict_master_spreadsheet.py, README.md
-# section 3b) for the whole dataset from master_spreadsheet.csv. Skip it and
+# training-trial list (workflows/restrict_master_spreadsheet.py, docs/trial-restriction.md) for the whole dataset from master_spreadsheet.csv. Skip it and
 # the pipeline is unchanged. It is not part of 0_submit_mvpa_pipeline.sh --
 # run it yourself after stage 2 and before stage 3:
 #
