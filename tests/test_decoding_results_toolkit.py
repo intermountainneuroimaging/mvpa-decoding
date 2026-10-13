@@ -16,6 +16,9 @@ import pytest
 
 from _interactive_notebooks.decoding_results_toolkit import (
     load_decoding_results,
+    balance_trial_table,
+    weighted_group_mean,
+    balance_preceding_category,
     select_evidence_value,
     apply_filters,
     derive_label,
@@ -35,6 +38,9 @@ from _interactive_notebooks.decoding_results_toolkit import (
     first_significant_bin,
     mark_onsets_in_rows,
     draw_significance_table,
+    draw_stat_strip,
+    baseline_correct_timecourses,
+    baseline_only_bins,
     STAT_METHODS,
     fdr_correct,
     split_half_group_difference,
@@ -960,3 +966,342 @@ class TestDrawSignificanceTable:
         assert list(tab.get_yticks()) == []
         assert not any(sp.get_visible() for sp in tab.spines.values())
         plt.close(fig)
+
+
+class TestDrawStatStrip:
+    STATS = pd.DataFrame({"tr_start": [0, 3, 6], "tr_end": [2, 5, 8], "p_fdr": [0.01, 0.5, 0.04]})
+
+    def _strip(self, stats=None, **kw):
+        fig, (top, strip) = plt.subplots(2, 1, sharex=True)
+        top.plot([0, 9], [0, 1])
+        draw_stat_strip(strip, self.STATS if stats is None else stats, alpha=0.05, p_col="p_fdr", tr_seconds=2.0, **kw)
+        return fig, strip
+
+    def test_white_star_in_each_significant_cell_only(self):
+        fig, strip = self._strip()
+        stars = [t for t in strip.texts if t.get_text() == "*"]
+        assert len(stars) == 2 and all(t.get_color() == "white" for t in stars)
+        assert sorted(t.get_position()[0] for t in stars) == [3.0, 15.0]     # centers of bins 0 and 2 at 2 s/TR
+        plt.close(fig)
+
+    def test_significant_cells_are_dark_and_others_light(self):
+        fig, strip = self._strip()
+        by_x = {p.get_x(): p.get_facecolor()[0] for p in strip.patches}
+        assert by_x[0.0] < 0.5 and by_x[6.0] > 0.85 and by_x[12.0] < 0.5
+        plt.close(fig)
+
+    def test_framed_with_time_axis_labels_kept_and_no_legend(self):
+        fig, strip = self._strip()
+        assert all(sp.get_visible() for sp in strip.spines.values())
+        assert strip.xaxis.get_tick_params()["labelbottom"] is True or strip.xaxis.get_ticklabels()
+        assert strip.get_legend() is None and len(strip.texts) == 2
+        plt.close(fig)
+
+    def test_label_is_written_to_the_left(self):
+        from matplotlib.offsetbox import AnchoredOffsetbox
+        fig, strip = self._strip(label="Face: pos vs. neg")
+        boxes = [a for a in strip.artists if isinstance(a, AnchoredOffsetbox)]
+        assert [t.get_text() for t in boxes[0].get_child().get_children()] == ["Face: pos vs. neg"]
+        plt.close(fig)
+
+    def test_empty_stats_draw_an_empty_strip_without_error(self):
+        fig, strip = self._strip(stats=self.STATS.iloc[0:0])
+        assert len(strip.patches) == 0 and len(strip.texts) == 0
+        plt.close(fig)
+
+    def test_default_table_is_unchanged_by_the_new_options(self):
+        fig, (top, tab) = plt.subplots(2, 1, sharex=True)
+        draw_significance_table(tab, [{"parts": [("A", "blue")], "stats": self.STATS}], p_col="p_fdr", tr_seconds=2.0)
+        assert not any(sp.get_visible() for sp in tab.spines.values())
+        assert not [t for t in tab.texts if t.get_text() == "*"]
+        assert tab.get_legend() is not None
+        plt.close(fig)
+
+
+class TestSignificanceTableDirection:
+    # bins: 0 significant ABOVE zero, 1 significant BELOW zero, 2 not significant, 3 significant BELOW zero
+    STATS = pd.DataFrame({"tr_start": [0, 3, 6, 9], "tr_end": [2, 5, 8, 11], "p_fdr": [0.01, 0.02, 0.5, 0.03],
+                          "mean_diff": [0.05, -0.04, -0.02, -0.06]})
+
+    def _dark_cells(self, direction):
+        fig, (top, tab) = plt.subplots(2, 1, sharex=True)
+        row = {"parts": [("X", "black")], "stats": self.STATS}
+        if direction:
+            row["direction"] = direction
+        draw_significance_table(tab, [row], p_col="p_fdr", tr_seconds=1.0, stars=True)
+        dark = sorted(p.get_x() for p in tab.patches if p.get_facecolor()[0] < 0.7)
+        stars = sorted(t.get_position()[0] for t in tab.texts if t.get_text() == "*")
+        plt.close(fig)
+        return dark, stars
+
+    def test_no_direction_counts_either_sign(self):
+        assert self._dark_cells(None)[0] == [0.0, 3.0, 9.0]
+
+    def test_negative_ignores_a_window_significant_above_zero(self):
+        dark, stars = self._dark_cells("negative")
+        assert dark == [3.0, 9.0] and stars == [4.5, 10.5]
+
+    def test_positive_counts_only_windows_above_zero(self):
+        assert self._dark_cells("positive")[0] == [0.0]
+
+    def test_rows_with_and_without_direction_can_share_a_table(self):
+        fig, (top, tab) = plt.subplots(2, 1, sharex=True)
+        rows = [{"parts": [("below", "black")], "stats": self.STATS, "direction": "negative"},
+                {"parts": [("either", "black")], "stats": self.STATS}]
+        draw_significance_table(tab, rows, p_col="p_fdr", tr_seconds=1.0)
+        top_row = sorted(p.get_x() for p in tab.patches if p.get_y() == 1 and p.get_facecolor()[0] < 0.7)
+        bottom_row = sorted(p.get_x() for p in tab.patches if p.get_y() == 0 and p.get_facecolor()[0] < 0.7)
+        assert top_row == [3.0, 9.0] and bottom_row == [0.0, 3.0, 9.0]
+        plt.close(fig)
+
+
+class TestBaselineCorrection:
+    @staticmethod
+    def _data():
+        rows = []
+        for subject, offset in (("s1", 0.0), ("s2", 1.0)):
+            for valence, shift in (("pos", 0.0), ("neg", 0.5)):
+                for trial in range(4):
+                    for w in range(6):
+                        # a shared shape plus subject / valence offsets and trial noise that averages out
+                        noise = (-1) ** trial * 0.1
+                        rows.append({"subject": subject, "valence": valence, "trial_index": trial, "window_index": w,
+                                     "value": offset + shift + 0.1 * w + noise})
+        return pd.DataFrame(rows)
+
+    def test_each_groups_mean_baseline_becomes_zero(self):
+        out, dropped = baseline_correct_timecourses(self._data(), ["subject", "valence"], (0, 1, 2))
+        assert dropped == 0
+        tc = out.groupby(["subject", "valence", "window_index"])["value"].mean().reset_index()
+        first3 = tc[tc.window_index < 3].groupby(["subject", "valence"])["value"].mean()
+        assert np.allclose(first3, 0.0)
+
+    def test_subtracts_one_constant_per_group_so_shape_is_preserved(self):
+        data = self._data()
+        out, _ = baseline_correct_timecourses(data, ["subject", "valence"], (0, 1, 2))
+        diff = (data["value"] - out["value"]).groupby([data["subject"], data["valence"]]).agg(["min", "max"])
+        assert np.allclose(diff["min"], diff["max"])           # the same constant for every row of a group
+        # s1/pos baseline = mean(0, 0.1, 0.2) = 0.1 (trial noise cancels in the trial average)
+        assert np.isclose(diff.loc[("s1", "pos"), "min"], 0.1)
+
+    def test_baseline_is_the_mean_of_the_trial_averaged_time_course(self):
+        # unequal trial counts per window: baseline must be the mean of the per-window MEANS, not of all rows
+        df = pd.DataFrame({"subject": "s", "window_index": [0, 0, 0, 1, 2], "value": [1.0, 1.0, 1.0, 4.0, 7.0]})
+        out, _ = baseline_correct_timecourses(df, ["subject"], (0, 1, 2))
+        assert np.allclose(out["value"], df["value"] - 4.0)    # mean(1, 4, 7) = 4, not mean of all rows (2.8)
+
+    def test_groups_without_any_baseline_data_are_dropped_and_counted(self):
+        df = pd.DataFrame({"subject": ["a", "a", "b", "b"], "window_index": [0, 5, 4, 5], "value": [1.0, 2.0, 3.0, 4.0]})
+        out, dropped = baseline_correct_timecourses(df, ["subject"], (0, 1, 2))
+        assert dropped == 2 and set(out["subject"]) == {"a"}
+
+    def test_input_is_not_modified_and_index_is_kept(self):
+        data = self._data(); before = data.copy()
+        out, _ = baseline_correct_timecourses(data, ["subject", "valence"], (0, 1, 2))
+        pd.testing.assert_frame_equal(data, before)
+        assert list(out.index) == list(data.index)
+
+    def test_condition_differences_in_the_baseline_are_removed_per_group(self):
+        data = self._data()
+        raw = data.groupby(["valence", "window_index"])["value"].mean().unstack(0)
+        out, _ = baseline_correct_timecourses(data, ["subject", "valence"], (0, 1, 2))
+        cor = out.groupby(["valence", "window_index"])["value"].mean().unstack(0)
+        assert abs((raw["pos"] - raw["neg"]).iloc[:3].mean()) > 0.4          # raw pos/neg differ by the 0.5 offset
+        assert abs((cor["pos"] - cor["neg"]).iloc[:3].mean()) < 1e-9         # ...and not after correction
+
+    def test_baseline_only_bins(self):
+        assert baseline_only_bins((0, 1, 2), 3) == {0}
+        assert baseline_only_bins((0, 1, 2), 1) == {0, 1, 2}
+        assert baseline_only_bins((0, 1, 2), 2) == {0}      # bin 1 covers TRs 2-3, only half inside the baseline
+        assert baseline_only_bins((0, 1, 2), 4) == set()    # no bin is wholly inside
+        assert baseline_only_bins((3, 4, 5), 3) == {1}
+        assert baseline_only_bins((6, 7, 8), 3) == {2}       # the first three operation-phase TRs are exactly one stat bin
+        assert baseline_only_bins((7, 8, 9), 3) == set()     # a shifted baseline straddles bins, so none is wholly inside
+
+
+# ---------------------------------------------------------------- balancing on the preceding trial
+
+def _ordered_trial_table(sequences):
+    """sequences: {(subject, boldfile, valence): [trial_type, ...]} -> a build_trial_table-shaped frame."""
+    rows = []
+    for (subject, boldfile, valence), seq in sequences.items():
+        for i, tt in enumerate(seq, start=1):
+            prev = "<start>" if i == 1 else seq[i - 2]
+            rows.append(dict(subject=subject, boldfile=boldfile, trial_index=i, valence=valence, trial_type=tt,
+                             operation=tt.split("_")[0] if tt else np.nan, category=tt.split("_")[1] if tt else np.nan,
+                             previous_trial=prev))
+    return pd.DataFrame(rows)
+
+
+class TestBalancePrecedingCategory:
+    # acquisition: clear_face, clear_face, clear_face, clear_place, clear_face
+    #   predecessors: start (diff), face (same), face (same), face (diff), place (diff)
+    #   -> clear_face: same = 2, different = 2 (start, place) ; clear_place: same 0, different 1
+    SEQ = ["clear_face", "clear_face", "clear_face", "clear_place", "clear_face"]
+
+    def test_each_cell_keeps_equal_numbers_of_same_and_different(self):
+        kept, report = balance_trial_table(_ordered_trial_table({("1", "a", "pos"): self.SEQ * 2}))
+        cell = report.set_index(["subject", "operation", "category", "valence"])
+        r = cell.loc[("1", "clear", "face", "pos")]
+        assert r["n_same_category"] == 5 and r["n_different_or_no_category"] == 3 and r["n_kept_per_group"] == 3
+        assert kept["predecessor"].value_counts().to_dict() == {"same": 3, "different": 3}      # clear_place has no same-category trial: nothing kept
+
+    def test_first_trial_of_an_acquisition_counts_as_different(self):
+        _, report = balance_trial_table(_ordered_trial_table({("1", "a", "pos"): ["clear_face", "clear_face"]}))
+        r = report.iloc[0]
+        assert r["n_same_category"] == 1 and r["n_different_or_no_category"] == 1 and r["n_kept_per_group"] == 1
+
+    def test_a_cell_missing_one_group_keeps_nothing(self):
+        kept, report = balance_trial_table(_ordered_trial_table({("1", "a", "pos"): self.SEQ}))
+        r = report.set_index(["operation", "category"]).loc[("clear", "place")]
+        assert r["n_same_category"] == 0 and r["n_kept_per_group"] == 0
+        assert not ((kept["trial_index"] == 4)).any()
+
+    def test_balancing_is_per_subject(self):
+        kept, report = balance_trial_table(_ordered_trial_table({("1", "a", "pos"): self.SEQ, ("2", "b", "pos"): ["clear_face"] * 5}))
+        per = report[(report["category"] == "face")].set_index("subject")
+        assert per.loc["1", "n_kept_per_group"] == 2           # same 2, different 2
+        assert per.loc["2", "n_kept_per_group"] == 1           # same 4, different 1 (the first trial)
+        assert set(kept["subject"]) == {"1", "2"}
+
+    def test_kept_trials_are_a_subset_and_seed_is_reproducible(self):
+        trials = _ordered_trial_table({("1", "a", "pos"): self.SEQ * 4})
+        k1, _ = balance_trial_table(trials, seed=3)
+        k2, _ = balance_trial_table(trials, seed=3)
+        assert k1.equals(k2)
+        keys = set(map(tuple, trials[["subject", "boldfile", "trial_index"]].to_numpy()))
+        assert set(map(tuple, k1[["subject", "boldfile", "trial_index"]].to_numpy())) <= keys
+        k3, _ = balance_trial_table(trials, seed=4)
+        assert len(k3) == len(k1)
+
+    def test_within_can_pool_categories(self):
+        _, report = balance_trial_table(_ordered_trial_table({("1", "a", "pos"): self.SEQ}), within=("operation", "valence"))
+        r = report.iloc[0]
+        assert r["n_same_category"] == 2 and r["n_different_or_no_category"] == 3 and r["n_kept_per_group"] == 2
+
+    def test_trial_after_a_typeless_trial_is_left_out_and_counted(self):
+        trials = _ordered_trial_table({("1", "a", "pos"): ["clear_face", "clear_face", "clear_face"]})
+        trials.loc[1, ["trial_type", "operation", "category"]] = np.nan        # the middle trial has no type
+        trials.loc[2, "previous_trial"] = np.nan                                  # so its successor's predecessor is unknown
+        kept, report = balance_trial_table(trials)
+        assert report.attrs["n_trials_with_unknown_predecessor"] == 1
+        assert not (kept["trial_index"] == 3).any()
+
+    def test_balance_preceding_category_works_from_a_raw_decoding_table(self):
+        rows = []
+        vol = 0
+        for i, tt in enumerate(["clear_face", "clear_face", "clear_place"], start=1):
+            for w, label in enumerate([tt.replace("clear", "view")] * 2 + [tt] * 2 + ["trial_fixation"] * 2):
+                rows.append(dict(subject="1", session="A1", task="WMpos", run=1, boldfile="a", trial_index=i, window_index=w,
+                                 volume_of_interest=vol, trial_type=label))
+                vol += 1
+        kept, report = balance_preceding_category(pd.DataFrame(rows))
+        assert set(report.columns) >= {"subject", "operation", "category", "valence", "n_kept_per_group"}
+        assert len(kept) == 2 and set(kept["predecessor"]) == {"same", "different"}
+
+
+class TestWeightedBalancing:
+    SEQ = ["clear_face", "clear_face", "clear_face", "clear_place", "clear_face"]   # clear_face: same 2, different 2
+
+    def test_weighted_mode_keeps_every_trial_of_a_balanceable_cell_with_inclusion_probability_weights(self):
+        seq = self.SEQ * 2                                       # clear_face: same 5, different 3 -> k = 3
+        kept, report = balance_trial_table(_ordered_trial_table({("1", "a", "pos"): seq}), mode="weighted")
+        faces = kept[kept["trial_index"].isin([i for i, tt in enumerate(seq, start=1) if tt == "clear_face"])]
+        assert len(kept) == len(faces) == 8                      # all 8 face trials; clear_place has no same-category trial: dropped
+        w = faces.groupby("predecessor")["weight"].agg(["count", "sum", "min", "max"])
+        assert w.loc["same", "count"] == 5 and w.loc["same", "sum"] == pytest.approx(3.0) and w.loc["same", "min"] == pytest.approx(3 / 5)
+        assert w.loc["different", "sum"] == pytest.approx(3.0) and w.loc["different", "max"] == pytest.approx(1.0)
+        r = report.set_index("category").loc["face"]
+        assert r["inclusion_probability_same_category"] == pytest.approx(0.6) and r["inclusion_probability_different_or_no_category"] == 1.0
+
+    def test_weighted_mode_does_not_depend_on_the_seed(self):
+        trials = _ordered_trial_table({("1", "a", "pos"): self.SEQ * 3})
+        k1, _ = balance_trial_table(trials, seed=1, mode="weighted")
+        k2, _ = balance_trial_table(trials, seed=2, mode="weighted")
+        assert k1.equals(k2)
+
+    def test_subsample_mode_weights_are_all_one(self):
+        kept, _ = balance_trial_table(_ordered_trial_table({("1", "a", "pos"): self.SEQ * 2}))
+        assert (kept["weight"] == 1.0).all()
+
+    def test_unknown_mode_is_refused(self):
+        with pytest.raises(ValueError, match="mode"):
+            balance_trial_table(_ordered_trial_table({("1", "a", "pos"): self.SEQ}), mode="bootstrap")
+
+    def test_weighted_mean_is_the_average_over_every_possible_subsample(self):
+        """The point of the weighted mode: weights k/n make the weighted mean equal the mean of the
+        subsample mean over all equally likely draws."""
+        from itertools import combinations
+        rng = np.random.default_rng(0)
+        n_same, n_diff, k = 5, 3, 3
+        same_vals, diff_vals = rng.normal(size=n_same), rng.normal(size=n_diff)
+        draws = [np.mean(np.concatenate([same_vals[list(c)], diff_vals])) for c in combinations(range(n_same), k)]
+        df = pd.DataFrame({"g": "x", "value": np.concatenate([same_vals, diff_vals]),
+                           "weight": [k / n_same] * n_same + [k / n_diff] * n_diff})
+        assert weighted_group_mean(df, "g", "value", "weight").loc["x"] == pytest.approx(np.mean(draws))
+
+
+class TestWeightedMeans:
+    def test_no_weight_column_is_the_plain_groupby_mean(self):
+        df = pd.DataFrame({"g": list("aabb"), "value": [1.0, 3.0, 5.0, np.nan]})
+        assert weighted_group_mean(df, "g").to_dict() == df.groupby("g")["value"].mean().to_dict()
+
+    def test_weighted_mean_and_missing_values(self):
+        df = pd.DataFrame({"g": list("aaab"), "value": [1.0, 3.0, np.nan, 2.0], "w": [1.0, 3.0, 10.0, 0.5]})
+        out = weighted_group_mean(df, ["g"], "value", "w")
+        assert out["a"] == pytest.approx((1 * 1 + 3 * 3) / 4)       # the NaN row counts for neither sum
+        assert out["b"] == pytest.approx(2.0) and out.name == "value"
+
+    def test_aggregate_by_subject_window_weights(self):
+        df = pd.DataFrame({"subject": "1", "window_index": 0, "cond": ["a", "a", "b"], "value": [0.0, 1.0, 5.0], "w": [1.0, 3.0, 1.0]})
+        wide = aggregate_by_subject_window(df, condition_col="cond", weight_col="w")
+        assert wide.loc[("1", 0), "a"] == pytest.approx(0.75) and wide.loc[("1", 0), "b"] == 5.0
+        assert aggregate_by_subject_window(df, condition_col="cond").loc[("1", 0), "a"] == pytest.approx(0.5)
+
+    def test_baseline_correction_uses_the_weighted_time_course(self):
+        rows = []
+        for trial, (w, v) in enumerate([(1.0, [0.0, 0.0, 10.0]), (3.0, [4.0, 4.0, 4.0])]):
+            for t, val in enumerate(v):
+                rows.append(dict(subject="1", cond="x", trial=trial, window_index=t, value=val, w=w))
+        df = pd.DataFrame(rows)
+        out, dropped = baseline_correct_timecourses(df, ["subject", "cond"], (0, 1), weight_col="w")
+        assert dropped == 0
+        base = (0 * 1 + 4 * 3) / 4                                    # weighted mean at windows 0 and 1
+        assert out.loc[(out["trial"] == 0) & (out["window_index"] == 2), "value"].iloc[0] == pytest.approx(10 - base)
+        plain, _ = baseline_correct_timecourses(df, ["subject", "cond"], (0, 1))
+        assert plain.loc[(plain["trial"] == 0) & (plain["window_index"] == 2), "value"].iloc[0] == pytest.approx(10 - 2.0)
+
+
+class TestWeightedSplitHalf:
+    def _long(self, n_subjects=6, n_trials=8, seed=0):
+        rng = np.random.default_rng(seed)
+        rows = []
+        for s in range(n_subjects):
+            for cond, shift in (("a", 0.5), ("b", 0.0)):
+                for tr in range(n_trials):
+                    weight = rng.uniform(0.2, 1.0)
+                    for w in range(6):
+                        rows.append(dict(subject=str(s), cond=cond, boldfile="f", trial_index=(cond == "b") * 100 + tr,
+                                         window_index=w, value=shift + rng.normal(), weight=weight))
+        return pd.DataFrame(rows)
+
+    def test_unit_weights_reproduce_the_unweighted_result(self):
+        df = self._long().assign(weight=1.0)
+        a = split_half_group_difference(df, "cond", "a", "b", bin_size=3, n_splits=50, seed=1)
+        b = split_half_group_difference(df, "cond", "a", "b", bin_size=3, n_splits=50, seed=1, weight_col="weight")
+        pd.testing.assert_frame_equal(a, b)
+
+    def test_full_mean_diff_is_the_weighted_statistics_pipeline_number(self):
+        df = self._long()
+        sh = split_half_group_difference(df, "cond", "a", "b", bin_size=3, n_splits=20, seed=0, weight_col="weight")
+        wide = aggregate_by_subject_window(df, condition_col="cond", weight_col="weight")
+        per_bin, _ = bin_by_size(wide, bin_size=3, tr_offset=0)
+        stats_table = compare_conditions_by_bin(per_bin, "a", "b", method="ttest_1samp_diff", alternative="two-sided", fdr=None)
+        merged = sh.merge(stats_table, on="bin")
+        assert np.allclose(merged["full_mean_diff"], merged["mean_diff"])
+
+    def test_weights_change_the_answer(self):
+        df = self._long()
+        plain = split_half_group_difference(df, "cond", "a", "b", bin_size=3, n_splits=20, seed=0)
+        weighted = split_half_group_difference(df, "cond", "a", "b", bin_size=3, n_splits=20, seed=0, weight_col="weight")
+        assert not np.allclose(plain["full_mean_diff"], weighted["full_mean_diff"])

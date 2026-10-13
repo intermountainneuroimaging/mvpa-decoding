@@ -23,6 +23,11 @@ configurable pipeline, so a new analysis picks just the pieces it needs:
                                                 average_across_groups combines
                                                 several such tables with equal
                                                 weight each (e.g. face + place)
+  trial balance: balance_preceding_category    equal say for trials that follow a same-
+                                                category vs different/no-category trial
+                                                per subject x condition cell, by random
+                                                subsampling or by weights (all trials);
+                weighted_group_mean            the weighted means that go with the weights
   baseline:     subtract_baseline             (matched on shared index, e.g.
                                                subject + window_index)
   windows:      bin_by_size, bin_by_edges     (adjustable stat windows --
@@ -176,13 +181,30 @@ def derive_label(df: pd.DataFrame, column: str, mapping: dict, new_col: str, reg
 # Aggregation
 # =====================================================
 
+def weighted_group_mean(df: pd.DataFrame, by, value_col: str = "value", weight_col: str = None) -> pd.Series:
+    """Mean of value_col within each group of `by` (a column name or list), named value_col.
+    With `weight_col` it is the weighted mean sum(w * v) / sum(w); rows with a missing value
+    count for neither sum, as in a plain groupby mean. weight_col=None is exactly
+    df.groupby(by)[value_col].mean()."""
+    if weight_col is None:
+        return df.groupby(by)[value_col].mean()
+    valid = df[value_col].notna()
+    weights = df[weight_col].where(valid)
+    keys = [df[b] for b in ([by] if isinstance(by, str) else list(by))]
+    numerator = (df[value_col] * df[weight_col]).where(valid).groupby(keys).sum()
+    denominator = weights.groupby(keys).sum()
+    return (numerator / denominator.where(denominator > 0)).rename(value_col)
+
+
 def aggregate_by_subject_window(df: pd.DataFrame, condition_col: str, value_col: str = "value",
-                                 subject_col: str = "subject", window_col: str = "window_index") -> pd.DataFrame:
+                                 subject_col: str = "subject", window_col: str = "window_index",
+                                 weight_col: str = None) -> pd.DataFrame:
     """(subject, window_index) x condition_col's levels -- mean of value_col
-    across every row sharing that (subject, window, condition). Call this
+    across every row sharing that (subject, window, condition), weighted by
+    `weight_col` if given (see weighted_group_mean). Call this
     once per subgroup you want kept separate (e.g. once per stimulus), or
     once on the whole dataframe for no subgrouping at all."""
-    grouped = df.groupby([subject_col, window_col, condition_col])[value_col].mean()
+    grouped = weighted_group_mean(df, [subject_col, window_col, condition_col], value_col, weight_col)
     return grouped.unstack(condition_col)
 
 
@@ -412,12 +434,14 @@ def _split_masks(n_units: int, n_splits: int, rng) -> tuple:
     return ranks < half, (ranks >= half) & (ranks < 2 * half)
 
 
-def _half_means(matrix: np.ndarray, mask: np.ndarray) -> np.ndarray:
+def _half_means(matrix: np.ndarray, mask: np.ndarray, weights: np.ndarray = None) -> np.ndarray:
     """NaN-aware mean of `matrix` (units x timepoints) over each row of
-    `mask` (n_splits x units) -> (n_splits, timepoints)."""
+    `mask` (n_splits x units) -> (n_splits, timepoints); weighted by `weights`
+    (one per unit) if given."""
     valid = np.isfinite(matrix)
-    sums = mask.astype(float) @ np.where(valid, matrix, 0.0)
-    counts = mask.astype(float) @ valid.astype(float)
+    selected = mask.astype(float) if weights is None else mask.astype(float) * weights[None, :]
+    sums = selected @ np.where(valid, matrix, 0.0)
+    counts = selected @ valid.astype(float)
     with np.errstate(invalid="ignore", divide="ignore"):
         return np.where(counts > 0, sums / counts, np.nan)
 
@@ -426,7 +450,7 @@ def split_half_group_difference(df: pd.DataFrame, condition_col: str, cond_a: st
                                  bin_size: int = 3, value_col: str = "value", subject_col: str = "subject",
                                  time_col: str = "window_index", trial_cols=("boldfile", "trial_index"),
                                  tr_offset: int = 0, n_splits: int = 1000, seed: int = 0,
-                                 min_trials: int = 2) -> pd.DataFrame:
+                                 min_trials: int = 2, weight_col: str = None) -> pd.DataFrame:
     """If the same participants were run again, how reliable is the group-level
     finding "condition a differs from condition b" in each time bin?
 
@@ -443,7 +467,11 @@ def split_half_group_difference(df: pd.DataFrame, condition_col: str, cond_a: st
     Then, n_splits times: every subject's trials in each of the two conditions
     are randomly cut into two equal halves (separately per condition, an odd
     trial left out), the group mean difference is computed in each half, and
-    the halves are compared. Subjects need at least `min_trials` (>= 2) trials
+    the halves are compared. With `weight_col`, every trial carries a weight
+    (one per trial, constant over its timepoints) and all means -- the full data
+    and each half -- are weighted means, as in aggregate_by_subject_window(...,
+    weight_col=...); the weights are the full-data ones, so a half's mean is a
+    weighted mean of the trials that landed in it. Subjects need at least `min_trials` (>= 2) trials
     in BOTH conditions to take part; the rest are left out of every split and
     of full_mean_diff (n_subjects counts those who took part).
 
@@ -474,8 +502,10 @@ def split_half_group_difference(df: pd.DataFrame, condition_col: str, cond_a: st
     if sub.empty:
         return pd.DataFrame()
     rng = np.random.default_rng(seed)
-    wide = sub.pivot_table(index=[subject_col, condition_col] + trial_cols, columns=time_col,
-                           values=value_col, aggfunc="mean")
+    index_cols = [subject_col, condition_col] + trial_cols
+    wide = sub.pivot_table(index=index_cols, columns=time_col, values=value_col, aggfunc="mean")
+    unit_weights = (sub.groupby(index_cols)[weight_col].first().reindex(wide.index).to_numpy(dtype=float)
+                    if weight_col is not None else None)
     times = wide.columns.to_numpy()
     bins = np.unique(times // bin_size)
     bin_matrix = ((times[:, None] // bin_size) == bins[None, :]).astype(float)  # (timepoints, bins)
@@ -487,17 +517,22 @@ def split_half_group_difference(df: pd.DataFrame, condition_col: str, cond_a: st
             return np.where(counts > 0, (np.where(valid > 0, x, 0.0) @ bin_matrix) / counts, np.nan)
 
     full_diffs, half_a, half_b = [], [], []
+    position = np.arange(len(wide))
     for _, g in wide.groupby(level=subject_col, sort=False):
         conds = g.index.get_level_values(condition_col)
         values = g.to_numpy(dtype=float)
+        rows = position[wide.index.get_indexer(g.index)]
+        wa = wb = None
+        if unit_weights is not None:
+            wa, wb = unit_weights[rows][conds == cond_a], unit_weights[rows][conds == cond_b]
         ma, mb = values[conds == cond_a], values[conds == cond_b]
         if len(ma) < min_trials or len(mb) < min_trials:
             continue
-        full_diffs.append((bin_means(_half_means(ma, np.ones((1, len(ma)), dtype=bool)))
-                           - bin_means(_half_means(mb, np.ones((1, len(mb)), dtype=bool))))[0])
+        full_diffs.append((bin_means(_half_means(ma, np.ones((1, len(ma)), dtype=bool), wa))
+                           - bin_means(_half_means(mb, np.ones((1, len(mb)), dtype=bool), wb)))[0])
         (a1, a2), (b1, b2) = _split_masks(len(ma), n_splits, rng), _split_masks(len(mb), n_splits, rng)
-        half_a.append(bin_means(_half_means(ma, a1)) - bin_means(_half_means(mb, b1)))
-        half_b.append(bin_means(_half_means(ma, a2)) - bin_means(_half_means(mb, b2)))
+        half_a.append(bin_means(_half_means(ma, a1, wa)) - bin_means(_half_means(mb, b1, wb)))
+        half_b.append(bin_means(_half_means(ma, a2, wa)) - bin_means(_half_means(mb, b2, wb)))
     if not full_diffs:
         return pd.DataFrame()
 
@@ -583,7 +618,9 @@ def annotate_significance(ax, bin_stats: pd.DataFrame, alpha: float = 0.05, colo
 def draw_significance_table(ax, rows, alpha: float = 0.05, p_col: str = "p_fdr", tr_seconds: float = 1.0,
                             tr_start_col: str = "tr_start", tr_end_col: str = "tr_end",
                             sig_color: str = "0.55", ns_color: str = "0.93", legend_label: str = None,
-                            label_fontsize: float = 8, window_numbers: bool = True):
+                            label_fontsize: float = 8, window_numbers: bool = True, stars: bool = False,
+                            frame: bool = False, xaxis: bool = False, show_legend: bool = True,
+                            value_col: str = "mean_diff"):
     """A graphic table of which time windows differ significantly, in the style
     of a trajectory figure's footer: one row per comparison, one column per
     stat window, a dark cell where the window is significant and a light one
@@ -600,16 +637,31 @@ def draw_significance_table(ax, rows, alpha: float = 0.05, p_col: str = "p_fdr",
     [("Switch", "blue"), (" vs. ", "black"), ("Suppress", "red")]) and `stats`
     has tr_start_col, tr_end_col and p_col, one row per window. A window with
     a missing p is left blank. Windows are numbered 1..N under the first row's
-    columns. The axes is stripped of ticks and spines."""
+    columns. By default the axes is stripped of ticks and spines.
+
+    stars=True writes a white "*" in every significant cell; frame=True keeps a
+    thin black outline around the table; xaxis=True keeps the bottom tick
+    labels (shared with the plot above), so the time axis can sit underneath
+    the table instead of the plot; show_legend=False omits the shading legend.
+    draw_stat_strip below is the one-row version of these settings.
+
+    A row may also carry "direction": "negative" or "positive" -- then a
+    window only counts as significant when p < alpha AND that row's value_col
+    (the window's mean difference, "mean_diff" by default) is below / above
+    zero; a window significant in the other direction is drawn as not
+    significant. Rows without "direction" count either sign."""
     from matplotlib.offsetbox import AnchoredOffsetbox, HPacker, TextArea
     from matplotlib.patches import Patch, Rectangle
 
     n = len(rows)
     ax.set_ylim(0, n)
     ax.set_yticks([])
-    ax.tick_params(bottom=False, labelbottom=False)
+    ax.tick_params(bottom=xaxis, labelbottom=xaxis)
     for side in ("top", "right", "left", "bottom"):
-        ax.spines[side].set_visible(False)
+        ax.spines[side].set_visible(frame)
+        if frame:
+            ax.spines[side].set_color("black")
+            ax.spines[side].set_linewidth(0.8)
 
     for i, row in enumerate(rows):
         y0 = n - 1 - i
@@ -619,8 +671,16 @@ def draw_significance_table(ax, rows, alpha: float = 0.05, p_col: str = "p_fdr",
                 continue
             x0 = w[tr_start_col] * tr_seconds
             width = (w[tr_end_col] + 1 - w[tr_start_col]) * tr_seconds
-            ax.add_patch(Rectangle((x0, y0), width, 1, facecolor=sig_color if p < alpha else ns_color,
+            significant = p < alpha
+            if row.get("direction") == "negative":
+                significant = significant and w[value_col] < 0
+            elif row.get("direction") == "positive":
+                significant = significant and w[value_col] > 0
+            ax.add_patch(Rectangle((x0, y0), width, 1, facecolor=sig_color if significant else ns_color,
                                    edgecolor="white", linewidth=1.5))
+            if stars and significant:
+                ax.text(x0 + width / 2, y0 + 0.42, "*", color="white", ha="center", va="center",
+                        fontsize=12, fontweight="bold")
         pieces = [TextArea(text, textprops=dict(color=color, fontsize=label_fontsize,
                                                 fontweight="normal" if color == "black" else "bold"))
                   for text, color in row["parts"]]
@@ -635,10 +695,144 @@ def draw_significance_table(ax, rows, alpha: float = 0.05, p_col: str = "p_fdr",
             xc = (w[tr_start_col] + w[tr_end_col] + 1) / 2 * tr_seconds
             ax.text(xc, -0.12, str(k + 1), ha="center", va="top", fontsize=7, color="gray", clip_on=False)
 
-    label = legend_label or f"{p_col} < {alpha}"
-    ax.legend(handles=[Patch(facecolor=sig_color, label=label), Patch(facecolor=ns_color, label="n.s.")],
-              loc="upper center", bbox_to_anchor=(0.5, -0.22 if window_numbers else -0.05), ncol=2, frameon=False,
-              fontsize=8, handlelength=1.2)
+    if show_legend:
+        label = legend_label or f"{p_col} < {alpha}"
+        ax.legend(handles=[Patch(facecolor=sig_color, label=label), Patch(facecolor=ns_color, label="n.s.")],
+                  loc="upper center", bbox_to_anchor=(0.5, -0.22 if window_numbers else -0.05), ncol=2, frameon=False,
+                  fontsize=8, handlelength=1.2)
+
+
+def draw_stat_strip(ax, stats, label: str = "Positive vs. Negative", alpha: float = 0.05, p_col: str = "p_fdr",
+                    tr_seconds: float = 1.0, **kwargs):
+    """A single-row stat strip to sit directly under a time-series plot: one
+    cell per stat window at its real time position, dark with a white "*"
+    where `stats` (tr_start, tr_end, p_col) is significant and light where it
+    is not, outlined in black, with the time axis tick labels underneath (it
+    shares the plot's x-axis, so create both with sharex). `label` is written
+    to the left of the strip. Extra keyword arguments pass through to
+    draw_significance_table."""
+    settings = dict(sig_color="0.35", ns_color="0.93", stars=True, frame=True, xaxis=True, show_legend=False,
+                    window_numbers=False)
+    settings.update(kwargs)
+    draw_significance_table(ax, [{"parts": [(label, "black")], "stats": stats}], alpha=alpha, p_col=p_col,
+                            tr_seconds=tr_seconds, **settings)
+
+
+def baseline_correct_timecourses(df: pd.DataFrame, group_cols, baseline_windows, value_col: str = "value",
+                                  window_col: str = "window_index", weight_col: str = None):
+    """Per-participant baseline correction of trial-level evidence.
+
+    For every group in `group_cols` (e.g. subject, operation, category,
+    valence) the trials are first averaged into that group's time course (mean
+    over trials at each `window_col` value). The baseline is the mean of that
+    time course over `baseline_windows` (e.g. (0, 1, 2): the first three TRs of
+    the trial, i.e. its first three view-period timepoints), and it is
+    subtracted from `value_col` at every timepoint of the group. Doing it per
+    trial row is the same as subtracting it from the group's time course, and it
+    means any later pooling or averaging (across groups, then across
+    participants) works on already-corrected values.
+
+    Groups with no data at any baseline window have no baseline and are
+    dropped (they cannot be corrected). With `weight_col` the group's time
+    course is the weighted mean over trials (see weighted_group_mean). Returns
+    (corrected copy, number of rows dropped)."""
+    group_cols = list(group_cols)
+    data = df.dropna(subset=group_cols + [window_col])
+    timecourse = weighted_group_mean(data, group_cols + [window_col], value_col, weight_col).reset_index()
+    baseline = (timecourse[timecourse[window_col].isin(list(baseline_windows))]
+                .groupby(group_cols)[value_col].mean().rename("_baseline").to_frame())
+    out = df.join(baseline, on=group_cols)
+    missing = out["_baseline"].isna()
+    n_dropped = int(missing.sum())
+    out = out[~missing].copy()
+    out[value_col] = out[value_col] - out["_baseline"]
+    return out.drop(columns="_baseline"), n_dropped
+
+
+def baseline_only_bins(baseline_windows, bin_size: int) -> set:
+    """Stat bins (bin_by_size numbering) that lie entirely inside the baseline
+    windows. After baseline correction such a bin averages to zero in every
+    participant by construction, so it carries no information to test (and a
+    t-test on it would only amplify floating-point noise): leave it out of the
+    statistics."""
+    windows = set(baseline_windows)
+    candidate_bins = {w // bin_size for w in windows}
+    return {b for b in candidate_bins if all(t in windows for t in range(b * bin_size, (b + 1) * bin_size))}
+
+
+BALANCE_MODES = ("subsample", "weighted")
+
+
+def balance_trial_table(trials: pd.DataFrame, within=("operation", "category", "valence"), seed: int = 0,
+                        mode: str = "subsample"):
+    """Within every subject x `within` cell, give trials that follow a trial of the SAME
+    category as the one before them and trials that follow a trial of a DIFFERENT category
+    or no trial at all (the first trial of an acquisition) the same total say. Let k be the
+    size of the smaller group in a cell; `trials` is trial_order_analysis.build_trial_table()'s output.
+
+    mode="subsample": the smaller group is kept whole and the larger one is randomly thinned
+    to k trials (a fixed `seed` makes the draw reproducible; cells are visited in sorted
+    order). Every kept trial has weight 1.
+
+    mode="weighted": every trial of a cell with k > 0 is kept, with weight k / (size of its
+    group): the probability that "subsample" would have kept it. A weighted mean over these
+    trials is the average of the subsample mean over every possible draw, so it uses all
+    trials with no randomness (`seed` is not used). The smaller group has weight 1.
+
+    A cell with no trial in one of the two groups keeps nothing. A trial whose predecessor
+    has no type (a truncated trial) is left out: whether its predecessor had the same
+    category is unknown.
+
+    Returns (kept, report): `kept` is the retained trials (subject, boldfile, trial_index plus
+    `predecessor`, "same" or "different", and `weight`); `report` has one row per subject x
+    cell with the trial counts before balancing, the number kept per group (subsample) or
+    the size of the smaller group (weighted) in n_kept_per_group, and each group's inclusion
+    probability."""
+    if mode not in BALANCE_MODES:
+        raise ValueError(f"mode must be one of {BALANCE_MODES}, got {mode!r}")
+    from _interactive_notebooks.trial_order_analysis import with_predecessor_flags
+    within = list(within)
+    flagged = with_predecessor_flags(trials)
+    flagged = flagged[flagged["trial_type"].notna()].copy()
+    same = flagged["same_category"].astype("boolean")
+    is_same = same.fillna(False).astype(bool)
+    is_different = (~same.fillna(True)).astype(bool) | flagged["is_first_trial"]      # known to differ, or no predecessor
+    flagged["predecessor"] = np.select([is_same, is_different], ["same", "different"], default="unknown")
+    n_unknown_predecessor = int((flagged["predecessor"] == "unknown").sum())
+    flagged = flagged[flagged["predecessor"] != "unknown"]
+    keys = ["subject", "boldfile", "trial_index"]
+    rng = np.random.default_rng(seed)
+    kept_parts, rows = [], []
+    for cell, g in flagged.groupby(["subject"] + within, sort=True):
+        same_rows = g[g["predecessor"] == "same"].sort_values(keys)
+        diff_rows = g[g["predecessor"] == "different"].sort_values(keys)
+        k = min(len(same_rows), len(diff_rows))
+        for part in (same_rows, diff_rows):
+            if not k:
+                continue
+            if mode == "subsample":
+                kept_parts.append(part.iloc[np.sort(rng.choice(len(part), size=k, replace=False))].assign(weight=1.0))
+            else:
+                kept_parts.append(part.assign(weight=k / len(part)))
+        rows.append(dict(zip(["subject"] + within, cell if isinstance(cell, tuple) else (cell,)),
+                         n_same_category=len(same_rows), n_different_or_no_category=len(diff_rows), n_kept_per_group=k,
+                         inclusion_probability_same_category=k / len(same_rows) if len(same_rows) else np.nan,
+                         inclusion_probability_different_or_no_category=k / len(diff_rows) if len(diff_rows) else np.nan))
+    columns = keys + ["predecessor", "weight"]
+    kept = pd.concat(kept_parts)[columns] if kept_parts else flagged.iloc[0:0].assign(weight=1.0)[columns]
+    report = pd.DataFrame(rows)
+    report.attrs["n_trials_with_unknown_predecessor"] = n_unknown_predecessor
+    report.attrs["mode"] = mode
+    return kept.reset_index(drop=True), report
+
+
+def balance_preceding_category(decoding: pd.DataFrame, within=("operation", "category", "valence"), seed: int = 0,
+                               mode: str = "subsample"):
+    """balance_trial_table() on the trials of a raw decoding table (one row per decoded TR, with
+    subject, session, task, run, boldfile, trial_index, window_index, volume_of_interest and
+    trial_type). Returns (kept, report) -- see balance_trial_table."""
+    from _interactive_notebooks.trial_order_analysis import build_trial_table
+    return balance_trial_table(build_trial_table(decoding), within=within, seed=seed, mode=mode)
 
 
 def first_significant_bin(bin_stats: pd.DataFrame, alpha: float = 0.05, p_col: str = "p_value",
