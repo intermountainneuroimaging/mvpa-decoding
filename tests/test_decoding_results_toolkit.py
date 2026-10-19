@@ -18,6 +18,8 @@ from _interactive_notebooks.decoding_results_toolkit import (
     load_decoding_results,
     balance_trial_table,
     weighted_group_mean,
+    describe_baseline_groups,
+    baseline_group_names,
     balance_preceding_category,
     select_evidence_value,
     apply_filters,
@@ -1305,3 +1307,41 @@ class TestWeightedSplitHalf:
         plain = split_half_group_difference(df, "cond", "a", "b", bin_size=3, n_splits=20, seed=0)
         weighted = split_half_group_difference(df, "cond", "a", "b", bin_size=3, n_splits=20, seed=0, weight_col="weight")
         assert not np.allclose(plain["full_mean_diff"], weighted["full_mean_diff"])
+
+
+class TestBaselineGroupsAndDescription:
+    def _frame(self):
+        rows = []
+        for v in ("pos", "neg"):
+            for obj in ("face", "place"):
+                for op in ("maintain", "clear"):
+                    for w in range(3):
+                        rows.append(dict(subject="1", valence=v, object=obj, operation=op, window_index=w, value=float(w) + (v == "pos")))
+        return pd.DataFrame(rows)
+
+    def test_names_of_valence_by_category_groups(self):
+        assert describe_baseline_groups(self._frame(), ("object", "valence")) == [
+            "positive faces", "positive places", "negative faces", "negative places"]
+
+    def test_names_with_the_operation_included(self):
+        names = describe_baseline_groups(self._frame(), ("object", "operation", "valence"))
+        assert len(names) == 8 and names[0] == "positive clear faces" and names[-1] == "negative maintain places"
+
+    def test_coarser_groups_pool_operations_into_one_baseline(self):
+        df = self._frame().assign(value=lambda d: d["value"] + np.where(d["operation"] == "clear", 10.0, 0.0))
+        out, dropped = baseline_correct_timecourses(df, ["subject", "object", "valence"], (0,))
+        assert dropped == 0
+        pos_face = out[(out["valence"] == "pos") & (out["object"] == "face")]
+        # the baseline is the mean over BOTH operations at window 0 ((1 + 11) / 2 = 6), subtracted from each
+        assert pos_face.loc[(pos_face["operation"] == "maintain") & (pos_face["window_index"] == 0), "value"].iloc[0] == pytest.approx(1 - 6)
+        assert pos_face.loc[(pos_face["operation"] == "clear") & (pos_face["window_index"] == 0), "value"].iloc[0] == pytest.approx(11 - 6)
+        fine, _ = baseline_correct_timecourses(df, ["subject", "object", "operation", "valence"], (0,))
+        assert (fine.loc[fine["window_index"] == 0, "value"] == 0).all()           # per operation, window 0 is zero by construction
+
+
+class TestBaselineGroupNames:
+    def test_group_names_dict_keys_are_the_groupby_keys(self):
+        rows = [dict(valence=v, object=o, operation=op) for v in ("pos", "neg") for o in ("face", "place") for op in ("maintain", "clear")]
+        names = baseline_group_names(pd.DataFrame(rows), ("object", "valence"))
+        assert names[("face", "pos")] == "positive faces" and names[("place", "neg")] == "negative places"
+        assert list(names.values()) == ["positive faces", "positive places", "negative faces", "negative places"]

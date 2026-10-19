@@ -516,6 +516,16 @@ def baseline_bias(trials_with_baseline: pd.DataFrame):
     return table, pairwise, pd.DataFrame(tests), scenarios
 
 
+def pool_operations_in_labels(frame: pd.DataFrame) -> pd.DataFrame:
+    """The same table with trial_label = category + valence ("face_pos"): the operation is dropped, so
+    every analysis that groups trials by trial_label (the baseline per trial type, the bias, the dropped
+    trials) pools all operations of a category x valence into one trial type."""
+    out = frame.copy()
+    out["trial_label"] = np.where(out["category"].notna(), out["category"].astype(str) + "_" + out["valence"].astype(str), None)
+    out.loc[out["category"].isna(), "trial_label"] = np.nan
+    return out
+
+
 def contrast_bias(table: pd.DataFrame) -> pd.DataFrame:
     """The bias the notebooks' own contrasts inherit from what preceded the trials,
     from baseline_bias()'s per-trial-type table.
@@ -547,7 +557,12 @@ def contrast_bias(table: pd.DataFrame) -> pd.DataFrame:
             a, b = f"{op}_{category}_pos", f"{op}_{category}_neg"
             if a in labels and b in labels:
                 add("pos vs neg", "pos - neg", f"{op} {category}: pos - neg", a, b)
-    out = pd.DataFrame(rows)
+    for category in ("face", "place"):                          # operations pooled: trial types are category x valence
+        a, b = f"{category}_pos", f"{category}_neg"
+        if a in labels and b in labels:
+            add("pos vs neg", "pos - neg", f"{category}: pos - neg (operations pooled)", a, b)
+    out = pd.DataFrame(rows, columns=["contrast_type", "valence", "contrast", "trial_type_a", "trial_type_b",
+                                      "observed_baseline_difference", "bias_same_category", "bias_iti", "bias_total"])
     out["implied_shift_of_corrected_difference"] = -out["bias_total"]
     return out
 
@@ -614,6 +629,17 @@ def _type_marker(label: str) -> str:
     return {"maintain": "o", "suppress": "s", "switch": "^", "clear": "D"}.get(label.split("_")[0], "o")
 
 
+_BASELINE_LABEL = "TRs 1-3"     # the baseline TRs as they read in plot titles; set by analyse() from its baseline_windows
+
+
+def baseline_label(baseline_windows) -> str:
+    """"TRs 4-6" for window_index values (3, 4, 5): the 1-based TRs, as a range when they are consecutive."""
+    trs = sorted(int(w) + 1 for w in baseline_windows)
+    if len(trs) > 1 and trs == list(range(trs[0], trs[-1] + 1)):
+        return f"TRs {trs[0]}-{trs[-1]}"
+    return ("TR " if len(trs) == 1 else "TRs ") + ", ".join(str(t) for t in trs)
+
+
 MID_TRIAL_WINDOWS = (10, 11, 12)         # window_index of TRs 11-13 (1-based): the middle of the trial
 MID_TRIAL_COLUMN = "evidence_tr11_13"
 
@@ -672,7 +698,7 @@ def plot_carryover(trials_with_baseline: pd.DataFrame, table: pd.DataFrame):
     fig, axes = plt.subplots(1, n, figsize=(6.5 * n, 5.4), sharey=False)
     ax1, ax2 = axes[0], axes[-1]
     _draw_predecessor_panel(ax1, _baseline_by_subject_predecessor(trials_with_baseline),
-                            "(a) TRs 1-3: each subject's baseline by predecessor", "self-evidence, TRs 1-3 (baseline window)")
+                            f"(a) {_BASELINE_LABEL}: each subject's baseline by predecessor", f"self-evidence, {_BASELINE_LABEL} (baseline window)")
     if has_mid:
         _draw_predecessor_panel(axes[1], _baseline_by_subject_predecessor(trials_with_baseline, MID_TRIAL_COLUMN),
                                 "(b) TRs 11-13 (middle of the trial): the same, by predecessor", "self-evidence, TRs 11-13")
@@ -694,8 +720,8 @@ def plot_carryover(trials_with_baseline: pd.DataFrame, table: pd.DataFrame):
         note2 = f"r = {r:.2f}, p = {p:.1e}; slope {slope * 10:+.3f} per 10 percentage points"
     else:
         note2 = "too little variation to fit"
-    ax2.set_xlabel("% of the type's trials that follow a same-category trial"); ax2.set_ylabel("mean baseline-window self-evidence (TRs 1-3)")
-    ax2.set_title(f"{panel_c} TRs 1-3 across the 16 trial types (red = pos, blue = neg)\n{note2}", fontsize=10)
+    ax2.set_xlabel("% of the type's trials that follow a same-category trial"); ax2.set_ylabel(f"mean baseline-window self-evidence ({_BASELINE_LABEL})")
+    ax2.set_title(f"{panel_c} {_BASELINE_LABEL} across the {len(table)} trial types (red = pos, blue = neg)\n{note2}", fontsize=10)
     fig.tight_layout()
     return fig
 
@@ -740,7 +766,7 @@ def plot_iti(trials_with_baseline: pd.DataFrame, by_iti: pd.DataFrame = None, st
                 ax.text(g["iti_trs"].max() + 0.08, level, f"start block: {label} {level:.2f}", fontsize=7, va="center", color="#666666")
         ax.legend(frameon=False, fontsize=8, loc="upper left" if predecessor == "different category" else "lower right")
         ax.set_xlim(g["iti_trs"].min() - 0.3, g["iti_trs"].max() + 1.4)
-    axes[0].set_ylabel("mean evidence in the baseline TRs (1-3) +/- SE across subjects")
+    axes[0].set_ylabel(f"mean evidence in the baseline window ({_BASELINE_LABEL}) +/- SE across subjects")
     note = (f"; dotted = start block (last {start_block['last_trs']} of {start_block['block_trs']} TRs, {start_block['n_acquisitions']} acquisitions)"
             if start_block.get("n_acquisitions") else "")
     fig.suptitle("Baseline-window evidence vs ITI: the previous trial's category is still active at short ITIs and suppresses the other categories"
@@ -756,6 +782,10 @@ def plot_contrast_bias(contrasts: pd.DataFrame):
     fig, axes = plt.subplots(1, 2, figsize=(15, 6.5), gridspec_kw={"width_ratios": [1.15, 1]})
     for ax, kind in zip(axes, ("operation vs maintain", "pos vs neg")):
         c = contrasts[contrasts["contrast_type"] == kind].reset_index(drop=True)
+        if c.empty:
+            ax.axis("off")
+            ax.text(0.5, 0.5, f"no {kind} contrasts\n(operations are pooled)", ha="center", va="center", transform=ax.transAxes, fontsize=10, color="0.4")
+            continue
         y = np.arange(len(c))
         colors = ["#d62728" if v == "pos" else "#1f77b4" if v == "neg" else "#555555" for v in c["valence"]]
         ax.barh(y, c["implied_shift_of_corrected_difference"], color=colors, alpha=0.85)
@@ -772,7 +802,7 @@ def plot_contrast_bias(contrasts: pd.DataFrame):
         ax.set_xlabel("shift of the baseline-corrected A - B difference caused by what preceded the trials (evidence units)")
         ax.set_title(f"{kind}" + (" (red = pos, blue = neg)" if kind == "operation vs maintain" else ""), fontsize=10)
     fig.suptitle("Bias the notebooks' own contrasts inherit from the preceding trials' category and the ITI "
-                 "(TR 1-3 baseline correction)", fontsize=11, fontweight="bold")
+                 f"({_BASELINE_LABEL} baseline correction)", fontsize=11, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     return fig
 
@@ -790,7 +820,7 @@ def plot_restricting(tests: pd.DataFrame, scenarios: dict):
             ys = [scenarios[(valence, key)].mean().get(label, np.nan) for key, _ in names]
             ax.plot(range(len(names)), ys, marker=_type_marker(label), alpha=0.85, label=label.replace(f"_{valence}", ""))
         ax.set_xticks(range(len(names))); ax.set_xticklabels([n for _, n in names], fontsize=8)
-        ax.set_title(f"{valence.upper()} acquisitions: mean baseline (TRs 1-3) of each trial type", fontsize=10)
+        ax.set_title(f"{valence.upper()} acquisitions: mean baseline ({_BASELINE_LABEL}) of each trial type", fontsize=10)
         lines = []
         for key, label in names:
             r = tests[(tests["valence"] == valence) & (tests["trial_set"] == key)].iloc[0]
@@ -877,10 +907,15 @@ def iti_dependence_tests(trials: pd.DataFrame) -> pd.DataFrame:
 
 
 def analyse(decoding: pd.DataFrame, baseline_windows=(0, 1, 2), tr_seconds: float = DEFAULT_TR_SECONDS,
-            start_block_trs: int = 13, start_block_last_trs: int = 5) -> dict:
+            start_block_trs: int = 13, start_block_last_trs: int = 5, pool_operations: bool = False) -> dict:
     """Every table as a dict of DataFrames (see save() for the file names). The
     transition tables are built separately for the pos and the neg acquisitions
-    and use valence-labelled trial types ("maintain_face_pos")."""
+    and use valence-labelled trial types ("maintain_face_pos"). baseline_windows are window_index values
+    (0-based); the baseline analyses use them. pool_operations=True makes the baseline, bias and
+    dropped-trial analyses treat every category x valence ("face_pos") as one trial type, all operations
+    pooled; the transition tables keep the operation."""
+    global _BASELINE_LABEL
+    _BASELINE_LABEL = baseline_label(baseline_windows)
     trials = build_trial_table(decoding)
     usable = usable_transitions(trials)
     n_unknown = int(trials["trial_type"].isna().sum())
@@ -955,10 +990,13 @@ def analyse(decoding: pd.DataFrame, baseline_windows=(0, 1, 2), tr_seconds: floa
     out["start_block"] = start_block_evidence(decoding, start_block_trs, start_block_last_trs)
     out["start_block_table"] = start_block_table(decoding, start_block_last_trs)
 
-    (out["bias_by_trial_type"], out["bias_pairwise"], out["bias_tests"], out["bias_scenarios"]) = baseline_bias(with_baseline)
+    bias_frame, bias_trials = (pool_operations_in_labels(with_baseline), pool_operations_in_labels(trials)) if pool_operations else (with_baseline, trials)
+    (out["bias_by_trial_type"], out["bias_pairwise"], out["bias_tests"], out["bias_scenarios"]) = baseline_bias(bias_frame)
     out["contrast_bias"] = contrast_bias(out["bias_by_trial_type"])
-    out["dropped_per_subject"], out["kept_by_type"] = dropped_same_category(trials)
-    out["dropped_by_type"] = dropped_by_trial_type(trials)
+    out["dropped_per_subject"], out["kept_by_type"] = dropped_same_category(bias_trials)
+    out["dropped_by_type"] = dropped_by_trial_type(bias_trials)
+    summary["baseline_window"] = _BASELINE_LABEL
+    summary["operations_pooled_in_baseline_analyses"] = bool(pool_operations)
     dropped_all = out["dropped_per_subject"][out["dropped_per_subject"]["valence"] == "all"]
     kept_cells = out["kept_by_type"].drop(columns="min_per_trial_type")
     summary["same_category_trials_dropped_total"] = int(dropped_all["n_same_category_dropped"].sum())
@@ -1089,12 +1127,16 @@ def main():
                         help="how many TRs at the end of that block to average (default 5)")
     parser.add_argument("--baseline-timepoints", type=int, nargs="+", default=[1, 2, 3],
                         help="1-based TRs from the start of each trial used for the baseline-window check (default 1 2 3)")
+    parser.add_argument("--pool-operations", action="store_true",
+                        help="treat every category x valence (face_pos, ...) as one trial type in the baseline, bias and "
+                             "dropped-trial analyses, pooling the operations")
     args = parser.parse_args()
     cols = ["subject", "session", "task", "run", "boldfile", "trial_index", "window_index", "volume_of_interest",
             "trial_type", "evidence_face", "evidence_place", "evidence_item"]
     decoding = pd.read_csv(args.decoding_csv, usecols=lambda c: c in cols, dtype={"subject": str, "session": str})
     results = analyse(decoding, baseline_windows=[t - 1 for t in args.baseline_timepoints], tr_seconds=args.tr_seconds,
-                       start_block_trs=args.start_block_trs, start_block_last_trs=args.start_block_last_trs)
+                       start_block_trs=args.start_block_trs, start_block_last_trs=args.start_block_last_trs,
+                       pool_operations=args.pool_operations)
     files = save(results, args.output_dir)
     pd.set_option("display.width", 220, "display.max_columns", 30)
     print(results["summary"].to_string())

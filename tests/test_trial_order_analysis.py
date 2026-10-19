@@ -668,3 +668,49 @@ class TestEvidenceByIti:
         fig = toa.plot_iti(fake_iti_table(per_cell=1))               # every ITI has fewer than 10 trials
         assert len(fig.axes) == 2
         plt.close(fig)
+
+
+class TestBaselineWindowAndPooling:
+    def _decoding(self):
+        return decoding(*[acquisition(str(s), f"{s}-{r}", ORDER * 3, run=r, task=("WMpos" if r % 2 else "WMneg"), fixation_trs=[8] * 12)
+                          for s in range(3) for r in (1, 2)])
+
+    def test_baseline_label_reads_the_one_based_trs(self):
+        assert toa.baseline_label((0, 1, 2)) == "TRs 1-3" and toa.baseline_label((3, 4, 5)) == "TRs 4-6"
+        assert toa.baseline_label((6,)) == "TR 7" and toa.baseline_label((0, 2, 5)) == "TRs 1, 3, 6"
+
+    def test_baseline_window_changes_the_baseline_and_the_plot_labels(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        d = self._decoding()
+        d.loc[d["window_index"].isin([3, 4, 5]), ["evidence_face", "evidence_place"]] = 0.9
+        res = toa.analyse(d, baseline_windows=(3, 4, 5))
+        typed = res["trials_with_baseline"].query("trial_type == trial_type")
+        assert typed["baseline_evidence"].eq(0.9).all()
+        fig = toa.plot_carryover(res["trials_with_baseline"], res["bias_by_trial_type"])
+        assert "TRs 4-6" in fig.axes[0].get_title() and "TRs 4-6" in fig.axes[0].get_ylabel()
+        plt.close(fig)
+        toa.analyse(d)                                                    # back to the default label for later users
+        assert toa._BASELINE_LABEL == "TRs 1-3"
+
+    def test_pooling_operations_makes_trial_types_category_by_valence(self):
+        res = toa.analyse(self._decoding(), pool_operations=True)
+        assert set(res["bias_by_trial_type"]["trial_label"]) <= {"face_pos", "place_pos", "face_neg", "place_neg"}
+        assert set(res["dropped_by_type"]["trial_label"]) <= {"face_pos", "place_pos", "face_neg", "place_neg"}
+        unpooled = toa.analyse(self._decoding())
+        assert len(unpooled["bias_by_trial_type"]) > len(res["bias_by_trial_type"])
+        assert res["summary"].loc["operations_pooled_in_baseline_analyses", "value"] in (True, "True")
+        # the transition tables still keep the operation
+        assert any("maintain" in str(c) for c in res["group_counts_pos"].columns)
+
+    def test_pooled_contrasts_are_pos_minus_neg_per_category(self):
+        res = toa.analyse(self._decoding(), pool_operations=True)
+        c = res["contrast_bias"]
+        assert set(c["contrast_type"]) <= {"pos vs neg"}
+        assert all("operations pooled" in name for name in c["contrast"])
+
+    def test_pooled_plots_draw(self, tmp_path):
+        res = toa.analyse(self._decoding(), pool_operations=True)
+        files = toa.save(res, str(tmp_path))
+        assert (tmp_path / "plot_6_bias_in_the_notebook_contrasts.png").is_file() and (tmp_path / "plot_5_dropped_trials_same_category.png").is_file()

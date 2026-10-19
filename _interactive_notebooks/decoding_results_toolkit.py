@@ -749,6 +749,38 @@ def baseline_correct_timecourses(df: pd.DataFrame, group_cols, baseline_windows,
     return out.drop(columns="_baseline"), n_dropped
 
 
+def baseline_group_names(df: pd.DataFrame, group_cols, valence_col: str = "valence", operation_col: str = "operation") -> dict:
+    """{group key: plain-language name} for every distinct combination of `group_cols` in df, in
+    reading order (pos before neg, then operation, then category). The key is the tuple of the
+    combination's values in `group_cols` order -- what a groupby on those columns yields -- and the
+    name is e.g. "positive faces": valence reads positive / negative, an operation keeps its name,
+    any other column (the category) is pluralised (face -> faces). Words run valence, operation,
+    category."""
+    cols = list(group_cols)
+    combos = df[cols].dropna().drop_duplicates()
+    valence_order = {"pos": 0, "neg": 1}
+    nouns = {"face": "faces", "place": "places", "item": "items"}
+    category_cols = [c for c in cols if c not in (valence_col, operation_col)]
+    ordered = ([valence_col] if valence_col in cols else []) + ([operation_col] if operation_col in cols else []) + category_cols
+    rows = []
+    for _, r in combos.iterrows():
+        sort_key = tuple((valence_order.get(r[c], 2) if c == valence_col else str(r[c])) for c in ordered)
+        words = []
+        for c in ordered:
+            v = str(r[c])
+            words.append({"pos": "positive", "neg": "negative"}.get(v, v) if c == valence_col else (v if c == operation_col else nouns.get(v, v)))
+        rows.append((sort_key, tuple(r[c] for c in cols), " ".join(words)))
+    return {key: name for _, key, name in sorted(rows, key=lambda t: t[0])}
+
+
+def describe_baseline_groups(df: pd.DataFrame, group_cols, valence_col: str = "valence", operation_col: str = "operation") -> list:
+    """The names of baseline_group_names(), in reading order, e.g. ["positive faces",
+    "positive places", "negative faces", "negative places"] for group_cols = ("object", "valence"):
+    the trial groups that each get their own baseline in
+    baseline_correct_timecourses(df, ["subject", *group_cols], ...)."""
+    return list(baseline_group_names(df, group_cols, valence_col, operation_col).values())
+
+
 def baseline_only_bins(baseline_windows, bin_size: int) -> set:
     """Stat bins (bin_by_size numbering) that lie entirely inside the baseline
     windows. After baseline correction such a bin averages to zero in every
