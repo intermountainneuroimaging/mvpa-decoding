@@ -67,6 +67,7 @@ order.
 | `secondary_groups` | `{name: query}`, optional. Balanced *within* each primary group. |
 | `secondary_applies_to` | Optional list of primary group names that get the secondary split (default: all of them). Groups not listed are only equalized in total. |
 | `seed` | Integer (default 0). Dropped trials are chosen by a generator seeded from this and the subject ID, so reruns give identical output. |
+| `balance_trial_counts` | Optional boolean (default `true`). `false` skips step 1 below: no trial is dropped to equalize counts, `primary_groups` only say which trials are governed, and only the common TR count (step 2) is applied. |
 | `drop_strategy` | `"random"` (default), or `"spread_runs"`: drop from whichever run currently holds the most trials of that group, so the survivors stay evenly spread over runs (use this with a `per_run` `model.kfold_cv`). |
 
 **What it does, per subject (all of that subject's runs pooled):**
@@ -85,7 +86,13 @@ order.
    so `hemodynamic_lag` must match your analysis config. One trial cut short
    by the end of the scan therefore shortens them all.
 
-A subject for whom no balanced set exists (some group, or some secondary
+**With `model_conditions.training.extend_events_until`** ([model_conditions](model-conditions.md)) set in the config you pass as `--config`,
+a trial's TRs are counted over its *extended* window (e.g. operation + ITI up to the next trial's cue), so the common TR count is the shortest such
+window. A governed trial with nothing after it (the last trial of a run) has an open-ended window that runs to the end of the scan: it never sets
+the common count, it is cut to it when the scan leaves it that many TRs (with the lag applied), and when it does not it gets the audit status
+`open_window_too_short` and is not listed, so not used.
+
+A subject for whom no balanced set existsA subject for whom no balanced set exists (some group, or some secondary
 group within it, has no usable trials) is **excluded**: it gets no rows in the
 list, is reported, and `mvpa_workflow.py` refuses to run it with the list
 set -- it is never silently run unbalanced.
@@ -97,6 +104,10 @@ set -- it is never silently run unbalanced.
 | `<stem>_trial_restriction.csv` | The list `trial_restriction` points at: one row per trial training may use -- `subject, boldfile, trial_index, onset, trial_type, primary_group, secondary_group, n_trs, hemodynamic_lag`. Kept balanced trials carry their `n_trs`; trials in no primary group are listed with `n_trs` blank (whole window). A trial not listed is not used. |
 | `<stem>_trial_restriction_summary.csv` | Per subject x primary x secondary group (plus an `(all)` row per subject): `n_trials_original`/`n_trials_restricted`, `trs_per_trial_restricted`, and `n_trs_original`/`n_trs_restricted` (TRs training would select). Excluded subjects appear with their `exclusion_reason`. |
 | `<stem>_trial_restriction_audit.csv` | Every governed trial and its `status` (`kept`, `balance_drop`, `no_secondary_label`, `outside_scan`, `subject_excluded`). |
+Pass `--output <path>` (third argument of the slurm script `2b_sbatch_restrict_master_spreadsheet.sh`) to write the list somewhere other than
+`<stem>_trial_restriction.csv`: two analyses that share one master spreadsheet need their own lists, otherwise the second run overwrites the first.
+The summary and audit tables are then written beside it as `<path stem>_summary.csv` / `_audit.csv`. The audit `status` also has
+`open_window_too_short` (see above).
 
 `trial_index` is the 1..N numbering of a run's retained events in onset order
 that `label_conditions_with_lag` already uses. Because the list is keyed by

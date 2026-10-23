@@ -1,0 +1,18 @@
+{
+  "config_version": "1.0",
+  "created_by": "AKH",
+  "notes": "Supplementary config for workflows/restrict_master_spreadsheet.py, used with config.clearvale-operation-iti-liblinear-kfold.json. It does NOT balance trial counts (balance_trial_counts is false): every working-memory operation trial that has a complete operation + ITI window is kept. It only gives every kept trial the same number of TRs: the subject's shortest operation + ITI window (in this study 6 operation TRs + the shortest ITI), with the extra TRs cut off the END of the ITI. The last trial of every run has no following trial cue: its window runs to the end of the scan, it never sets the shared TR count, and it is kept when the scan leaves it that many TRs after the hemodynamic lag (otherwise audit status 'open_window_too_short'). The single primary group below must cover exactly what model_conditions.training selects (pass --config and read the log for '(!)' warnings).",
+
+  "seed": 0,
+  "drop_strategy": "random",
+  "balance_trial_counts": false,
+
+  "primary_groups": {
+    "operation": {
+      "and": [
+        {"column": "task", "match": "regex", "value": "^WM.*"},
+        {"column": "trial_type", "match": "regex", "value": ".*(maintain|suppress|switch|clear).*"}
+      ]
+    }
+  }
+}

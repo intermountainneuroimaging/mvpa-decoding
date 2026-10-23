@@ -91,6 +91,32 @@ itself says is happening there at that moment. `model.kfold_cv` ([model config](
 inherits this automatically, since it cross-validates entirely within
 whatever `training` already resolved this way.
 
+**`extend_events_until` -- windows longer than the event** (optional key of
+`training`, and of `testing`, next to `conditions`). By default a matched
+event contributes only its own `duration`. With
+
+```json
+"training": {
+  "conditions": { ... },
+  "extend_events_until": {"column": "trial_type", "match": "regex", "value": "view_.*"}
+}
+```
+
+each matched event's window instead runs from its onset to the onset of the
+**next event matching that query** (any retained event, whether or not it is
+one of the conditions) -- here an operation period plus the inter-trial
+interval after it, up to the next trial's view cue. The window is never
+shorter than the event's own duration, every volume in it carries the event's
+condition label, and `hemodynamic_lag` shifts the whole window. An event with
+no later match (the last trial of a run) has an **open-ended** window: it runs to
+the end of the scan, but only when the restriction list gives it an `n_trs` cap
+that bounds it (it then uses its first `n_trs` volumes); with no cap its length
+is undefined and it is **not used**. The query is validated like any other (`validate_model_config.py`
+requires it to match rows). To give every trial the same number of TRs, use the
+restriction step ([trial restriction](trial-restriction.md)), which counts TRs
+the same way when you pass it `--config`; `timecourse_decoding` does not take
+this key.
+
 **`timecourse_decoding`** -- *(optional)* continuous, real-event decoding,
 read from `master_spreadsheet.csv` like `training`/`testing`, but --
 critically -- **never** through `label_conditions_with_lag`: it decodes every

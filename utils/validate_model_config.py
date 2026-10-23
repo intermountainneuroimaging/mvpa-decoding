@@ -126,6 +126,14 @@ def validate_config(cfg: dict, valid_columns=None, df: pd.DataFrame = None):
         for name, query in conditions.items():
             errors.extend(validate_query_node(query, valid_columns, path=f"{prefix}.conditions[{name!r}]"))
 
+        extend_until = model_conditions[section].get("extend_events_until")
+        if extend_until is not None:
+            if section == "timecourse_decoding":
+                errors.append(f"{prefix}.extend_events_until: only applies to training/testing (timecourse decoding already "
+                              f"decodes every volume between trial_start_event matches)")
+            else:
+                errors.extend(validate_query_node(extend_until, valid_columns, path=f"{prefix}.extend_events_until"))
+
         if section == "timecourse_decoding":
             trial_start_event = model_conditions[section].get("trial_start_event")
             if trial_start_event is None:
@@ -168,6 +176,14 @@ def validate_config(cfg: dict, valid_columns=None, df: pd.DataFrame = None):
                         warnings.append(
                             f"{section}: conditions {a!r} and {b!r} overlap on {overlap} row(s) -- ambiguous label"
                         )
+
+            extend_until = model_conditions[section].get("extend_events_until")
+            if extend_until is not None and section != "timecourse_decoding":
+                n = int(evaluate_query_node(extend_until, df).sum())
+                if n == 0:
+                    errors.append(f"model_conditions.{section}.extend_events_until matches 0 rows in the master_spreadsheet")
+                else:
+                    print(f"  [{section}] extend_events_until: {n} rows")
 
             if section == "timecourse_decoding":
                 trial_start_event = model_conditions[section].get("trial_start_event")

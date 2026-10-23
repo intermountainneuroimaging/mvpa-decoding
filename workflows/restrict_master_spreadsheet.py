@@ -40,6 +40,17 @@ WHAT IT DOES (per subject, over all of that subject's runs together)
      +duration)), so --config (or --hemodynamic-lag) must match the analysis
      config.
 
+  With "balance_trial_counts": false in the restriction config, step 1 is
+  skipped: no trial is dropped to equalize counts and only step 2 (the common TR
+  count) is applied, so primary_groups only say which trials are governed.
+
+  If the analysis config sets model_conditions.training.extend_events_until
+  (pass --config), a trial's window is the event's own duration stretched to
+  the onset of the next event matching that query (e.g. operation + ITI up to
+  the next trial's cue), exactly as training selects it; a trial with no
+  following match (the last of a run) has an open-ended window that runs to the end of the scan: it cannot set the shared
+  TR count, it is kept if the scan leaves it at least that many TRs, and dropped (open_window_too_short) if not.
+
   A subject for whom no balanced set exists (a primary or secondary group is
   empty) is EXCLUDED -- it has no rows in the trial list, so mvpa_workflow.py
   refuses to run it rather than silently using an unbalanced set.
@@ -79,7 +90,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
 from utils.mvpa_common import (
-    compute_volume_range, evaluate_query_node, get_bold_header_info,
+    compute_volume_range, evaluate_query_node, extended_window_durations, get_bold_header_info,
     label_conditions_with_lag, load_retained_events, validate_query_node,
 )
 
@@ -91,6 +102,8 @@ DROP_STRATEGIES = ("random", "spread_runs")
 # trial status values in the audit table
 KEPT = "kept"
 DROPPED_OUTSIDE_SCAN = "outside_scan"            # lagged window falls entirely past the last volume
+DROPPED_OPEN_SHORT = "open_window_too_short"     # extend_events_until is set, nothing follows the trial (last trial of a run) and the
+                                                 # scan ends before it has the subject's common number of TRs
 DROPPED_NO_SECONDARY = "no_secondary_label"      # in a secondary-split primary group, matches no secondary group
 DROPPED_BALANCE = "balance_drop"                 # randomly dropped to equalize counts
 EXCLUDED_SUBJECT = "subject_excluded"            # the subject has no balanced set at all
@@ -111,7 +124,8 @@ def load_restriction_config(path: str) -> dict:
 def validate_restriction_config(cfg: dict) -> list:
     """Returns a list of problems (empty if the config is usable)."""
     errors = []
-    allowed = {"seed", "drop_strategy", "primary_groups", "secondary_groups", "secondary_applies_to", "notes", "created_by", "config_version"}
+    allowed = {"seed", "drop_strategy", "primary_groups", "secondary_groups", "secondary_applies_to", "balance_trial_counts",
+               "notes", "created_by", "config_version"}
     for key in cfg:
         if key not in allowed:
             errors.append(f"unknown key {key!r} (expected: {sorted(allowed)})")
@@ -141,6 +155,8 @@ def validate_restriction_config(cfg: dict) -> list:
             for a in applies:
                 if a not in primary:
                     errors.append(f"secondary_applies_to: {a!r} is not a primary group")
+    if "balance_trial_counts" in cfg and not isinstance(cfg["balance_trial_counts"], bool):
+        errors.append("balance_trial_counts: must be true or false")
     if "seed" in cfg and not isinstance(cfg["seed"], int):
         errors.append("seed: must be an integer")
     if cfg.get("drop_strategy", "random") not in DROP_STRATEGIES:
@@ -174,10 +190,13 @@ def first_match_labels(queries: dict, events: pd.DataFrame, what: str) -> pd.Ser
     return labels
 
 
-def collect_trials(master: pd.DataFrame, cfg: dict, hemodynamic_lag: float) -> pd.DataFrame:
+def collect_trials(master: pd.DataFrame, cfg: dict, hemodynamic_lag: float, extend_until: dict = None) -> pd.DataFrame:
     """One row per retained event (trial) of every run in the master spreadsheet,
     with its primary/secondary group (NA if none) and the number of volumes
-    training/testing would select for it (n_trs)."""
+    training/testing would select for it (n_trs). With `extend_until`
+    (model_conditions.training.extend_events_until) a trial's window runs to the
+    next matching event; one with none after it (`open_window` True) runs to the end of
+    the scan, so its n_trs is just what the scan leaves."""
     rows = []
     for boldfile, group in master.groupby("boldfile", sort=False):
         first = group.iloc[0]
@@ -191,8 +210,12 @@ def collect_trials(master: pd.DataFrame, cfg: dict, hemodynamic_lag: float) -> p
         events["secondary"] = first_match_labels(cfg.get("secondary_groups", {}), events, "secondary_groups")
 
         tr, n_frames = get_bold_header_info(boldfile)
+        window = extended_window_durations(events, extend_until)
+        events["open_window"] = window.isna()
         n_trs = []
-        for onset, duration in zip(events["onset"], events["duration"]):
+        for onset, duration in zip(events["onset"], window):
+            if pd.isna(duration):
+                duration = n_frames * tr                  # open-ended: to the end of the scan
             start = onset + hemodynamic_lag
             lo, hi = compute_volume_range(start, start + duration, tr, n_frames)
             n_trs.append(hi - lo)
@@ -201,7 +224,8 @@ def collect_trials(master: pd.DataFrame, cfg: dict, hemodynamic_lag: float) -> p
         rows.append(events)
 
     if not rows:
-        return pd.DataFrame(columns=["subject", "boldfile", "eventfile", "trial_index", "source_row", "primary", "secondary", "n_trs", "tr"])
+        return pd.DataFrame(columns=["subject", "boldfile", "eventfile", "trial_index", "source_row", "primary", "secondary", "n_trs", "tr",
+                                     "open_window"])
     return pd.concat(rows, ignore_index=True)
 
 
@@ -241,6 +265,19 @@ def choose_kept(candidates: pd.DataFrame, n_keep: int, strategy: str, rng: np.ra
     return [lab for v in by_run.values() for lab in v]
 
 
+def common_trs(trials: pd.DataFrame, status: pd.Series, is_open: pd.Series) -> int:
+    """The shared TR count of one subject's kept trials: the shortest kept trial whose window ends at a real
+    following event. A kept trial with an OPEN-ENDED window (nothing follows it: its window runs to the end of
+    the scan) cannot set that minimum -- it is cut to the shared count if the scan leaves it enough TRs, and
+    otherwise dropped here (status open_window_too_short). Edits `status` in place."""
+    kept = status == KEPT
+    closed = kept & ~is_open
+    trs = int((trials.loc[closed, "n_trs"] if closed.any() else trials.loc[kept, "n_trs"]).min())
+    too_short = kept & is_open & (trials["n_trs"] < trs)
+    status[too_short] = DROPPED_OPEN_SHORT
+    return trs
+
+
 def plan_subject(trials: pd.DataFrame, cfg: dict, subject: str) -> dict:
     """Decide which of one subject's trials to keep.
 
@@ -256,6 +293,7 @@ def plan_subject(trials: pd.DataFrame, cfg: dict, subject: str) -> dict:
     status = pd.Series(pd.NA, index=trials.index, dtype=object)
     governed = trials["primary"].notna()
 
+    is_open = trials["open_window"].astype(bool) if "open_window" in trials else pd.Series(False, index=trials.index)
     status[governed & (trials["n_trs"] < 1)] = DROPPED_OUTSIDE_SCAN
     needs_sec = trials["primary"].isin(split)
     status[governed & status.isna() & needs_sec & trials["secondary"].isna()] = DROPPED_NO_SECONDARY
@@ -265,6 +303,14 @@ def plan_subject(trials: pd.DataFrame, cfg: dict, subject: str) -> dict:
         out = status.copy()
         out[governed] = EXCLUDED_SUBJECT
         return {"status": out, "included": False, "reason": reason, "n_per_primary": 0, "trs_per_trial": None}
+
+    if cfg.get("balance_trial_counts", True) is False:
+        # no count balancing: every usable governed trial is kept, only the common TR count is applied
+        if not eligible.any():
+            return exclude("no usable trials")
+        status[eligible] = KEPT
+        trs = common_trs(trials, status, is_open)
+        return {"status": status, "included": True, "reason": "", "n_per_primary": 0, "trs_per_trial": trs}
 
     # trials available per (primary, bucket); bucket is None for an unsplit primary group
     buckets = {p: (secondary_names if p in split else [None]) for p in primary_names}
@@ -301,7 +347,7 @@ def plan_subject(trials: pd.DataFrame, cfg: dict, subject: str) -> dict:
 
     status[eligible] = DROPPED_BALANCE
     status[kept] = KEPT
-    trs = int(trials.loc[kept, "n_trs"].min())
+    trs = common_trs(trials, status, is_open)
     return {"status": status, "included": True, "reason": "", "n_per_primary": n_per_primary, "trs_per_trial": trs}
 
 
@@ -309,9 +355,9 @@ def plan_subject(trials: pd.DataFrame, cfg: dict, subject: str) -> dict:
 # Orchestration
 # =====================================================
 
-def restrict_trials(master: pd.DataFrame, cfg: dict, hemodynamic_lag: float):
+def restrict_trials(master: pd.DataFrame, cfg: dict, hemodynamic_lag: float, extend_until: dict = None):
     """Returns (trial list, summary table, audit table)."""
-    trials = collect_trials(master, cfg, hemodynamic_lag)
+    trials = collect_trials(master, cfg, hemodynamic_lag, extend_until)
     trials["status"] = pd.NA
     trials["subject"] = trials["subject"].astype(str)
 
@@ -391,7 +437,8 @@ def build_summary(trials: pd.DataFrame, plans: dict, cells: list, split: set) ->
     return pd.DataFrame(rows)
 
 
-def find_ungoverned_condition_trials(master: pd.DataFrame, trials: pd.DataFrame, model_conditions: dict, hemodynamic_lag: float) -> list:
+def find_ungoverned_condition_trials(master: pd.DataFrame, trials: pd.DataFrame, model_conditions: dict, hemodynamic_lag: float,
+                                     extend_until: dict = None) -> list:
     """Trials that model_conditions.training selects but no primary group
     governs, so they stay unbalanced: [(section, condition, n_ungoverned,
     n_total)], only for conditions with n_ungoverned > 0. The usual cause is a
@@ -403,7 +450,7 @@ def find_ungoverned_condition_trials(master: pd.DataFrame, trials: pd.DataFrame,
         conditions = (model_conditions.get(section) or {}).get("conditions") or {}
         if not conditions:
             continue
-        labeled = label_conditions_with_lag(master, conditions, hemodynamic_lag)
+        labeled = label_conditions_with_lag(master, conditions, hemodynamic_lag, extend_until=extend_until)
         if labeled.empty:
             continue
         per_trial = labeled.drop_duplicates(["regressor_label", "boldfile", "trial_index"])
@@ -467,7 +514,10 @@ def main():
     master = pd.read_csv(args.master_spreadsheet, dtype=str, keep_default_na=False)
     print(f"Restricting {args.master_spreadsheet} ({master['subject'].nunique()} subject(s)), hemodynamic_lag={lag}")
 
-    trial_list, summary, audit = restrict_trials(master, cfg, lag)
+    extend_until = (main_cfg.get("model_conditions", {}).get("training") or {}).get("extend_events_until")
+    if extend_until:
+        print(f"Windows follow model_conditions.training.extend_events_until: each trial runs to the next matching event")
+    trial_list, summary, audit = restrict_trials(master, cfg, lag, extend_until)
     summary.to_csv(summary_csv, index=False)
     audit.to_csv(audit_csv, index=False)
     print_report(summary)
@@ -475,7 +525,8 @@ def main():
         raise SystemExit("No subject has a balanced trial set -- no trial list written (summary and audit saved).")
 
     if main_cfg.get("model_conditions"):
-        ungoverned = find_ungoverned_condition_trials(master, collect_trials(master, cfg, lag), main_cfg["model_conditions"], lag)
+        ungoverned = find_ungoverned_condition_trials(master, collect_trials(master, cfg, lag, extend_until), main_cfg["model_conditions"], lag,
+                                                      extend_until)
         for section, name, n_un, n_total in ungoverned:
             print(f"(!) model_conditions.{section}.{name}: {n_un} of its {n_total} trial(s) are in no primary group, so they are NOT "
                   f"balanced -- widen the primary_groups queries to cover everything this condition selects")

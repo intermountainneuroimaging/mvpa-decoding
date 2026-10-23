@@ -455,6 +455,35 @@ def load_retained_events(eventfile: str, extra_cols: dict = None, source_row_col
     return events
 
 
+def extended_window_durations(events: pd.DataFrame, extend_until: dict = None) -> pd.Series:
+    """The length (seconds) of each retained event's window for training/testing.
+
+    Without `extend_until` this is the event's own `duration`, as always. With it
+    (model_conditions.training.extend_events_until, a query of the same shape as a
+    condition's), an event's window is stretched to the onset of the NEXT retained
+    event that matches the query and starts after it -- e.g. an operation period
+    extended through the inter-trial interval up to the next trial's cue. The
+    window is never shorter than the event's own duration. An event with no such
+    following event (the last trial of a run) has an OPEN-ENDED window: it gets
+    NaN here. label_conditions_with_lag runs such a window to the end of the scan
+    when a TR cap (trial_restriction's n_trs) bounds it, and otherwise drops the
+    event rather than guess where its window ends.
+
+    `events` is load_retained_events()'s output (any order is fine)."""
+    own = events["duration"].astype(float)
+    if extend_until is None:
+        return own
+    anchors = np.sort(events.loc[evaluate_query_node(extend_until, events), "onset"].to_numpy(dtype=float))
+    onsets = events["onset"].to_numpy(dtype=float)
+    # index of the first anchor strictly after this event's own onset
+    pos = np.searchsorted(anchors, onsets, side="right")
+    following = np.full(len(onsets), np.nan)
+    has_next = pos < len(anchors)
+    following[has_next] = anchors[pos[has_next]]
+    window = np.where(has_next, np.maximum(own.to_numpy(), following - onsets), np.nan)
+    return pd.Series(window, index=events.index)
+
+
 TRIAL_RESTRICTION_COLUMNS = ("subject", "boldfile", "trial_index", "onset", "n_trs", "hemodynamic_lag")
 
 
@@ -484,7 +513,8 @@ def load_trial_restriction(path: str, hemodynamic_lag: float) -> pd.DataFrame:
 
 
 def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hemodynamic_lag: float,
-                               label_column: str = "regressor_label", trial_restriction: pd.DataFrame = None) -> pd.DataFrame:
+                               label_column: str = "regressor_label", trial_restriction: pd.DataFrame = None,
+                               extend_until: dict = None) -> pd.DataFrame:
     """model_conditions.training/testing's (and, transitively, model.kfold_cv's)
     counterpart to build_timecourse_instructions: selects which BOLD volumes
     actually get used to train/test a classifier.
@@ -538,7 +568,19 @@ def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hem
     contributes nothing), and a listed event with an n_trs uses only the FIRST
     n_trs volumes of its window -- extra volumes are cut from the end. The
     events.tsv files and the master spreadsheet are never modified. Without
-    it, every retained event is used in full."""
+    it, every retained event is used in full.
+
+    extend_until (model_conditions.training/testing.extend_events_until), if
+    given, stretches each matched event's window from its own duration to the
+    onset of the next retained event matching that query (see
+    extended_window_durations) -- e.g. an operation period plus the ITI that
+    follows it, up to the next trial's cue. Every volume of the longer window
+    carries the event's condition label. An event with no following match (the
+    last trial of a run) has an open-ended window: it runs to the end of the
+    scan, but ONLY if trial_restriction lists it with an n_trs that bounds it
+    (the first n_trs volumes are used); with no such cap its length is
+    undefined and it is dropped. The shift by hemodynamic_lag applies to the
+    whole window, and trial_restriction's n_trs cuts it from the end."""
     non_event_cols = {"volume_of_interest", "trial_type", "onset", "duration", "event_index"}
 
     rows = []
@@ -547,6 +589,8 @@ def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hem
         extra_cols = {c: first[c] for c in group.columns if c not in non_event_cols}
 
         events = load_retained_events(first["eventfile"], extra_cols)
+        # window length of every event, from ALL retained events (the anchors need not match any condition)
+        events["window_duration"] = extended_window_durations(events, extend_until)
 
         max_trs = {}
         if trial_restriction is not None:
@@ -568,13 +612,19 @@ def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hem
             labels[mask] = name
         events = events[labels.notna()].copy()
         events[label_column] = labels[labels.notna()]
+        # an open-ended window (nothing follows) needs a TR cap from the restriction list; without one it is dropped
+        capped = events["trial_index"].map(max_trs).notna() if max_trs else pd.Series(False, index=events.index)
+        events = events[events["window_duration"].notna() | capped]
         if events.empty:
             continue
 
         tr, n_frames = get_bold_header_info(boldfile)
         for _, ev in events.iterrows():
             start_time = ev["onset"] + hemodynamic_lag
-            stop_time = start_time + ev["duration"]
+            window = ev["window_duration"]
+            if pd.isna(window):
+                window = n_frames * tr          # open-ended: to the end of the scan; the n_trs cap below bounds it
+            stop_time = start_time + window
             start_vol, stop_vol = compute_volume_range(start_time, stop_time, tr, n_frames)
             cap = max_trs.get(ev["trial_index"])
             if cap is not None and not pd.isna(cap):

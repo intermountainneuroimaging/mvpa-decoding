@@ -151,3 +151,40 @@ class TestDataDrivenValidation:
         df = pd.DataFrame({"trial_type": ["face", "place"]})  # no view_face
         errors, _ = validate_config(cfg, valid_columns={"trial_type"}, df=df)
         assert any("trial_start_event" in e and "0 rows" in e for e in errors)
+
+
+class TestExtendEventsUntil:
+    VIEW = {"column": "trial_type", "match": "exact", "value": "view_face"}
+
+    def test_valid_query_on_training_and_testing(self):
+        cfg = _minimal_config()
+        cfg["model_conditions"]["training"]["extend_events_until"] = self.VIEW
+        cfg["model_conditions"]["testing"]["extend_events_until"] = self.VIEW
+        errors, _ = validate_config(cfg)
+        assert errors == []
+
+    def test_malformed_query_is_error(self):
+        cfg = _minimal_config()
+        cfg["model_conditions"]["training"]["extend_events_until"] = {"column": "trial_type"}
+        errors, _ = validate_config(cfg)
+        assert any("training.extend_events_until" in e for e in errors)
+
+    def test_not_allowed_for_timecourse_decoding(self):
+        cfg = _minimal_config()
+        cfg["model_conditions"]["timecourse_decoding"]["extend_events_until"] = self.VIEW
+        errors, _ = validate_config(cfg)
+        assert any("timecourse_decoding.extend_events_until" in e for e in errors)
+
+    def test_matching_zero_rows_is_error(self):
+        cfg = _minimal_config()
+        cfg["model_conditions"]["training"]["extend_events_until"] = {"column": "trial_type", "match": "exact", "value": "nonexistent"}
+        df = pd.DataFrame({"trial_type": ["face", "place", "view_face"]})
+        errors, _ = validate_config(cfg, valid_columns={"trial_type"}, df=df)
+        assert any("extend_events_until" in e and "0 rows" in e for e in errors)
+
+    def test_matching_rows_is_fine(self):
+        cfg = _minimal_config()
+        cfg["model_conditions"]["training"]["extend_events_until"] = self.VIEW
+        df = pd.DataFrame({"trial_type": ["face", "place", "view_face"]})
+        errors, _ = validate_config(cfg, valid_columns={"trial_type"}, df=df)
+        assert errors == []

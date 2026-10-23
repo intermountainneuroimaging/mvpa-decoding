@@ -508,15 +508,21 @@ def main(args):
                 f"none of subject {subject_id!r}'s boldfiles appear in {restriction_path} -- was it built from this master spreadsheet?")
         print(f"Training restricted to {len(trial_restriction)} listed trial(s) from {restriction_path}")
 
+    # model_conditions.training/testing.extend_events_until (optional): stretch every event's window to the next
+    # event matching this query -- e.g. operation period + the ITI up to the next trial's cue (docs/model-conditions.md)
+    training_extend = model_conditions["training"].get("extend_events_until")
+    testing_extend = (model_conditions.get("testing") or {}).get("extend_events_until")
     try:
         training_df = apply_regressor_codes(
-            label_conditions_with_lag(subject_df, training_conditions, hemodynamic_lag, trial_restriction=trial_restriction),
+            label_conditions_with_lag(subject_df, training_conditions, hemodynamic_lag, trial_restriction=trial_restriction,
+                                      extend_until=training_extend),
             regressor_categories,
         )
     except ValueError as exc:
         raise SystemExit(str(exc))
     testing_df = (
-        apply_regressor_codes(label_conditions_with_lag(subject_df, testing_conditions, hemodynamic_lag), regressor_categories)
+        apply_regressor_codes(label_conditions_with_lag(subject_df, testing_conditions, hemodynamic_lag,
+                                                        extend_until=testing_extend), regressor_categories)
         if testing_conditions is not None else None
     )
     if timecourse_cfg is not None:

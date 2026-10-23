@@ -23,6 +23,11 @@
 #       counts depend on it), plus model_conditions.training, which is checked
 #       against the restriction groups
 #   $2  the supplementary restriction config (primary_groups / secondary_groups)
+#   $3  OPTIONAL path for the trial list. Give every analysis that shares one master
+#       spreadsheet its own (e.g. .../master_spreadsheet_trial_restriction_operation_iti.csv),
+#       otherwise the next run overwrites the previous one's list. The summary and
+#       audit tables are written next to it as <that path without .csv>_summary.csv /
+#       _audit.csv. Without $3 everything is written as below.
 #
 # Writes next to master.master_spreadsheet (stem = its name without .csv):
 #   <stem>_trial_restriction.csv          -- the list stage 3 reads
@@ -49,6 +54,7 @@ conda activate incenv
 
 CONFIG_FILE="$1"
 RESTRICTION_CONFIG="$2"
+OUTPUT_PATH="$3"
 if [ -z "$CONFIG_FILE" ] || [ -z "$RESTRICTION_CONFIG" ]; then
     echo "Usage: sbatch $(basename "$0") <config.json> <restriction.json>" >&2
     exit 1
@@ -82,5 +88,10 @@ export SCRIPTS_DIR
 export REQUIRED_PIPELINE_FIELDS="master_spreadsheet"
 source "$SCRIPTS_DIR/slurm/resolve_pipeline_config.sh"
 
+OUTPUT_ARGS=()
+if [ -n "$OUTPUT_PATH" ]; then
+    OUTPUT_ARGS=(--output "$OUTPUT_PATH")
+fi
+
 python "$SCRIPTS_DIR/workflows/restrict_master_spreadsheet.py" --config $CONFIG_FILE \
-    --master-spreadsheet $MASTER_SPREADSHEET --restriction-config $RESTRICTION_CONFIG
+    --master-spreadsheet $MASTER_SPREADSHEET --restriction-config $RESTRICTION_CONFIG "${OUTPUT_ARGS[@]}"

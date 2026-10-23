@@ -395,3 +395,118 @@ class TestUngovernedWarning:
         trials = rms.collect_trials(master, CFG, 0.0)
         mc = {"training": {"conditions": {"face": _q("trial_type", "face_.*"), "item": _q("trial_type", "item")}}}
         assert rms.find_ungoverned_condition_trials(master, trials, mc, 0.0) == []
+
+
+# ---------------------------------------------------------------- operation + ITI windows (extend_events_until)
+
+VIEW_NEXT = {"column": "trial_type", "match": "regex", "value": "view_.*"}
+
+
+def write_trial_run(root, sub, run, itis):
+    """One run of trials, each = a 4 s view cue (view_face), a 4 s operation (maintain_face / clear_face alternating)
+    and `itis[i]` seconds of fixation (an administrative row) before the next view cue. The LAST trial has no next cue."""
+    d = root / f"sub-{sub}" / "func"
+    d.mkdir(parents=True, exist_ok=True)
+    img = nib.Nifti1Image(np.zeros((3, 3, 3, N_VOLS), dtype=np.float32), np.eye(4))
+    img.header.set_zooms((3.0, 3.0, 3.0, TR))
+    img.to_filename(str(d / f"sub-{sub}_task-t_run-{run:02d}_bold.nii.gz"))
+    rows, t = [], 2.0
+    for i, iti in enumerate(itis):
+        rows.append({"onset": t, "duration": 4.0, "trial_type": "view_face", "rt": "n/a"})
+        rows.append({"onset": t + 4.0, "duration": 4.0, "trial_type": "maintain_face" if i % 2 == 0 else "clear_face", "rt": "n/a"})
+        rows.append({"onset": t + 8.0, "duration": float(iti), "trial_type": "fixation", "rt": "n/a"})
+        t += 8.0 + iti
+    pd.DataFrame(rows).to_csv(d / f"sub-{sub}_task-t_run-{run:02d}_events.tsv", sep="\t", index=False)
+
+
+OP_CFG = {"primary_groups": {"operation": {"column": "trial_type", "match": "regex", "value": "(maintain|clear)_face"}},
+          "balance_trial_counts": False}
+
+
+class TestExtendedWindows:
+    def test_window_runs_to_the_next_matching_event(self):
+        ev = pd.DataFrame({"onset": [0.0, 4.0, 12.0, 16.0, 26.0], "duration": [4.0] * 5,
+                           "trial_type": ["view_face", "maintain_face", "view_face", "clear_face", "view_face"]})
+        from utils.mvpa_common import extended_window_durations
+        window = extended_window_durations(ev, VIEW_NEXT)
+        assert window.iloc[1] == pytest.approx(8.0) and window.iloc[3] == pytest.approx(10.0)    # to the next view cue
+        assert np.isnan(window.iloc[4])                                                          # nothing follows the last cue
+        assert extended_window_durations(ev).tolist() == [4.0] * 5                               # no query: own duration
+
+    def test_training_uses_operation_plus_iti_volumes(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6, 8, 10, 6])      # ITIs in seconds
+        master = build_master(tmp_path, ["001"])
+        conditions = {"op": _q("trial_type", "(maintain|clear)_face")}
+        plain = label_conditions_with_lag(master, conditions, 0.0)
+        extended = label_conditions_with_lag(master, conditions, 0.0, extend_until=VIEW_NEXT)
+        # operation = 4 s = 2 TRs; operation + ITI = 4 + ITI s; the 4th (last) trial has no following cue -> dropped
+        assert plain.groupby("trial_index").size().tolist() == [2, 2, 2, 2]
+        assert extended.groupby("trial_index").size().tolist() == [(4 + 6) // 2, (4 + 8) // 2, (4 + 10) // 2]
+        assert extended["window_duration"].max() == pytest.approx(14.0)
+
+    def test_every_volume_of_the_extension_carries_the_label_and_the_lag_shifts_the_whole_window(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6, 6, 6])
+        master = build_master(tmp_path, ["001"])
+        out = label_conditions_with_lag(master, {"op": _q("trial_type", "maintain_face")}, 4.0, extend_until=VIEW_NEXT)
+        first = out[out["trial_index"] == out["trial_index"].min()]
+        assert set(first["regressor_label"]) == {"op"}
+        # operation onset 6 s -> 3 TRs, + 4 s lag = 2 TRs -> first volume 5; window 4 + 6 s = 5 TRs
+        assert first["volume_of_interest_withlag"].tolist() == [5, 6, 7, 8, 9]
+
+    def test_restriction_equalizes_to_the_shortest_operation_plus_iti_window(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6, 8, 10, 12, 6])
+        master = build_master(tmp_path, ["001"])
+        trial_list, summary, audit = rms.restrict_trials(master, OP_CFG, 0.0, VIEW_NEXT)
+        status = dict(zip(audit["trial_index"], audit["status"]))
+        # the last trial has nothing after it: its window runs to the end of the scan (plenty here) and it is kept
+        assert list(status.values()).count("kept") == 5 and status[max(status)] == "kept"
+        # shortest window ending at a real next cue: 4 s operation + 6 s ITI = 5 TRs; every kept trial is cut to its first 5 TRs
+        kept = trial_list[trial_list["primary_group"] == "operation"]
+        assert kept["n_trs"].tolist() == [5, 5, 5, 5, 5]
+        # and training really uses 5 volumes per kept trial, the extras cut off the END of the ITI
+        path = tmp_path / "list.csv"
+        trial_list.to_csv(path, index=False)
+        used = label_conditions_with_lag(master, {"op": _q("trial_type", "(maintain|clear)_face")}, 0.0,
+                                         trial_restriction=load_trial_restriction(str(path), 0.0), extend_until=VIEW_NEXT)
+        assert used.groupby("trial_index").size().tolist() == [5, 5, 5, 5, 5]      # including the last trial of the run
+        longest = used[used["trial_index"] == used["trial_index"].unique()[3]]          # the 12 s ITI trial: 4 + 12 s = 8 TRs available
+        assert longest["volume_of_interest_withlag"].tolist() == list(range(longest["volume_of_interest_withlag"].min(),
+                                                                            longest["volume_of_interest_withlag"].min() + 5))
+
+    def test_balance_trial_counts_false_drops_no_trial_for_count_reasons(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6] * 7)
+        master = build_master(tmp_path, ["001"])
+        _, _, audit = rms.restrict_trials(master, OP_CFG, 0.0, VIEW_NEXT)
+        assert "balance_drop" not in set(audit["status"])
+        _, _, audit_default = rms.restrict_trials(master, {**OP_CFG, "balance_trial_counts": True}, 0.0, VIEW_NEXT)
+        assert audit["status"].eq("kept").sum() >= audit_default["status"].eq("kept").sum()
+
+    def test_balance_trial_counts_must_be_a_bool(self):
+        assert any("balance_trial_counts" in e for e in rms.validate_restriction_config({**OP_CFG, "balance_trial_counts": "no"}))
+
+
+    def test_last_trial_of_a_run_is_kept_only_when_the_scan_leaves_it_the_common_window(self, tmp_path):
+        # 28 trials; the 27th ITI is long so the last operation starts 4 s before the scan ends (2 TRs < the common 5)
+        write_trial_run(tmp_path, "001", 1, [6] * 26 + [18, 6])
+        master = build_master(tmp_path, ["001"])
+        _, _, audit = rms.restrict_trials(master, OP_CFG, 0.0, VIEW_NEXT)
+        status = dict(zip(audit["trial_index"], audit["status"]))
+        assert status[max(status)] == "open_window_too_short"
+        assert list(status.values()).count("kept") == 27
+        # another run whose last trial has room is kept
+        write_trial_run(tmp_path, "002", 1, [6] * 10)
+        _, _, audit2 = rms.restrict_trials(build_master(tmp_path, ["002"]), OP_CFG, 0.0, VIEW_NEXT)
+        assert audit2["status"].eq("kept").all()
+
+    def test_an_open_ended_trial_never_sets_the_common_tr_count(self, tmp_path):
+        # shortest scan-bounded window would be 2 TRs, but the closed windows are all 5: the common count stays 5
+        write_trial_run(tmp_path, "001", 1, [6] * 26 + [18, 6])
+        trial_list, summary, _ = rms.restrict_trials(build_master(tmp_path, ["001"]), OP_CFG, 0.0, VIEW_NEXT)
+        assert set(trial_list.loc[trial_list["primary_group"] == "operation", "n_trs"]) == {5}
+        assert summary[summary["primary_group"] == "(all)"]["trs_per_trial_restricted"].iloc[0] == 5
+
+    def test_open_ended_window_without_a_cap_is_still_dropped_from_training(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6, 8, 10])
+        master = build_master(tmp_path, ["001"])
+        out = label_conditions_with_lag(master, {"op": _q("trial_type", "(maintain|clear)_face")}, 0.0, extend_until=VIEW_NEXT)
+        assert out["trial_index"].nunique() == 2        # the last trial has no window and no cap
