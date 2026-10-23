@@ -1,7 +1,7 @@
 {
   "config_version": "1.0",
   "created_by": "AKH",
-  "notes": "Report-only alternate view of config-timecourse.clearvale-category (2).json's timecourse page: operation still gets its own color (0-3), but valence (pos/neg) is now placed in its own contiguous block of rows (with its own legend) via overlay's \"group\" key instead of a dashed line -- one report, two blocks (pos, then neg), rather than one shared legend for the whole page. model.desc is intentionally identical to config-timecourse.clearvale-category (2).json, so `generate_report.py --config config-timecourse.clearvale-category-valence-groups.json ...` reads the SAME already-computed <analysis-output-dir>/vvps_category_loc2WM_timecourse_classifier/ output and just re-renders the timecourse page with this overlay instead -- no need to rerun mvpa_workflow.py for this alternate report. MVPA operation (face/place/item) timecourse classifier; masking on vvps.",
+  "notes": "Clearvale MVPA face/place/item category classifier, trained on the localizer ('loc') task and applied to the working-memory tasks (WMpos/WMneg). Full run with this one config: stage 2 builds the master spreadsheet, stage 3 trains and evaluates each subject (CV, held-out test, timecourse decoding), stage 4 builds the group report. Key settings: event_extraction.hemodynamic_lag 4.6 s; mask = vvps temporal ROI (3 mm, MNI space, mnispace true); ANOVA feature selection at p < 0.05; model.kfold_cv per_run (leave one acquisition out); 1000-permutation significance test (seed 0); testing = WM view_face/view_place trials; timecourse decoding anchored on view_* with pos/neg overlay blocks in the report. THIS VERSION: one-vs-rest logistic regression (liblinear, C = 50, balanced class weights, random_state 6100) with model.classifier.evidence = sigmoid (unnormalized per-class evidence; rows do not sum to 1), unrestricted training trials (108 face / 108 place / 54 item per subject). Results folder: vvps_category_loc2WM_timecourse_liblin_onevrest_classifier. Every key is commented in config.clearvale-category-valence-groups.ANNOTATED.md. Sections: event_extraction, model_conditions (training = loc, testing = WM view cues, timecourse_decoding), model, master.",
 
   "event_extraction": {
     "bids_root": "/pl/active/banich/studies/Clearvale/bids/",
@@ -121,7 +121,7 @@
 
 
   "model": {
-    "desc": "vvps_category_loc2WM_timecourse_classifier",
+    "desc": "vvps_category_loc2WM_timecourse_liblin_onevrest_classifier",
     "mnispace": true,
     "mask": {
       "mask_pattern": "/pl/active/banich/studies/Clearvale/masks/mask_vvps_temporal_3mm.nii.gz"
@@ -140,7 +140,8 @@
         "class_weight": "balanced",
         "random_state": 6100
       },
-      "one_vs_rest": true
+      "one_vs_rest": true,
+      "evidence": "sigmoid"
     },
     "kfold_cv": {
       "strategy": "per_run"

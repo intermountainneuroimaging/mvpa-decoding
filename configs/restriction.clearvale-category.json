@@ -1,0 +1,36 @@
+{
+  "config_version": "1.0",
+  "created_by": "AKH",
+  "notes": "Supplementary config for workflows/restrict_master_spreadsheet.py, used with config.clearvale-category-fullyrestricted-valence-groups.json (stage 2b). It balances the localizer ('loc') TRAINING trials of every subject: face, place and item get exactly the same number of trials (54 each in this study: item is the limit, 3 runs x 18 neutral-item trials), and face and place are split equally into positive and negative (27 + 27). Item trials are all 'neutral_item', so item has no secondary split. Every kept trial is also cut to the subject's shortest trial (4 TRs here), extra TRs removed from the end. Dropped trials are spread evenly over runs (drop_strategy spread_runs: 18 per run per class, which keeps the per-run cross-validation usable). The groups are restricted to task 'loc' so the working-memory trials (which also contain 'face'/'place' in their trial_type) are never touched; they are not training data in this config. The primary-group queries must cover exactly what model_conditions.training selects (pass --config and read the log for '(!)' warnings). Only training is restricted; the held-out test and timecourse decoding stay unrestricted. Trial types seen in this study: positive_face, negative_face, positive_place, negative_place, neutral_item. RECONSTRUCTED from the trial-restriction audit table of the 88-subject run (group sizes, secondary split, 18 kept per run per class, 4 TRs): confirm 'seed' and 'drop_strategy' against the file you originally ran before relying on an identical trial selection.",
+
+  "seed": 0,
+  "drop_strategy": "spread_runs",
+
+  "primary_groups": {
+    "face": {
+      "and": [
+        {"column": "task", "match": "exact", "value": "loc"},
+        {"column": "trial_type", "match": "regex", "value": ".*face.*"}
+      ]
+    },
+    "place": {
+      "and": [
+        {"column": "task", "match": "exact", "value": "loc"},
+        {"column": "trial_type", "match": "regex", "value": ".*place.*"}
+      ]
+    },
+    "item": {
+      "and": [
+        {"column": "task", "match": "exact", "value": "loc"},
+        {"column": "trial_type", "match": "regex", "value": ".*item.*"}
+      ]
+    }
+  },
+
+  "secondary_groups": {
+    "positive": {"column": "trial_type", "match": "regex", "value": "positive_.*"},
+    "negative": {"column": "trial_type", "match": "regex", "value": "negative_.*"}
+  },
+
+  "secondary_applies_to": ["face", "place"]
+}
