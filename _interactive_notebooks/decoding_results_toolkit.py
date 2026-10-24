@@ -388,7 +388,7 @@ def fdr_correct(p_values, method: str = "bh") -> np.ndarray:
 
 def compare_conditions_by_bin(per_subject_bin: pd.DataFrame, cond_a: str, cond_b: str,
                                method="ttest_1samp_diff", alternative: str = "greater",
-                               bins_meta: pd.DataFrame = None, fdr: str = "bh") -> pd.DataFrame:
+                               bins_meta: pd.DataFrame = None, fdr: str = "bh", fdr_from_bin: int = None) -> pd.DataFrame:
     """One row per bin -- `method` is a name in STAT_METHODS (swap the test
     with one line), or your own callable(a_vals, b_vals, alternative) -> dict
     with at least {"stat", "p_value"}. A bin with fewer than 2 subjects
@@ -401,7 +401,12 @@ def compare_conditions_by_bin(per_subject_bin: pd.DataFrame, cond_a: str, cond_b
     (inserted right after it) is that family's FDR-adjusted p -- see
     fdr_correct. Call this once per contrast (e.g. once per operation, or
     per valence x operation) so each contrast is corrected on its own.
-    Pass fdr=None for raw p-values only (no p_fdr column)."""
+    Pass fdr=None for raw p-values only (no p_fdr column).
+
+    fdr_from_bin, if given, restricts the FDR family to the bins numbered
+    fdr_from_bin and later: earlier bins are still tested (stat, p_value) but are
+    NOT part of the correction and get p_fdr = NaN (never called significant on
+    p_fdr). The correction then counts only the later bins as tests."""
     test_fn = STAT_METHODS[method] if isinstance(method, str) else method
 
     rows = []
@@ -415,7 +420,10 @@ def compare_conditions_by_bin(per_subject_bin: pd.DataFrame, cond_a: str, cond_b
 
     out = pd.DataFrame(rows)
     if fdr and not out.empty:
-        out.insert(out.columns.get_loc("p_value") + 1, "p_fdr", fdr_correct(out["p_value"], fdr))
+        in_family = out["bin"] >= fdr_from_bin if fdr_from_bin is not None else pd.Series(True, index=out.index)
+        p_fdr = pd.Series(np.nan, index=out.index)
+        p_fdr[in_family] = fdr_correct(out.loc[in_family, "p_value"], fdr)
+        out.insert(out.columns.get_loc("p_value") + 1, "p_fdr", p_fdr)
     if bins_meta is not None and not out.empty:
         out = out.merge(bins_meta, on="bin", how="left")
     return out
@@ -620,7 +628,7 @@ def draw_significance_table(ax, rows, alpha: float = 0.05, p_col: str = "p_fdr",
                             sig_color: str = "0.55", ns_color: str = "0.93", legend_label: str = None,
                             label_fontsize: float = 8, window_numbers: bool = True, stars: bool = False,
                             frame: bool = False, xaxis: bool = False, show_legend: bool = True,
-                            value_col: str = "mean_diff"):
+                            value_col: str = "mean_diff", na_marker: bool = False):
     """A graphic table of which time windows differ significantly, in the style
     of a trajectory figure's footer: one row per comparison, one column per
     stat window, a dark cell where the window is significant and a light one
@@ -643,6 +651,8 @@ def draw_significance_table(ax, rows, alpha: float = 0.05, p_col: str = "p_fdr",
     thin black outline around the table; xaxis=True keeps the bottom tick
     labels (shared with the plot above), so the time axis can sit underneath
     the table instead of the plot; show_legend=False omits the shading legend.
+    na_marker=True draws windows that have no p (not tested, e.g. left out of the FDR
+    family) as light cells with a small gray "x" instead of leaving them blank.
     draw_stat_strip below is the one-row version of these settings.
 
     A row may also carry "direction": "negative" or "positive" -- then a
@@ -667,10 +677,13 @@ def draw_significance_table(ax, rows, alpha: float = 0.05, p_col: str = "p_fdr",
         y0 = n - 1 - i
         for _, w in row["stats"].iterrows():
             p = w[p_col]
-            if pd.isna(p):
-                continue
             x0 = w[tr_start_col] * tr_seconds
             width = (w[tr_end_col] + 1 - w[tr_start_col]) * tr_seconds
+            if pd.isna(p):
+                if na_marker:
+                    ax.add_patch(Rectangle((x0, y0), width, 1, facecolor=ns_color, edgecolor="white", linewidth=1.5))
+                    ax.text(x0 + width / 2, y0 + 0.5, "x", color="0.45", ha="center", va="center", fontsize=9)
+                continue
             significant = p < alpha
             if row.get("direction") == "negative":
                 significant = significant and w[value_col] < 0

@@ -1345,3 +1345,33 @@ class TestBaselineGroupNames:
         names = baseline_group_names(pd.DataFrame(rows), ("object", "valence"))
         assert names[("face", "pos")] == "positive faces" and names[("place", "neg")] == "negative places"
         assert list(names.values()) == ["positive faces", "positive places", "negative faces", "negative places"]
+
+
+class TestFdrFromBin:
+    def _per_subject_bin(self):
+        rng = np.random.default_rng(0)
+        rows = []
+        for subject in range(12):
+            for bin_id, shift in enumerate([1.0, 1.0, 0.4, 0.0, 0.0]):
+                rows.append({"subject": str(subject), "bin": bin_id, "a": shift + rng.normal(0, 0.5), "b": rng.normal(0, 0.5)})
+        return pd.DataFrame(rows).set_index(["subject", "bin"])
+
+    def test_default_corrects_every_bin(self):
+        out = compare_conditions_by_bin(self._per_subject_bin(), "a", "b", alternative="two-sided")
+        assert out["p_fdr"].notna().all()
+
+    def test_bins_before_the_start_are_tested_but_not_in_the_family(self):
+        data = self._per_subject_bin()
+        out = compare_conditions_by_bin(data, "a", "b", alternative="two-sided", fdr_from_bin=2)
+        assert out.loc[out["bin"] < 2, "p_fdr"].isna().all() and out.loc[out["bin"] < 2, "p_value"].notna().all()
+        assert out.loc[out["bin"] >= 2, "p_fdr"].notna().all()
+
+    def test_the_family_is_only_the_later_bins(self):
+        data = self._per_subject_bin()
+        out = compare_conditions_by_bin(data, "a", "b", alternative="two-sided", fdr_from_bin=2)
+        later = out[out["bin"] >= 2]
+        expected = fdr_correct(later["p_value"].to_numpy(), "bh")
+        assert np.allclose(later["p_fdr"].to_numpy(), expected)
+        # not the same as correcting everything and keeping the later rows: the early (strong) bins no longer help the later ones
+        full = compare_conditions_by_bin(data, "a", "b", alternative="two-sided")
+        assert not np.allclose(later["p_fdr"].to_numpy(), full.loc[full["bin"] >= 2, "p_fdr"].to_numpy())

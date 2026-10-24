@@ -1223,7 +1223,7 @@ def _build_overlay_legend(cats: list, overlay_styles: dict, ncol: int, overlay_c
     return list(handles), list(labels)
 
 
-def draw_event_annotations(ax, event_markers, tr, show_labels):
+def draw_event_annotations(ax, event_markers, tr, show_labels, fontsize: float = 6.5):
     """One annotation per compute_event_markers() entry: a dotted axvline at
     its mean start plus a text label there. No background shading -- an
     axvspan over the event's span visually competes with the plot's own
@@ -1251,7 +1251,7 @@ def draw_event_annotations(ax, event_markers, tr, show_labels):
             label = f"{label} (variable timing)"
 
         if show_labels:
-            ax.text(start, ylim[1], label, fontsize=6.5, ha="right", va="top",
+            ax.text(start, ylim[1], label, fontsize=fontsize, ha="right", va="top",
                      rotation=90, rotation_mode="anchor")
 
 
