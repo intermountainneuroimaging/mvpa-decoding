@@ -66,16 +66,15 @@ Written for `workflows/restrict_master_spreadsheet.py`; `docs/trial-restriction.
 | `primary_groups` | `face`, `place`, `item` = `task` `loc` AND `trial_type` regex `.*face.*` / `.*place.*` / `.*item.*` | the classes to equalize. Exactly the same trials the training conditions select (the `task` clause keeps the WM trials, which also contain "face"/"place", out of it) |
 | `secondary_groups` | `positive` = `positive_.*`, `negative` = `negative_.*` | the valence split inside a class |
 | `secondary_applies_to` | `["face", "place"]` | only face and place are split; item trials are all `neutral_item`, so item is equalized in total only |
-| `drop_strategy` | `"spread_runs"` | drop from whichever run holds the most trials of a class, so every run keeps the same number (18 per run per class) and per-run cross-validation stays balanced. (`"random"` could leave a run short) |
+| `drop_trial_strategy` | `"spread_runs"` | drop from whichever run holds the most trials of a class, so every run keeps the same number (18 per run per class) and per-run cross-validation stays balanced. (`"random"` could leave a run short) |
 | `seed` | `0` | makes the choice of dropped trials reproducible (with the subject ID) |
-| `balance_trial_counts` | not set = `true` | trial counts are equalized (this is the point of Model C) |
 
 Result per subject (3 localizer runs x 36 face, 36 place, 18 item): **54 face (27 + 27), 54 place (27 + 27), 54 item**, every
 trial cut to the shortest trial of that subject (4 TRs here), extras removed from the end.
 
 **Status of this file.** It was rebuilt from the trial-restriction audit table of the 88-subject run
 (`master_spreadsheet_trial_restriction_audit.csv`): the group queries label all 23,760 audited trials exactly as the audit
-does, the counts and the 18-per-run pattern match. `seed` (0) and `drop_strategy` (`spread_runs`) are inferred; if you still have
+does, the counts and the 18-per-run pattern match. `seed` (0) and `drop_trial_strategy` (`spread_runs`; called `drop_strategy` in older files) are inferred; if you still have
 the file you originally ran, diff it against this one before assuming the same trial selection.
 
 Things to know from that audit: 5 of 23,760 trials had no volume left after the lag (`outside_scan`, subjects 017 and 026) and

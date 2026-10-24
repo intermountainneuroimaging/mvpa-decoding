@@ -188,3 +188,25 @@ class TestExtendEventsUntil:
         df = pd.DataFrame({"trial_type": ["face", "place", "view_face"]})
         errors, _ = validate_config(cfg, valid_columns={"trial_type"}, df=df)
         assert errors == []
+
+
+class TestEqualizeTrialLength:
+    def test_valid_on_training(self):
+        cfg = _minimal_config()
+        cfg["model_conditions"]["training"]["equalize_trial_length"] = True
+        assert validate_config(cfg)[0] == []
+
+    def test_must_be_a_bool(self):
+        cfg = _minimal_config()
+        cfg["model_conditions"]["training"]["equalize_trial_length"] = "yes"
+        assert any("equalize_trial_length" in e and "true or false" in e for e in validate_config(cfg)[0])
+
+    def test_only_for_training(self):
+        cfg = _minimal_config()
+        cfg["model_conditions"]["testing"]["equalize_trial_length"] = True
+        assert any("testing.equalize_trial_length" in e for e in validate_config(cfg)[0])
+
+    def test_allowed_together_with_a_trial_restriction(self):
+        cfg = _minimal_config()
+        cfg["model_conditions"]["training"].update({"equalize_trial_length": True, "trial_restriction": "list.csv"})
+        assert validate_config(cfg)[0] == []

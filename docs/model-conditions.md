@@ -112,10 +112,38 @@ no later match (the last trial of a run) has an **open-ended** window: it runs t
 the end of the scan, but only when the restriction list gives it an `n_trs` cap
 that bounds it (it then uses its first `n_trs` volumes); with no cap its length
 is undefined and it is **not used**. The query is validated like any other (`validate_model_config.py`
-requires it to match rows). To give every trial the same number of TRs, use the
-restriction step ([trial restriction](trial-restriction.md)), which counts TRs
-the same way when you pass it `--config`; `timecourse_decoding` does not take
-this key.
+requires it to match rows). To give every trial the same number of TRs, use `equalize_trial_length`
+(next) or the restriction step ([trial restriction](trial-restriction.md)), which
+counts TRs the same way when you pass it `--config`; `timecourse_decoding` does
+not take this key.
+
+**`equalize_trial_length`** -- a boolean key of `training` (default `false`):
+
+```json
+"training": {
+  "conditions": { ... },
+  "extend_events_until": { ... },
+  "equalize_trial_length": true
+}
+```
+
+Within each subject, every training trial is cut to the number of TRs of that
+subject's **shortest** training trial: its first TRs are kept and the extras are
+removed from the **end** of its window. TRs are counted as training selects them
+(the `hemodynamic_lag`-shifted window, extended by `extend_events_until` if set, clipped to the
+scan), over all of the subject's runs and conditions together; nothing is compared across
+subjects. A trial whose window is open-ended (the last trial of a run, with
+`extend_events_until`) runs to the end of the scan, never sets the shared count, and is kept only if the
+scan leaves it at least that many TRs. No trial is dropped otherwise. This is the
+restriction step's TR rule without a separate step or list file. It may also be set together
+with a `trial_restriction` list built with `equalize_trial_length` (or without it): a list built with the same rule has already
+capped every trial at the common count, so equalizing again changes nothing, and the training set is **identical whichever
+way the rule is applied** -- stage 3 alone, stage 2b alone, or both. Every subject's run writes
+`<desc>/<subject>/model/<subject>_training_trial_length_audit.csv` (one row per trial: `open_window`, `n_trs`, `n_trs_used`,
+`n_trs_cut`, `status`) and `..._summary.csv` (per condition and in total: trials and TRs before and after, `trs_per_trial`,
+`n_trs_cut_from_kept_trials`), and prints the totals in the log. Open-ended windows run to the end of the scan, so the TRs they
+"lose" are whatever the scan left: the summary counts them apart (`n_open_ended_trials`, `n_open_ended_kept`) instead of in
+the TR totals; the audit still shows each one's `n_trs_cut`.
 
 **`timecourse_decoding`** -- *(optional)* continuous, real-event decoding,
 read from `master_spreadsheet.csv` like `training`/`testing`, but --

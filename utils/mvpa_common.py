@@ -484,6 +484,90 @@ def extended_window_durations(events: pd.DataFrame, extend_until: dict = None) -
     return pd.Series(window, index=events.index)
 
 
+def common_window_trs(n_trs, is_open) -> tuple:
+    """The shared TR count of a set of trial windows, and which of them can have it.
+
+    `n_trs`: TRs in each window (what training would select); `is_open`: True for an
+    open-ended window (nothing follows it: it just runs to the end of the scan).
+    The common count is the shortest window that ends at a real following event
+    (the shortest of all if none does). An open-ended window never sets it: it
+    is kept -- cut to the common count -- if the scan leaves it at least that many
+    TRs, and not otherwise. A window with no TRs at all is never kept.
+
+    Returns (common_count, keep): `keep` is a boolean Series aligned with `n_trs`.
+    Shared by workflows/restrict_master_spreadsheet.py and
+    label_conditions_with_lag(equalize_length=True), so both cut trials the same way."""
+    n = pd.Series(n_trs).astype(int)
+    open_ended = pd.Series(is_open, index=n.index).astype(bool)
+    usable = n >= 1
+    closed = usable & ~open_ended
+    pool = n[closed] if closed.any() else n[usable]
+    if pool.empty:
+        return 0, pd.Series(False, index=n.index)
+    common = int(pool.min())
+    return common, usable & (~open_ended | (n >= common))
+
+
+EQUALIZE_KEPT = "kept"
+EQUALIZE_OUTSIDE_SCAN = "outside_scan"
+EQUALIZE_OPEN_SHORT = "open_window_too_short"
+
+
+def equalize_trial_lengths(planned: pd.DataFrame, label_column: str = "regressor_label"):
+    """Give every training trial of one subject the same number of TRs.
+
+    `planned` has one row per matched training event with start_vol / stop_vol (the lag-shifted volume
+    window, clipped to the scan, [start, stop)), open_window, and subject, boldfile, trial_index, onset,
+    trial_type and `label_column`. Per subject (all of that subject's runs together) the shared TR count is
+    common_window_trs(); each kept trial keeps its FIRST `common` volumes, the rest are cut off the END of
+    its window. Only trials of ONE subject are compared -- there is no look across subjects.
+
+    Returns (planned, audit, summary): `planned` is the kept trials with stop_vol cut; `audit` has one row per
+    trial (n_trs = the window's TRs, n_trs_used, n_trs_cut, status kept / outside_scan / open_window_too_short);
+    `summary` has one row per subject x condition plus an "(all)" row per subject (trials and TRs before and
+    after, the common TR count, and the TRs cut from kept trials; open-ended windows -- the last trial of a run --
+    are counted apart, see n_open_ended_trials / n_open_ended_kept, since they run to the end of the scan)."""
+    df = planned.copy()
+    if "subject" not in df:
+        df["subject"] = ""
+    df["n_trs"] = (df["stop_vol"] - df["start_vol"]).astype(int)
+    df["n_trs_used"] = 0
+    df["status"] = EQUALIZE_OUTSIDE_SCAN
+    common_by_subject = {}
+    for subject, g in df.groupby("subject", sort=False):
+        common, keep = common_window_trs(g["n_trs"], g["open_window"])
+        common_by_subject[subject] = common
+        df.loc[g.index[keep.to_numpy()], "status"] = EQUALIZE_KEPT
+        short = (g["n_trs"] >= 1) & ~keep.to_numpy()
+        df.loc[g.index[short.to_numpy()], "status"] = EQUALIZE_OPEN_SHORT
+    kept = df["status"] == EQUALIZE_KEPT
+    df.loc[kept, "n_trs_used"] = df.loc[kept, "subject"].map(common_by_subject)
+    df["n_trs_cut"] = np.where(kept, df["n_trs"] - df["n_trs_used"], 0).astype(int)
+    df.loc[kept, "stop_vol"] = df.loc[kept, "start_vol"] + df.loc[kept, "n_trs_used"]
+
+    audit_cols = ["subject", "boldfile", "trial_index", "onset", "trial_type", label_column,
+                  "open_window", "n_trs", "n_trs_used", "n_trs_cut", "status"]
+    audit = df[[c for c in audit_cols if c in df.columns]].reset_index(drop=True)
+
+    rows = []
+    for subject, g in df.groupby("subject", sort=False):
+        closed = ~g["open_window"].astype(bool)
+
+        def row(name, sel):
+            k = sel & (g["status"] == EQUALIZE_KEPT)
+            # an open-ended window runs to the end of the scan, so the TRs it "loses" are whatever the scan left: counted
+            # separately (n_open_ended_*), not in the TR totals, which would otherwise be dominated by them
+            return {"subject": subject, "condition": name, "n_trials_original": int(sel.sum()), "n_trials_kept": int(k.sum()),
+                    "trs_per_trial": common_by_subject[subject], "n_trs_original": int(g.loc[sel & closed, "n_trs"].sum()),
+                    "n_trs_used": int(g.loc[k, "n_trs_used"].sum()), "n_trs_cut_from_kept_trials": int(g.loc[k & closed, "n_trs_cut"].sum()),
+                    "n_open_ended_trials": int((sel & ~closed).sum()), "n_open_ended_kept": int((k & ~closed).sum())}
+        for name in g[label_column].unique():
+            rows.append(row(name, g[label_column] == name))
+        rows.append(row("(all)", pd.Series(True, index=g.index)))
+    summary = pd.DataFrame(rows)
+    return df[kept].copy(), audit, summary
+
+
 TRIAL_RESTRICTION_COLUMNS = ("subject", "boldfile", "trial_index", "onset", "n_trs", "hemodynamic_lag")
 
 
@@ -514,7 +598,7 @@ def load_trial_restriction(path: str, hemodynamic_lag: float) -> pd.DataFrame:
 
 def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hemodynamic_lag: float,
                                label_column: str = "regressor_label", trial_restriction: pd.DataFrame = None,
-                               extend_until: dict = None) -> pd.DataFrame:
+                               extend_until: dict = None, equalize_length: bool = False, report: dict = None) -> pd.DataFrame:
     """model_conditions.training/testing's (and, transitively, model.kfold_cv's)
     counterpart to build_timecourse_instructions: selects which BOLD volumes
     actually get used to train/test a classifier.
@@ -580,10 +664,23 @@ def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hem
     scan, but ONLY if trial_restriction lists it with an n_trs that bounds it
     (the first n_trs volumes are used); with no such cap its length is
     undefined and it is dropped. The shift by hemodynamic_lag applies to the
-    whole window, and trial_restriction's n_trs cuts it from the end."""
+    whole window, and trial_restriction's n_trs cuts it from the end.
+
+    equalize_length (model_conditions.training.equalize_trial_length) does the
+    TR-count equalization of the restriction step inside this call, with no
+    separate step or file: per subject, every matched trial is cut to the
+    subject's shortest trial -- the first TRs kept, the extras removed from the
+    END of its window (see common_window_trs / equalize_trial_lengths). Open-ended
+    windows (the last trial of a run, with extend_until) run to the end of the scan
+    and are kept only if it leaves them that many TRs. It can be combined with
+    trial_restriction: a list built with the same rule has already capped every
+    trial at the common count, so equalizing again changes nothing. If `report` is a dict it receives "audit" (one row per
+    trial: its TRs, the TRs used and cut, its status) and "summary" (per subject x
+    condition) so the caller can write them out."""
+
     non_event_cols = {"volume_of_interest", "trial_type", "onset", "duration", "event_index"}
 
-    rows = []
+    planned = []
     for boldfile, group in full_frame_df.groupby("boldfile", sort=False):
         first = group.iloc[0]
         extra_cols = {c: first[c] for c in group.columns if c not in non_event_cols}
@@ -614,7 +711,7 @@ def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hem
         events[label_column] = labels[labels.notna()]
         # an open-ended window (nothing follows) needs a TR cap from the restriction list; without one it is dropped
         capped = events["trial_index"].map(max_trs).notna() if max_trs else pd.Series(False, index=events.index)
-        events = events[events["window_duration"].notna() | capped]
+        events = events[events["window_duration"].notna() | capped | equalize_length]
         if events.empty:
             continue
 
@@ -633,13 +730,26 @@ def label_conditions_with_lag(full_frame_df: pd.DataFrame, conditions: dict, hem
             # the event's own real, unshifted start volume -- purely for
             # labeling clarity alongside volume_of_interest_withlag below;
             # not clipped to n_frames (never used to index into BOLD data)
-            raw_start_vol = int(math.floor(ev["onset"] / tr))
-            base = ev.to_dict()
-            for i, vol in enumerate(range(start_vol, stop_vol)):
-                row = dict(base)
-                row["volume_of_interest"] = raw_start_vol + i
-                row["volume_of_interest_withlag"] = vol
-                rows.append(row)
+            planned.append({**ev.to_dict(), "start_vol": start_vol, "stop_vol": stop_vol,
+                            "raw_start_vol": int(math.floor(ev["onset"] / tr)), "open_window": bool(pd.isna(ev["window_duration"]))})
+
+    if not planned:
+        return pd.DataFrame()
+    planned = pd.DataFrame(planned)
+    if equalize_length:
+        planned, audit, summary = equalize_trial_lengths(planned, label_column)
+        if report is not None:
+            report["audit"], report["summary"] = audit, summary
+
+    rows = []
+    helper_cols = {"start_vol", "stop_vol", "raw_start_vol", "open_window", "n_trs", "n_trs_used", "n_trs_cut", "status"}
+    for ev in planned.to_dict("records"):
+        base = {k: v for k, v in ev.items() if k not in helper_cols}
+        for i, vol in enumerate(range(int(ev["start_vol"]), int(ev["stop_vol"]))):
+            row = dict(base)
+            row["volume_of_interest"] = ev["raw_start_vol"] + i
+            row["volume_of_interest_withlag"] = vol
+            rows.append(row)
 
     return pd.DataFrame(rows)
 

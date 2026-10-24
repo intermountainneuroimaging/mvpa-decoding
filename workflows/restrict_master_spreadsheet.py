@@ -40,9 +40,11 @@ WHAT IT DOES (per subject, over all of that subject's runs together)
      +duration)), so --config (or --hemodynamic-lag) must match the analysis
      config.
 
-  With "balance_trial_counts": false in the restriction config, step 1 is
+  With "drop_trial_strategy": "none" in the restriction config, step 1 is
   skipped: no trial is dropped to equalize counts and only step 2 (the common TR
   count) is applied, so primary_groups only say which trials are governed.
+  ("random" and "spread_runs" choose HOW trials are dropped in step 1; step 2
+  always cuts TRs from the end of each trial, whatever the strategy.)
 
   If the analysis config sets model_conditions.training.extend_events_until
   (pass --config), a trial's window is the event's own duration stretched to
@@ -90,14 +92,14 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
 from utils.mvpa_common import (
-    compute_volume_range, evaluate_query_node, extended_window_durations, get_bold_header_info,
+    common_window_trs, compute_volume_range, evaluate_query_node, extended_window_durations, get_bold_header_info,
     label_conditions_with_lag, load_retained_events, validate_query_node,
 )
 
 # the master spreadsheet's per-volume columns; every other column is a
 # per-boldfile constant (subject/session/task/run/boldfile/eventfile/BIDS extras)
 FRAME_COLUMNS = ("volume_of_interest", "trial_type", "onset", "duration", "event_index")
-DROP_STRATEGIES = ("random", "spread_runs")
+DROP_STRATEGIES = ("random", "spread_runs", "none")
 
 # trial status values in the audit table
 KEPT = "kept"
@@ -124,8 +126,8 @@ def load_restriction_config(path: str) -> dict:
 def validate_restriction_config(cfg: dict) -> list:
     """Returns a list of problems (empty if the config is usable)."""
     errors = []
-    allowed = {"seed", "drop_strategy", "primary_groups", "secondary_groups", "secondary_applies_to", "balance_trial_counts",
-               "notes", "created_by", "config_version"}
+    allowed = {"seed", "drop_trial_strategy", "drop_strategy", "equalize_trial_length", "primary_groups", "secondary_groups",
+               "secondary_applies_to", "notes", "created_by", "config_version"}
     for key in cfg:
         if key not in allowed:
             errors.append(f"unknown key {key!r} (expected: {sorted(allowed)})")
@@ -155,13 +157,29 @@ def validate_restriction_config(cfg: dict) -> list:
             for a in applies:
                 if a not in primary:
                     errors.append(f"secondary_applies_to: {a!r} is not a primary group")
-    if "balance_trial_counts" in cfg and not isinstance(cfg["balance_trial_counts"], bool):
-        errors.append("balance_trial_counts: must be true or false")
+    if "equalize_trial_length" in cfg and not isinstance(cfg["equalize_trial_length"], bool):
+        errors.append("equalize_trial_length: must be true or false")
+    if "drop_trial_strategy" in cfg and "drop_strategy" in cfg:
+        errors.append("drop_trial_strategy and drop_strategy are the same setting (drop_strategy is the old name): set only drop_trial_strategy")
     if "seed" in cfg and not isinstance(cfg["seed"], int):
         errors.append("seed: must be an integer")
-    if cfg.get("drop_strategy", "random") not in DROP_STRATEGIES:
-        errors.append(f"drop_strategy: must be one of {list(DROP_STRATEGIES)}, got {cfg.get('drop_strategy')!r}")
+    chosen = drop_trial_strategy(cfg)
+    if chosen not in DROP_STRATEGIES:
+        errors.append(f"drop_trial_strategy: must be one of {list(DROP_STRATEGIES)}, got {chosen!r}")
     return errors
+
+
+def drop_trial_strategy(cfg: dict) -> str:
+    """How trials are dropped to equalize counts: "random" (default), "spread_runs", or "none" (drop no trial;
+    only the TR count is equalized). `drop_strategy` is accepted as the old name of the same setting."""
+    return cfg.get("drop_trial_strategy", cfg.get("drop_strategy", "random"))
+
+
+def equalizes_trial_length(cfg: dict) -> bool:
+    """Whether the list caps every kept trial at the subject's common TR count (default true, the step's original behaviour).
+    False: the list only selects trials (n_trs blank); training then uses each window in full -- or set
+    model_conditions.training.equalize_trial_length in the analysis config to do the cut there, with the same result."""
+    return cfg.get("equalize_trial_length", True)
 
 
 def groups_using_secondary(cfg: dict) -> set:
@@ -271,11 +289,16 @@ def common_trs(trials: pd.DataFrame, status: pd.Series, is_open: pd.Series) -> i
     the scan) cannot set that minimum -- it is cut to the shared count if the scan leaves it enough TRs, and
     otherwise dropped here (status open_window_too_short). Edits `status` in place."""
     kept = status == KEPT
-    closed = kept & ~is_open
-    trs = int((trials.loc[closed, "n_trs"] if closed.any() else trials.loc[kept, "n_trs"]).min())
-    too_short = kept & is_open & (trials["n_trs"] < trs)
-    status[too_short] = DROPPED_OPEN_SHORT
-    return trs
+    common, keep = common_window_trs(trials.loc[kept, "n_trs"], is_open[kept])      # the same rule as equalize_trial_length
+    status[keep.index[~keep.to_numpy()]] = DROPPED_OPEN_SHORT
+    return common
+
+
+def apply_tr_rule(trials: pd.DataFrame, status: pd.Series, is_open: pd.Series, equalize: bool):
+    """The TR step for one subject's kept trials: the common count, or None when `equalize` is false (nothing is capped and
+    the trials are listed as selected). An open-ended window (the last trial of a run, with extend_events_until) listed
+    without a cap is used by training only if model_conditions.training.equalize_trial_length is set there."""
+    return common_trs(trials, status, is_open) if equalize else None
 
 
 def plan_subject(trials: pd.DataFrame, cfg: dict, subject: str) -> dict:
@@ -287,7 +310,7 @@ def plan_subject(trials: pd.DataFrame, cfg: dict, subject: str) -> dict:
     primary_names = list(cfg["primary_groups"])
     secondary_names = list(cfg.get("secondary_groups", {}))
     split = groups_using_secondary(cfg)
-    strategy = cfg.get("drop_strategy", "random")
+    strategy = drop_trial_strategy(cfg)
     rng = np.random.default_rng(np.random.SeedSequence([int(cfg.get("seed", 0)), zlib.crc32(str(subject).encode())]))
 
     status = pd.Series(pd.NA, index=trials.index, dtype=object)
@@ -304,12 +327,12 @@ def plan_subject(trials: pd.DataFrame, cfg: dict, subject: str) -> dict:
         out[governed] = EXCLUDED_SUBJECT
         return {"status": out, "included": False, "reason": reason, "n_per_primary": 0, "trs_per_trial": None}
 
-    if cfg.get("balance_trial_counts", True) is False:
+    if strategy == "none":
         # no count balancing: every usable governed trial is kept, only the common TR count is applied
         if not eligible.any():
             return exclude("no usable trials")
         status[eligible] = KEPT
-        trs = common_trs(trials, status, is_open)
+        trs = apply_tr_rule(trials, status, is_open, equalizes_trial_length(cfg))
         return {"status": status, "included": True, "reason": "", "n_per_primary": 0, "trs_per_trial": trs}
 
     # trials available per (primary, bucket); bucket is None for an unsplit primary group
@@ -347,7 +370,7 @@ def plan_subject(trials: pd.DataFrame, cfg: dict, subject: str) -> dict:
 
     status[eligible] = DROPPED_BALANCE
     status[kept] = KEPT
-    trs = common_trs(trials, status, is_open)
+    trs = apply_tr_rule(trials, status, is_open, equalizes_trial_length(cfg))
     return {"status": status, "included": True, "reason": "", "n_per_primary": n_per_primary, "trs_per_trial": trs}
 
 
@@ -377,7 +400,8 @@ def restrict_trials(master: pd.DataFrame, cfg: dict, hemodynamic_lag: float, ext
         t = trials.loc[sub_idx]
         usable = t[t["primary"].isna() | (t["status"] == KEPT)].copy()
         # governed trials are capped at the subject's common TR count; ungoverned ones keep their whole window
-        usable["n_trs"] = np.where(usable["primary"].notna(), plan["trs_per_trial"], np.nan)
+        cap = np.nan if plan["trs_per_trial"] is None else plan["trs_per_trial"]
+        usable["n_trs"] = np.where(usable["primary"].notna(), cap, np.nan)
         listed.append(usable)
 
     columns = ["subject", "boldfile", "trial_index", "onset", "trial_type", "primary_group", "secondary_group", "n_trs", "hemodynamic_lag"]
@@ -389,9 +413,14 @@ def restrict_trials(master: pd.DataFrame, cfg: dict, hemodynamic_lag: float, ext
         out = pd.DataFrame(columns=columns)
 
     summary = build_summary(trials, plans, cells, split)
+    # per trial: the TRs training would use, and how many of the window's TRs are cut from the end to reach the subject's common count
+    common = trials["subject"].map({s: p["trs_per_trial"] for s, p in plans.items() if p["included"]})
+    kept = trials["status"] == KEPT
+    trials["n_trs_used"] = np.where(kept, np.where(common.isna(), trials["n_trs"], common), 0).astype(int)      # no cap: the whole window is used
+    trials["n_trs_cut"] = np.where(kept, trials["n_trs"] - trials["n_trs_used"], 0).astype(int)
     audit = trials.loc[trials["primary"].notna(), [
         "subject", "boldfile", "eventfile", "trial_index", "source_row", "trial_type", "onset", "duration", "n_trs",
-        "primary", "secondary", "status",
+        "n_trs_used", "n_trs_cut", "open_window", "primary", "secondary", "status",
     ]].rename(columns={"primary": "primary_group", "secondary": "secondary_group"})
     return out, summary, audit
 
@@ -400,9 +429,11 @@ def build_summary(trials: pd.DataFrame, plans: dict, cells: list, split: set) ->
     rows = []
     for subject, plan in plans.items():
         t = trials[trials["subject"] == subject]
+        is_open = t["open_window"].astype(bool) if "open_window" in t else pd.Series(False, index=t.index)
         status = "included" if plan["included"] else "excluded"
         common = {"subject": subject, "status": status, "exclusion_reason": plan["reason"]}
-        trs = plan["trs_per_trial"] if plan["included"] else np.nan
+        capped = plan["included"] and plan["trs_per_trial"] is not None
+        trs = plan["trs_per_trial"] if capped else np.nan
         sub_rows = []
         for p, b in cells:
             sel = t["primary"] == p
@@ -413,8 +444,10 @@ def build_summary(trials: pd.DataFrame, plans: dict, cells: list, split: set) ->
                 **common, "primary_group": p, "secondary_group": b if b is not None else "",
                 "n_trials_original": int(sel.sum()), "n_trials_restricted": n_kept,
                 "trs_per_trial_restricted": trs,
-                "n_trs_original": int(t.loc[sel, "n_trs"].sum()),
-                "n_trs_restricted": n_kept * int(plan["trs_per_trial"] or 0),
+                "n_trs_original": int(t.loc[sel & ~is_open, "n_trs"].sum()),
+                "n_trs_restricted": n_kept * int(plan["trs_per_trial"]) if capped else int(t.loc[sel & (t["status"] == KEPT), "n_trs"].sum()),
+                "n_trs_cut_from_kept_trials": int((t.loc[sel & ~is_open & (t["status"] == KEPT), "n_trs"] - int(plan["trs_per_trial"])).sum()) if capped else 0,
+                "n_open_ended_trials": int((sel & is_open).sum()), "n_open_ended_kept": int((sel & is_open & (t["status"] == KEPT)).sum()),
             })
         # trials a secondary-split primary group claimed but no secondary group matched
         unlabeled = t["primary"].isin(split) & t["secondary"].isna()
@@ -423,7 +456,8 @@ def build_summary(trials: pd.DataFrame, plans: dict, cells: list, split: set) ->
             sub_rows.append({
                 **common, "primary_group": p, "secondary_group": "(no secondary match)",
                 "n_trials_original": int(sel.sum()), "n_trials_restricted": 0, "trs_per_trial_restricted": np.nan,
-                "n_trs_original": int(t.loc[sel, "n_trs"].sum()), "n_trs_restricted": 0,
+                "n_trs_original": int(t.loc[sel & ~is_open, "n_trs"].sum()), "n_trs_restricted": 0, "n_trs_cut_from_kept_trials": 0,
+                "n_open_ended_trials": int((sel & is_open).sum()), "n_open_ended_kept": 0,
             })
         rows += sub_rows
         rows.append({
@@ -433,6 +467,9 @@ def build_summary(trials: pd.DataFrame, plans: dict, cells: list, split: set) ->
             "trs_per_trial_restricted": trs,
             "n_trs_original": sum(x["n_trs_original"] for x in sub_rows),
             "n_trs_restricted": sum(x["n_trs_restricted"] for x in sub_rows),
+            "n_trs_cut_from_kept_trials": sum(x["n_trs_cut_from_kept_trials"] for x in sub_rows),
+            "n_open_ended_trials": sum(x["n_open_ended_trials"] for x in sub_rows),
+            "n_open_ended_kept": sum(x["n_open_ended_kept"] for x in sub_rows),
         })
     return pd.DataFrame(rows)
 
@@ -474,7 +511,8 @@ def print_report(summary: pd.DataFrame):
     for _, s in subjects.iterrows():
         if s["status"] == "included":
             print(f"  {s['subject']}: {int(s['n_trials_original'])} -> {int(s['n_trials_restricted'])} governed trials, "
-                  f"{int(s['trs_per_trial_restricted'])} TR(s)/trial, {int(s['n_trs_restricted'])} TRs")
+                  + (f"{int(s['trs_per_trial_restricted'])} TR(s)/trial" if pd.notna(s["trs_per_trial_restricted"]) else "no TR cap")
+                  + f", {int(s['n_trs_restricted'])} TRs")
         else:
             print(f"  (!) {s['subject']}: EXCLUDED -- {s['exclusion_reason']}")
 
@@ -518,6 +556,10 @@ def main():
     if extend_until:
         print(f"Windows follow model_conditions.training.extend_events_until: each trial runs to the next matching event")
     trial_list, summary, audit = restrict_trials(master, cfg, lag, extend_until)
+    n_open = int(audit["open_window"].sum()) if "open_window" in audit else 0
+    if not equalizes_trial_length(cfg) and extend_until and n_open:
+        print(f"(!) equalize_trial_length is false: {n_open} open-ended trial(s) (last of a run, nothing follows) are listed WITHOUT a TR cap. "
+              f"Training uses them only if model_conditions.training.equalize_trial_length is true in the analysis config.")
     summary.to_csv(summary_csv, index=False)
     audit.to_csv(audit_csv, index=False)
     print_report(summary)

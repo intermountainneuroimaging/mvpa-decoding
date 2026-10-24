@@ -1,7 +1,7 @@
 {
   "config_version": "1.0",
   "created_by": "AKH",
-  "notes": "MVPA operation (maintain/suppress/switch/clear) k-fold classifier, Clearvale working-memory tasks (WMpos/WMneg). Operation windows follow the Nature Communications method: every operation trial contributes its operation period PLUS the inter-trial interval that follows it (up to the next trial's view cue), all shifted by hemodynamic_lag 4.6 s, and every trial is cut to the same number of TRs per subject (extras removed from the END of the ITI) by workflows/restrict_master_spreadsheet.py with configs/restriction.clearvale-operation-iti.json -- run that step first (stage 2b, third argument = the trial_restriction path below). Classifier settings are the updated ones from config.clearvale-category-valence-groups.json (one-vs-rest LogisticRegression, liblinear, C = 50, sigmoid evidence, random_state 6100); mask, feature selection, folds and timecourse overlay are from config.clearvale-operation-valence-groups.json. Folds: each fold holds out one pos and one neg run (Clearvale protocols A1|B1|C1|D1 all pair runs [[1,3],[2,4],[5,7],[6,8]]); review before using with other protocols. Every key is commented in config.clearvale-operation-iti-liblinear-kfold.ANNOTATED.md.",
+  "notes": "MVPA operation (maintain/suppress/switch/clear) k-fold classifier, Clearvale working-memory tasks (WMpos/WMneg). Operation windows follow the Nature Communications method: every operation trial contributes its operation period PLUS the inter-trial interval that follows it (up to the next trial's view cue), all shifted by hemodynamic_lag 4.6 s, and, within each subject, every trial is cut to the subject's shortest operation + ITI window (equalize_trial_length: extras removed from the END of the ITI; no separate restriction step -- each subject's model/<subject>_training_trial_length_audit.csv and _summary.csv report every TR cut). Classifier settings are the updated ones from config.clearvale-category-valence-groups.json (one-vs-rest LogisticRegression, liblinear, C = 50, sigmoid evidence, random_state 6100); mask, feature selection, folds and timecourse overlay are from config.clearvale-operation-valence-groups.json. Folds: each fold holds out one pos and one neg run (Clearvale protocols A1|B1|C1|D1 all pair runs [[1,3],[2,4],[5,7],[6,8]]); review before using with other protocols. Every key is commented in config.clearvale-operation-iti-liblinear-kfold.ANNOTATED.md.",
 
   "event_extraction": {
     "bids_root": "/pl/active/banich/studies/Clearvale/bids/",
@@ -41,7 +41,7 @@
         }
       },
       "extend_events_until": {"column": "trial_type", "match": "regex", "value": "view_.*"},
-      "trial_restriction": "/pl/active/banich/studies/Clearvale/analysis/mvpa-decoding/master_spreadsheet_trial_restriction_operation_iti.csv"
+      "equalize_trial_length": true
     },
 
     "timecourse_decoding": {

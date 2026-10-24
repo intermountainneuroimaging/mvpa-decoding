@@ -1,11 +1,11 @@
 {
   "config_version": "1.0",
   "created_by": "AKH",
-  "notes": "Supplementary config for workflows/restrict_master_spreadsheet.py, used with config.clearvale-operation-iti-liblinear-kfold.json. It does NOT balance trial counts (balance_trial_counts is false): every working-memory operation trial that has a complete operation + ITI window is kept. It only gives every kept trial the same number of TRs: the subject's shortest operation + ITI window (in this study 6 operation TRs + the shortest ITI), with the extra TRs cut off the END of the ITI. The last trial of every run has no following trial cue: its window runs to the end of the scan, it never sets the shared TR count, and it is kept when the scan leaves it that many TRs after the hemodynamic lag (otherwise audit status 'open_window_too_short'). The single primary group below must cover exactly what model_conditions.training selects (pass --config and read the log for '(!)' warnings).",
+  "notes": "OPTIONAL stage-2b route for config.clearvale-operation-iti-liblinear-kfold.json; the same training set is produced WITHOUT this file by leaving model_conditions.training.equalize_trial_length true in the analysis config and running stage 3 directly. This file selects every working-memory operation trial (drop_trial_strategy none: no trial is dropped to equalize counts) and caps each at the subject's shortest operation + ITI window (equalize_trial_length true: first TRs kept, extras cut off the END of the ITI). The last trial of every run has no following cue: it runs to the end of the scan, never sets the shared TR count, and is kept when the scan leaves it that many TRs after the hemodynamic lag (otherwise audit status 'open_window_too_short'). The primary group must cover exactly what model_conditions.training selects (pass --config and read the log for '(!)' warnings). Use its own output path (third argument of stage 2b) so it does not overwrite the category model's list.",
 
   "seed": 0,
-  "drop_strategy": "random",
-  "balance_trial_counts": false,
+  "drop_trial_strategy": "none",
+  "equalize_trial_length": true,
 
   "primary_groups": {
     "operation": {

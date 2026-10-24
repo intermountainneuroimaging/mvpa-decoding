@@ -2,6 +2,12 @@
 
 # Optional: force balanced training trials (`workflows/restrict_master_spreadsheet.py`)
 
+> If all you need is the **same number of TRs per trial within each subject** (no trial dropped, no balancing across conditions),
+> you don't need this step: set `model_conditions.training.equalize_trial_length` ([model_conditions](model-conditions.md)) and the
+> workflow does it per subject, with its own audit and summary. The two routes give the **same training set**, and you may set the flag in
+> both places (this step's restriction config and the analysis config): with `drop_trial_strategy: "none"` and primary groups that cover
+> exactly what training selects, stage 2 -> 3 and stage 2 -> 2b -> 3 select identical volumes (tested).
+
 An optional step between the master spreadsheet and `mvpa_workflow.py`. It
 forces every subject to have exactly the same number of **training** trials --
 and the same number of TRs per trial -- in each condition of interest, and
@@ -67,8 +73,8 @@ order.
 | `secondary_groups` | `{name: query}`, optional. Balanced *within* each primary group. |
 | `secondary_applies_to` | Optional list of primary group names that get the secondary split (default: all of them). Groups not listed are only equalized in total. |
 | `seed` | Integer (default 0). Dropped trials are chosen by a generator seeded from this and the subject ID, so reruns give identical output. |
-| `balance_trial_counts` | Optional boolean (default `true`). `false` skips step 1 below: no trial is dropped to equalize counts, `primary_groups` only say which trials are governed, and only the common TR count (step 2) is applied. |
-| `drop_strategy` | `"random"` (default), or `"spread_runs"`: drop from whichever run currently holds the most trials of that group, so the survivors stay evenly spread over runs (use this with a `per_run` `model.kfold_cv`). |
+| `equalize_trial_length` | Optional boolean (default `true`, the step's original behaviour). Whether every kept trial is capped at the subject's common TR count (step 2 below). `false`: the list only *selects* trials (`n_trs` blank); open-ended last-trial windows are then listed uncapped and training uses them only when `model_conditions.training.equalize_trial_length` is `true` in the analysis config. Either way, together with the same setting in the analysis config, the resulting training set is the same. |
+| `drop_trial_strategy` | How **trials** are dropped to equalize counts (step 1 below); it never affects TRs, which are always cut from the end of each trial (step 2). `"random"` (default); `"spread_runs"`: drop from whichever run currently holds the most trials of that group, so the survivors stay evenly spread over runs (use this with a `per_run` `model.kfold_cv`); `"none"`: drop no trial, `primary_groups` only say which trials are governed and only the common TR count is applied. (`drop_strategy` is the old name of this key and still works; do not set both.) |
 
 **What it does, per subject (all of that subject's runs pooled):**
 
@@ -102,8 +108,8 @@ set -- it is never silently run unbalanced.
 | File | Contents |
 |---|---|
 | `<stem>_trial_restriction.csv` | The list `trial_restriction` points at: one row per trial training may use -- `subject, boldfile, trial_index, onset, trial_type, primary_group, secondary_group, n_trs, hemodynamic_lag`. Kept balanced trials carry their `n_trs`; trials in no primary group are listed with `n_trs` blank (whole window). A trial not listed is not used. |
-| `<stem>_trial_restriction_summary.csv` | Per subject x primary x secondary group (plus an `(all)` row per subject): `n_trials_original`/`n_trials_restricted`, `trs_per_trial_restricted`, and `n_trs_original`/`n_trs_restricted` (TRs training would select). Excluded subjects appear with their `exclusion_reason`. |
-| `<stem>_trial_restriction_audit.csv` | Every governed trial and its `status` (`kept`, `balance_drop`, `no_secondary_label`, `outside_scan`, `subject_excluded`). |
+| `<stem>_trial_restriction_summary.csv` | Per subject x primary x secondary group (plus an `(all)` row per subject): `n_trials_original`/`n_trials_restricted`, `trs_per_trial_restricted`, and `n_trs_original`/`n_trs_restricted` (TRs training would select, before and after) and `n_trs_cut_from_kept_trials` (the TRs removed from the END of the kept trials to reach the common count; the TRs of dropped trials are not in it), with open-ended trials (the last of a run, running to the scan end) counted apart in `n_open_ended_trials` / `n_open_ended_kept` rather than in the TR totals. Excluded subjects appear with their `exclusion_reason`. |
+| `<stem>_trial_restriction_audit.csv` | Every governed trial and its `status` (`kept`, `balance_drop`, `no_secondary_label`, `outside_scan`, `open_window_too_short`, `subject_excluded`), its `open_window`, `n_trs` (TRs in its window), `n_trs_used` (what training will use: the subject's common count for a kept trial, 0 otherwise) and `n_trs_cut` (`n_trs` minus `n_trs_used` for a kept trial: the TRs removed from the END of its window). |
 Pass `--output <path>` (third argument of the slurm script `2b_sbatch_restrict_master_spreadsheet.sh`) to write the list somewhere other than
 `<stem>_trial_restriction.csv`: two analyses that share one master spreadsheet need their own lists, otherwise the second run overwrites the first.
 The summary and audit tables are then written beside it as `<path stem>_summary.csv` / `_audit.csv`. The audit `status` also has
@@ -122,7 +128,7 @@ checked for you).
   primary-group query doesn't (say it adds a run restriction the primary
   group lacks), those stay unbalanced -- pass `--config` and the script
   prints a warning naming the condition and how many trials are uncovered.
-- *Balance is per subject, across runs.* With `drop_strategy: "random"` a run
+- *Balance is per subject, across runs.* With `drop_trial_strategy: "random"` a run
   can end up with few trials of a group; prefer `"spread_runs"` for
   per-run cross-validation.
 - *Testing and timecourse decoding are not restricted* (for now), so with a

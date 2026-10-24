@@ -126,6 +126,13 @@ def validate_config(cfg: dict, valid_columns=None, df: pd.DataFrame = None):
         for name, query in conditions.items():
             errors.extend(validate_query_node(query, valid_columns, path=f"{prefix}.conditions[{name!r}]"))
 
+        equalize = model_conditions[section].get("equalize_trial_length")
+        if equalize is not None:
+            if section != "training":
+                errors.append(f"{prefix}.equalize_trial_length: only applies to training")
+            elif not isinstance(equalize, bool):
+                errors.append(f"{prefix}.equalize_trial_length: must be true or false")
+
         extend_until = model_conditions[section].get("extend_events_until")
         if extend_until is not None:
             if section == "timecourse_decoding":

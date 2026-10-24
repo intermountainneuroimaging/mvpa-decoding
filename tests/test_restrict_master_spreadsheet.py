@@ -420,7 +420,7 @@ def write_trial_run(root, sub, run, itis):
 
 
 OP_CFG = {"primary_groups": {"operation": {"column": "trial_type", "match": "regex", "value": "(maintain|clear)_face"}},
-          "balance_trial_counts": False}
+          "drop_trial_strategy": "none"}
 
 
 class TestExtendedWindows:
@@ -473,17 +473,30 @@ class TestExtendedWindows:
         assert longest["volume_of_interest_withlag"].tolist() == list(range(longest["volume_of_interest_withlag"].min(),
                                                                             longest["volume_of_interest_withlag"].min() + 5))
 
-    def test_balance_trial_counts_false_drops_no_trial_for_count_reasons(self, tmp_path):
+    def test_strategy_none_drops_no_trial_for_count_reasons(self, tmp_path):
+        # 7 trials alternate maintain/clear: 4 vs 3 -> a count-balancing strategy drops one, "none" drops none
         write_trial_run(tmp_path, "001", 1, [6] * 7)
         master = build_master(tmp_path, ["001"])
-        _, _, audit = rms.restrict_trials(master, OP_CFG, 0.0, VIEW_NEXT)
-        assert "balance_drop" not in set(audit["status"])
-        _, _, audit_default = rms.restrict_trials(master, {**OP_CFG, "balance_trial_counts": True}, 0.0, VIEW_NEXT)
-        assert audit["status"].eq("kept").sum() >= audit_default["status"].eq("kept").sum()
+        two = {"primary_groups": {"maintain": _q("trial_type", "maintain_face"), "clear": _q("trial_type", "clear_face")}}
+        _, _, none_audit = rms.restrict_trials(master, {**two, "drop_trial_strategy": "none"}, 0.0, VIEW_NEXT)
+        _, _, random_audit = rms.restrict_trials(master, {**two, "drop_trial_strategy": "random"}, 0.0, VIEW_NEXT)
+        assert "balance_drop" not in set(none_audit["status"]) and "balance_drop" in set(random_audit["status"])
+        assert none_audit["status"].eq("kept").sum() > random_audit["status"].eq("kept").sum()
 
-    def test_balance_trial_counts_must_be_a_bool(self):
-        assert any("balance_trial_counts" in e for e in rms.validate_restriction_config({**OP_CFG, "balance_trial_counts": "no"}))
+    def test_old_drop_strategy_name_still_works(self, tmp_path):
+        assert rms.drop_trial_strategy({"drop_strategy": "spread_runs"}) == "spread_runs"
+        assert rms.drop_trial_strategy({}) == "random"
+        assert rms.validate_restriction_config({**OP_CFG, "drop_trial_strategy": "spread_runs"}) == []
 
+    def test_both_names_together_is_an_error(self):
+        errors = rms.validate_restriction_config({**OP_CFG, "drop_strategy": "random"})
+        assert any("same setting" in e for e in errors)
+
+    def test_unknown_strategy_is_an_error(self):
+        assert any("drop_trial_strategy" in e for e in rms.validate_restriction_config({**OP_CFG, "drop_trial_strategy": "sometimes"}))
+
+    def test_the_removed_balance_trial_counts_key_is_refused(self):
+        assert any("balance_trial_counts" in e for e in rms.validate_restriction_config({**OP_CFG, "balance_trial_counts": False}))
 
     def test_last_trial_of_a_run_is_kept_only_when_the_scan_leaves_it_the_common_window(self, tmp_path):
         # 28 trials; the 27th ITI is long so the last operation starts 4 s before the scan ends (2 TRs < the common 5)
@@ -510,3 +523,203 @@ class TestExtendedWindows:
         master = build_master(tmp_path, ["001"])
         out = label_conditions_with_lag(master, {"op": _q("trial_type", "(maintain|clear)_face")}, 0.0, extend_until=VIEW_NEXT)
         assert out["trial_index"].nunique() == 2        # the last trial has no window and no cap
+
+    def test_audit_and_summary_report_the_tr_cut_from_each_kept_trial(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6, 8, 10, 12, 6])             # windows 5, 6, 7, 8 TRs, then the open-ended last trial
+        master = build_master(tmp_path, ["001"])
+        _, summary, audit = rms.restrict_trials(master, OP_CFG, 0.0, VIEW_NEXT)
+        kept = audit[audit["status"] == "kept"]
+        assert (kept["n_trs_used"] == 5).all()
+        closed = kept[kept["n_trs"] < 100]                                  # the four trials that end at a real next cue
+        assert (closed["n_trs"] - closed["n_trs_used"]).tolist() == closed["n_trs_cut"].tolist() == [0, 1, 2, 3]
+        row = summary[summary["primary_group"] == "operation"].iloc[0]
+        # the open-ended last trial runs to the scan end, so it is counted apart rather than inflating the TR totals
+        assert row["n_trs_cut_from_kept_trials"] == closed["n_trs_cut"].sum() == 6
+        assert row["n_open_ended_trials"] == row["n_open_ended_kept"] == 1 and kept["open_window"].sum() == 1
+        assert row["n_trs_restricted"] == 5 * len(kept)
+        dropped = audit[audit["status"] != "kept"]
+        assert (dropped["n_trs_used"] == 0).all() and (dropped["n_trs_cut"] == 0).all()
+
+
+# ---------------------------------------------------------------- equalize_trial_length (no restriction step)
+
+COND = {"op": _q("trial_type", "(maintain|clear)_face")}
+
+
+def vols(labeled, trial_index):
+    return labeled[labeled["trial_index"] == trial_index]["volume_of_interest_withlag"].tolist()
+
+
+class TestCommonWindowTrs:
+    def test_shortest_closed_window_sets_the_count_and_open_windows_never_do(self):
+        from utils.mvpa_common import common_window_trs
+        common, keep = common_window_trs([5, 6, 7, 3, 9], [False, False, False, True, True])
+        assert common == 5 and keep.tolist() == [True, True, True, False, True]       # the open 3-TR window is too short; the open 9 is kept
+
+    def test_all_open_falls_back_to_the_shortest_and_empty_windows_are_never_kept(self):
+        from utils.mvpa_common import common_window_trs
+        common, keep = common_window_trs([4, 8, 0], [True, True, False])
+        assert common == 4 and keep.tolist() == [True, True, False]
+        assert common_window_trs([0, 0], [False, False])[0] == 0
+
+
+class TestEqualizeTrialLength:
+    def test_every_trial_is_cut_to_the_shortest_with_the_extras_off_the_end(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6, 8, 10, 12, 6])               # operation + ITI windows: 5, 6, 7, 8 TRs + the open last trial
+        master = build_master(tmp_path, ["001"])
+        report = {}
+        out = label_conditions_with_lag(master, COND, 0.0, extend_until=VIEW_NEXT, equalize_length=True, report=report)
+        assert out.groupby("trial_index").size().tolist() == [5, 5, 5, 5, 5]
+        plain = label_conditions_with_lag(master, COND, 0.0, extend_until=VIEW_NEXT, equalize_length=False)
+        for t in plain["trial_index"].unique():                                # FIRST five volumes of each window are the ones kept
+            assert vols(out, t) == vols(plain, t)[:5]
+
+    def test_the_audit_and_summary_say_which_trs_were_cut(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6, 8, 10, 12, 6])
+        report = {}
+        label_conditions_with_lag(build_master(tmp_path, ["001"]), COND, 0.0, extend_until=VIEW_NEXT, equalize_length=True, report=report)
+        audit, summary = report["audit"], report["summary"]
+        kept = audit[audit["status"] == "kept"]
+        assert (kept["n_trs_used"] == 5).all()
+        closed = kept[kept["n_trs"] < 100]
+        assert closed["n_trs_cut"].tolist() == [0, 1, 2, 3]
+        total = summary[summary["condition"] == "(all)"].iloc[0]
+        assert total["trs_per_trial"] == 5 and total["n_trials_kept"] == 5
+        assert total["n_trs_cut_from_kept_trials"] == closed["n_trs_cut"].sum() == 6            # the open-ended last trial is counted apart ...
+        assert total["n_open_ended_trials"] == total["n_open_ended_kept"] == 1 and total["n_trs_original"] == 5 + 6 + 7 + 8   # ... not in the TR totals
+        assert set(summary["condition"]) == {"op", "(all)"}
+
+    def test_each_subject_gets_its_own_common_length(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6, 8, 10, 6])      # shortest closed window: 5 TRs
+        write_trial_run(tmp_path, "002", 1, [10, 12, 14, 10])   # shortest closed window: 7 TRs
+        master = build_master(tmp_path, ["001", "002"])
+        report = {}
+        out = label_conditions_with_lag(master, COND, 0.0, extend_until=VIEW_NEXT, equalize_length=True, report=report)
+        per_subject = out.groupby("subject").size() / out.groupby("subject")["trial_index"].nunique()
+        assert per_subject.to_dict() == {"001": 5.0, "002": 7.0}                # no look across subjects
+        total = report["summary"][report["summary"]["condition"] == "(all)"].set_index("subject")["trs_per_trial"]
+        assert total.to_dict() == {"001": 5, "002": 7}
+
+    def test_a_last_trial_the_scan_cannot_fill_is_dropped_and_reported(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6] * 26 + [18, 6])       # the last operation starts 2 TRs before the scan ends
+        report = {}
+        out = label_conditions_with_lag(build_master(tmp_path, ["001"]), COND, 0.0, extend_until=VIEW_NEXT, equalize_length=True, report=report)
+        audit = report["audit"]
+        assert audit["status"].iloc[-1] == "open_window_too_short" and (audit["status"] == "kept").sum() == 27
+        assert out["trial_index"].nunique() == 27 and set(out.groupby("trial_index").size()) == {5}
+
+    def test_it_matches_the_restriction_step_exactly(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6, 8, 10, 12, 6, 8])
+        master = build_master(tmp_path, ["001"])
+        trial_list, _, _ = rms.restrict_trials(master, OP_CFG, 0.0, VIEW_NEXT)
+        path = tmp_path / "list.csv"
+        trial_list.to_csv(path, index=False)
+        via_step = label_conditions_with_lag(master, COND, 0.0, trial_restriction=load_trial_restriction(str(path), 0.0), extend_until=VIEW_NEXT)
+        built_in = label_conditions_with_lag(master, COND, 0.0, extend_until=VIEW_NEXT, equalize_length=True)
+        key = ["trial_index", "volume_of_interest_withlag"]
+        assert via_step[key].sort_values(key).reset_index(drop=True).equals(built_in[key].sort_values(key).reset_index(drop=True))
+
+    def test_without_extension_it_equalizes_the_event_durations(self, tmp_path):
+        d = tmp_path / "sub-001" / "func"
+        d.mkdir(parents=True)
+        img = nib.Nifti1Image(np.zeros((3, 3, 3, N_VOLS), dtype=np.float32), np.eye(4))
+        img.header.set_zooms((3.0, 3.0, 3.0, TR))
+        img.to_filename(str(d / "sub-001_task-t_run-01_bold.nii.gz"))
+        pd.DataFrame({"onset": [2.0, 20.0, 40.0], "duration": [6.0, 4.0, 8.0], "trial_type": ["maintain_face", "clear_face", "maintain_face"]}) \
+            .to_csv(d / "sub-001_task-t_run-01_events.tsv", sep="\t", index=False)
+        out = label_conditions_with_lag(build_master(tmp_path, ["001"]), COND, 0.0, equalize_length=True)
+        assert out.groupby("trial_index").size().tolist() == [2, 2, 2]          # 3, 2 and 4 TRs, all cut to the shortest (2)
+
+    def test_it_can_be_combined_with_a_restriction_list_and_changes_nothing(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6, 8, 10, 12, 6])
+        master = build_master(tmp_path, ["001"])
+        trial_list, _, _ = rms.restrict_trials(master, OP_CFG, 0.0, VIEW_NEXT)
+        path = tmp_path / "list.csv"
+        trial_list.to_csv(path, index=False)
+        restriction = load_trial_restriction(str(path), 0.0)
+        alone = label_conditions_with_lag(master, COND, 0.0, trial_restriction=restriction, extend_until=VIEW_NEXT)
+        both = label_conditions_with_lag(master, COND, 0.0, trial_restriction=restriction, extend_until=VIEW_NEXT, equalize_length=True)
+        assert both[["trial_index", "volume_of_interest_withlag"]].equals(alone[["trial_index", "volume_of_interest_withlag"]])
+
+    def test_workflow_writes_the_subject_audit_and_summary(self, tmp_path, capsys):
+        from workflows.mvpa_workflow import write_trial_length_report
+        write_trial_run(tmp_path / "data", "001", 1, [6, 8, 10, 6])
+        report = {}
+        label_conditions_with_lag(build_master(tmp_path / "data", ["001"]), COND, 0.0, extend_until=VIEW_NEXT, equalize_length=True, report=report)
+        write_trial_length_report(report, str(tmp_path / "out"), "desc", "001")
+        base = tmp_path / "out" / "desc" / "001" / "model"
+        audit = pd.read_csv(base / "001_training_trial_length_audit.csv")
+        summary = pd.read_csv(base / "001_training_trial_length_summary.csv")
+        assert {"n_trs", "n_trs_used", "n_trs_cut", "status"} <= set(audit.columns) and "(all)" in set(summary["condition"])
+        assert "TR(s) per trial" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- one training set, whichever way the TR rule is applied
+
+def training_signature(labeled):
+    """Everything that defines the training set: which volumes of which trial carry which label."""
+    cols = ["subject", "boldfile", "trial_index", "regressor_label", "volume_of_interest", "volume_of_interest_withlag"]
+    return labeled[cols].sort_values(cols).reset_index(drop=True)
+
+
+class TestSameTrainingSetOnEveryRoute:
+    """stage 2 -> 3, 2 -> 2b -> 3, and both together must select exactly the same volumes."""
+
+    COND = {"op": _q("trial_type", "(maintain|clear)_face")}
+    COVERS_ALL = {"primary_groups": {"operation": _q("trial_type", "(maintain|clear)_face")}, "drop_trial_strategy": "none"}
+
+    def data(self, tmp_path):
+        write_trial_run(tmp_path, "001", 1, [6, 8, 10, 12, 6, 14, 8])
+        write_trial_run(tmp_path, "001", 2, [10, 12, 14, 8, 8])
+        write_trial_run(tmp_path, "002", 1, [12, 14, 10, 16, 12, 12])                  # a different shortest window
+        write_trial_run(tmp_path, "003", 1, [6] * 26 + [18, 6])                         # the last trial cannot fill the common window
+        return build_master(tmp_path, ["001", "002", "003"])
+
+    def step2b(self, tmp_path, master, cfg, lag=0.0):
+        trial_list, _, _ = rms.restrict_trials(master, cfg, lag, VIEW_NEXT)
+        path = tmp_path / f"list_{abs(hash(json.dumps(cfg, sort_keys=True)))}.csv"
+        trial_list.to_csv(path, index=False)
+        return load_trial_restriction(str(path), lag)
+
+    def test_step3_only_step2b_only_and_both_give_the_same_training_set(self, tmp_path):
+        master = self.data(tmp_path)
+        step3_only = label_conditions_with_lag(master, self.COND, 0.0, extend_until=VIEW_NEXT, equalize_length=True)
+        lst = self.step2b(tmp_path, master, self.COVERS_ALL)
+        step2b_only = label_conditions_with_lag(master, self.COND, 0.0, trial_restriction=lst, extend_until=VIEW_NEXT)
+        both = label_conditions_with_lag(master, self.COND, 0.0, trial_restriction=lst, extend_until=VIEW_NEXT, equalize_length=True)
+        reference = training_signature(step3_only)
+        assert len(reference) > 0 and reference["subject"].nunique() == 3
+        for other in (step2b_only, both):
+            assert training_signature(other).equals(reference)
+        # the row order is the same too, not just the set
+        assert step2b_only["volume_of_interest_withlag"].tolist() == step3_only["volume_of_interest_withlag"].tolist()
+
+    def test_a_restriction_that_does_not_cap_plus_step3_equalizing_is_the_same_again(self, tmp_path):
+        master = self.data(tmp_path)
+        reference = training_signature(label_conditions_with_lag(master, self.COND, 0.0, extend_until=VIEW_NEXT, equalize_length=True))
+        lst = self.step2b(tmp_path, master, {**self.COVERS_ALL, "equalize_trial_length": False})
+        assert lst.loc[lst["primary_group"] == "operation", "n_trs"].isna().all()          # step 2b only SELECTED trials
+        via_both_steps = label_conditions_with_lag(master, self.COND, 0.0, trial_restriction=lst, extend_until=VIEW_NEXT, equalize_length=True)
+        assert training_signature(via_both_steps).equals(reference)
+
+    def test_every_subject_has_the_same_tr_count_on_all_trials_of_that_subject(self, tmp_path):
+        master = self.data(tmp_path)
+        out = label_conditions_with_lag(master, self.COND, 0.0, extend_until=VIEW_NEXT, equalize_length=True)
+        per_trial = out.groupby(["subject", "boldfile", "trial_index"]).size()
+        assert per_trial.groupby("subject").nunique().eq(1).all()
+        assert per_trial.groupby("subject").first().to_dict() == {"001": 5, "002": 7, "003": 5}
+
+    def test_step2b_without_equalizing_lists_open_ended_trials_for_step3_to_cap(self, tmp_path):
+        master = self.data(tmp_path)
+        cfg = {**self.COVERS_ALL, "equalize_trial_length": False}
+        lst = self.step2b(tmp_path, master, cfg)
+        _, _, audit = rms.restrict_trials(master, cfg, 0.0, VIEW_NEXT)
+        assert audit["status"].eq("kept").all() and audit["open_window"].sum() == 4          # nothing dropped, nothing capped
+        no_cap = label_conditions_with_lag(master, self.COND, 0.0, trial_restriction=lst, extend_until=VIEW_NEXT)
+        capped = label_conditions_with_lag(master, self.COND, 0.0, trial_restriction=lst, extend_until=VIEW_NEXT, equalize_length=True)
+        n_trials = lambda df: len(df.drop_duplicates(["boldfile", "trial_index"]))
+        assert n_trials(no_cap) < n_trials(capped)                                              # an open window cannot be used without a cap
+
+    def test_the_restriction_config_flag_must_be_a_bool(self):
+        assert any("equalize_trial_length" in e for e in rms.validate_restriction_config({**self.COVERS_ALL, "equalize_trial_length": "yes"}))
+        assert rms.validate_restriction_config({**self.COVERS_ALL, "equalize_trial_length": True}) == []

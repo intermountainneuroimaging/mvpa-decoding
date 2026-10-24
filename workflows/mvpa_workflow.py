@@ -394,6 +394,27 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
 # Main Workflow
 # =====================================================
 
+def write_trial_length_report(report: dict, analysis_output_dir: str, model_descr: str, subject_id: str):
+    """model/<subject>_training_trial_length_audit.csv (every training trial: its TRs, the TRs used and cut, its status) and
+    model/<subject>_training_trial_length_summary.csv (per condition and in total) from equalize_trial_length, and the summary
+    printed to the log."""
+    if not report:
+        print(f"equalize_trial_length: subject {subject_id} has no training trials")
+        return
+    out_dir = os.path.join(analysis_output_dir, model_descr, subject_id, "model")
+    os.makedirs(out_dir, exist_ok=True)
+    report["audit"].to_csv(os.path.join(out_dir, f"{subject_id}_training_trial_length_audit.csv"), index=False)
+    report["summary"].to_csv(os.path.join(out_dir, f"{subject_id}_training_trial_length_summary.csv"), index=False)
+    total = report["summary"][report["summary"]["condition"] == "(all)"].iloc[0]
+    print(f"equalize_trial_length: subject {subject_id}: {int(total['trs_per_trial'])} TR(s) per trial; "
+          f"{int(total['n_trials_kept'])} of {int(total['n_trials_original'])} trial(s) kept; "
+          f"{int(total['n_trs_cut_from_kept_trials'])} TR(s) cut from the end of kept trials")
+    print(report["summary"].to_string(index=False))
+    dropped = report["audit"][report["audit"]["status"] != "kept"]
+    if len(dropped):
+        print(f"  {len(dropped)} trial(s) not used: {dropped['status'].value_counts().to_dict()} (see the audit file)")
+
+
 def main(args):
     subject_id = args.subject
     analysis_output_dir = args.analysis_output_dir
@@ -512,14 +533,21 @@ def main(args):
     # event matching this query -- e.g. operation period + the ITI up to the next trial's cue (docs/model-conditions.md)
     training_extend = model_conditions["training"].get("extend_events_until")
     testing_extend = (model_conditions.get("testing") or {}).get("extend_events_until")
+    # model_conditions.training.equalize_trial_length (optional): cut every training trial of THIS subject to the subject's
+    # shortest trial, extras off the END -- the restriction step's TR rule without a separate step or file
+    # (also fine together with a trial_restriction list built with the same setting: its trials are already at the common count)
+    equalize_length = bool(model_conditions["training"].get("equalize_trial_length", False))
+    length_report = {}
     try:
         training_df = apply_regressor_codes(
             label_conditions_with_lag(subject_df, training_conditions, hemodynamic_lag, trial_restriction=trial_restriction,
-                                      extend_until=training_extend),
+                                      extend_until=training_extend, equalize_length=equalize_length, report=length_report),
             regressor_categories,
         )
     except ValueError as exc:
         raise SystemExit(str(exc))
+    if equalize_length:
+        write_trial_length_report(length_report, analysis_output_dir, model_descr, subject_id)
     testing_df = (
         apply_regressor_codes(label_conditions_with_lag(subject_df, testing_conditions, hemodynamic_lag,
                                                         extend_until=testing_extend), regressor_categories)
