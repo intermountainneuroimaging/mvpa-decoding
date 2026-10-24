@@ -204,6 +204,7 @@ def main():
         if unexpected:
             print(f"(!) observed trial_type(s) not in {expected_events_file} (possible typo?): {unexpected}")
 
+    os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
     table.to_csv(output_file, index=False)
     print(f"Wrote {len(table)} rows to {output_file}")
 

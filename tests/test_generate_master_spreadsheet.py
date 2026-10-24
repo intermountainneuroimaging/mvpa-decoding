@@ -131,3 +131,13 @@ class TestMain:
         assert output_file.exists()
         table = pd.read_csv(output_file)
         assert len(table) == 20  # one row per volume of the 20-frame bids_run fixture
+
+    def test_creates_missing_output_folder(self, tmp_path, bids_run, monkeypatch):
+        bids_run  # writes the NIfTI/events.tsv under tmp_path
+        output_file = tmp_path / "analysis" / "mvpa-decoding" / "master_spreadsheet.csv"
+        config_path = self._config(tmp_path, output_file)
+
+        monkeypatch.setattr(sys, "argv", ["generate_master_spreadsheet.py", "--config", config_path])
+        main()
+
+        assert output_file.exists()
