@@ -180,6 +180,7 @@ def plot_importance_surface(impa_nii: str, title: str = "", operations=OPERATION
     vmax = np.percentile(nonzero, 99.5)
     threshold = np.percentile(nonzero, 100 * (1 - top_fraction))
     fsaverage = datasets.load_fsaverage("fsaverage")
+    sulcal = datasets.load_fsaverage_data(mesh="fsaverage", mesh_type="inflated", data_type="sulcal").data.parts
     fig, axes = plt.subplots(len(operations), 4, figsize=(15, 3 * len(operations)), subplot_kw={"projection": "3d"})
     for r, op in enumerate(operations):
         vol = nib.Nifti1Image(data[..., r], img.affine)
@@ -187,7 +188,7 @@ def plot_importance_surface(impa_nii: str, title: str = "", operations=OPERATION
             texture = surface.vol_to_surf(vol, fsaverage.pial.parts[hemi], radius=3.0, interpolation="linear")
             plotting.plot_surf_stat_map(fsaverage.inflated.parts[hemi], texture, hemi=hemi, view=view, axes=axes[r][c],
                                         figure=fig, colorbar=False, cmap="RdBu_r", threshold=threshold, vmax=vmax,
-                                        vmin=-vmax, bg_map=None, darkness=None)
+                                        vmin=-vmax, bg_map=sulcal[hemi], darkness=0.6)
             if r == 0:
                 axes[r][c].set_title(f"{hemi} {view}", fontsize=13)
         axes[r][0].text2D(-0.05, 0.5, op.capitalize(), transform=axes[r][0].transAxes, rotation=90, fontsize=15,
