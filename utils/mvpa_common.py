@@ -1358,8 +1358,9 @@ def extract_importance_map(pipe, n_features: int) -> np.ndarray:
 
     # special case where classifier is binary (yes/no) -- only codes one label
     if n_class == 2:
-        # voxel weights -- volume 0 and volume 1 are mat*-1 of each other
-        impa = np.vstack((coef, -coef))
+        # a binary fit has ONE weight vector, for classes_[1] (a positive weight raises that class's
+        # score). Volume 0 (classes_[0]) is its negation, volume 1 (classes_[1]) is the weights themselves.
+        impa = np.vstack((-coef, coef))
     else:
         impa = coef
 

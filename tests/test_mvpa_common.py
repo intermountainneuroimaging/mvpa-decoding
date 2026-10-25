@@ -1135,6 +1135,21 @@ class TestOneVsRestClassification:
         assert impa.shape == (2, X.shape[1])
         np.testing.assert_allclose(impa[0], -impa[1])
 
+    @pytest.mark.parametrize("one_vs_rest", [False, True])
+    def test_binary_importance_map_weights_belong_to_the_class_they_favor(self, one_vs_rest):
+        # voxel 0 is HIGHER for class 2: its weight must be positive in class 2's volume (index 1) and
+        # negative in class 1's (index 0), the same sign evidence follows (evidence for class 2 rises with it)
+        rng = np.random.default_rng(0)
+        y = np.repeat([1, 2], 60)
+        X = rng.normal(size=(len(y), 8))
+        X[y == 2, 0] += 2.0
+        pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 1.0}, classifier_name=CLASSIFIER_NAME,
+                                     classifier_params=LIBLINEAR_PARAMS, one_vs_rest=one_vs_rest)
+        impa = extract_importance_map(pipe, n_features=X.shape[1])
+        assert impa[1, 0] > 0 > impa[0, 0]
+        evidence = decision_evidence(pipe, X, "sigmoid")
+        assert evidence[y == 2, 1].mean() > evidence[y == 2, 0].mean()   # the class the voxel favors wins on its own trials
+
     def test_performance_and_evidence_work_through_the_wrapper(self):
         X, y = _separable_data(n_per_class=15, n_features=10, n_classes=3)
         pipe = model_classification(X, y, feature_selection_cfg={"feat_p": 0.05}, classifier_name=CLASSIFIER_NAME,
