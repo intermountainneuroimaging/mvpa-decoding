@@ -891,6 +891,14 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
         ax.axis("off")
     else:
         categories = auc_families[0][1].index.tolist()
+        # two classes: each class's evidence is the other's mirror, so the two per-class AUCs are the
+        # same number -- show it once (the CSVs keep both columns)
+        two_class = len(categories) == 2
+        if two_class:
+            tick_labels = [f"{categories[0]} vs. {categories[1]}\n(same AUC for both classes)"]
+            categories = categories[:1]
+        else:
+            tick_labels = categories
         n_fam = len(auc_families)
         width = 0.8 / n_fam
         for fi, (name, auc_df, color) in enumerate(auc_families):
@@ -913,12 +921,15 @@ def render_accuracy_auc_page(pdf, analysis_output_dir, desc, subjects, fold_flag
                             ax.scatter(positions, fold_auc.values, color="black", s=15, zorder=3)
         if len(subjects) == 1:
             ax.legend(fontsize=8)
+        elif n_fam > 1:      # group boxplots are told apart by colour only: name the families
+            from matplotlib.patches import Patch
+            ax.legend(handles=[Patch(facecolor=c, alpha=0.6, label=n) for n, _, c in auc_families], fontsize=8)
         ax.set_xticks(range(len(categories)))
-        ax.set_xticklabels(categories, rotation=45, ha="right")
+        ax.set_xticklabels(tick_labels, rotation=0 if two_class else 45, ha="center" if two_class else "right")
         ax.set_ylabel("AUC")
         _draw_chance_line(ax, 0.5)
 
-    auc_title = "Per-class AUC" + (" across subjects" if len(subjects) > 1 else "")
+    auc_title = ("AUC" if auc_families and len(auc_families[0][1].index) == 2 else "Per-class AUC") + (" across subjects" if len(subjects) > 1 else "")
     if len(auc_families) > 1:
         auc_title += " (CV vs. held-out-test)"
     ax.set_title(auc_title)
