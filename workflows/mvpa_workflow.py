@@ -52,6 +52,11 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
     model/<subject>_fold{N}_permutation_test.csv        -- per-fold significance (optional)
     model/<subject>_model_results_{metric}.csv          -- aggregated across folds
     model/<subject>_impa[_mni].nii.gz                   -- aggregated importance map
+    model/<subject>_impa_act[_mni].nii.gz               -- the same shape: each class's mean z-scored
+                                                            activity in the training data, averaged
+                                                            over folds (with the weights it gives the
+                                                            polarity-matched importance maps of
+                                                            utils/importance_maps.py)
     model/<subject>_cv_results.csv                      -- raw, one row per held-out
                                                             sample across all folds (task,
                                                             trial_type, run, predicted_label,
@@ -68,6 +73,7 @@ Outputs, under <analysis-output-dir>/<model.desc>/<subject>/:
   against all of testing:
     test/<subject>_model_results_{metric}.csv           -- held-out test metrics
     test/<subject>_impa[_mni].nii.gz                    -- that fit's importance map
+    test/<subject>_impa_act[_mni].nii.gz                -- that fit's per-class mean z-scored activity
     test/<subject>_permutation_test.csv                 -- significance (optional)
 
   model_conditions.timecourse_decoding configured -- always the complete-training
@@ -98,6 +104,7 @@ import pandas as pd
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root, for utils.mvpa_common
+from utils.importance_maps import activity_tag, class_mean_activity
 from utils.mvpa_common import (
     build_trial_pivot_table, quick_safe, label_conditions_with_lag, label_rows_optional, load_trial_restriction,
     track_runtime, load_config, apply_regressor_codes,
@@ -282,7 +289,7 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
     print(f"model.kfold_cv: {len(fold_groups)} fold(s), strategy={kfold_cv_cfg.get('strategy')!r}")
 
     folds_manifest = {}
-    model_results, model_impas, cv_raw_frames = [], [], []
+    model_results, model_impas, model_activity, cv_raw_frames = [], [], [], []
     boldfile_to_pipe = {}
 
     for fold_id, held_out_runs in enumerate(fold_groups, start=1):
@@ -342,6 +349,8 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
         save_model_results(output_pattern, xout, regressor_categories)
         model_results.append(xout)
         model_impas.append(impa)
+        model_activity.append(class_mean_activity(fold_train_data, fold_train_labels,
+                                                  xclf.named_steps["classifier"].classes_))
 
         fold_impa_file = os.path.join(
             analysis_output_dir, model_descr, subject_id, "model",
@@ -386,6 +395,12 @@ def run_kfold(kfold_cv_cfg, fold_groups, permutation_test_cfg, masker, impa_file
 
     aggregated_model_xout = average_fold_results(model_results)
     aggregated_impa = np.mean(np.stack(model_impas, axis=0), axis=0)
+
+    # per-class mean z-scored activity of the folds' training data, averaged over folds like the weights above
+    activity_file = os.path.join(
+        analysis_output_dir, model_descr, subject_id, "model", f"{subject_id}_{activity_tag(impa_filename_tag)}.nii.gz"
+    )
+    masker.inverse_transform(np.mean(np.stack(model_activity, axis=0), axis=0)).to_filename(activity_file)
 
     return aggregated_impa, aggregated_model_xout, boldfile_to_pipe
 
@@ -765,6 +780,10 @@ def main(args):
         img = masker.inverse_transform(importance_map)
         output_file = os.path.join(analysis_output_dir, model_descr, subject_id, "test", f"{subject_id}_{impa_filename_tag}.nii.gz")
         img.to_filename(output_file)
+        masker.inverse_transform(
+            class_mean_activity(training_data, training_labels, xclf_full.named_steps["classifier"].classes_)
+        ).to_filename(os.path.join(analysis_output_dir, model_descr, subject_id, "test",
+                                   f"{subject_id}_{activity_tag(impa_filename_tag)}.nii.gz"))
 
         if permutation_test_cfg is not None:
             n_permutations = permutation_test_cfg.get("n_permutations", 1000)

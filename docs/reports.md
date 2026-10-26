@@ -136,6 +136,46 @@ importance map is already named `_impa_mni.nii.gz`, i.e. ran with
 `mnispace: true`) -- manual `hcp_resample.py` calls are only needed if
 you're generating a report outside that pipeline.
 
+**Which voxels differ from zero across subjects.** Whenever the group page
+exists (MNI maps for at least 3 subjects) `generate_report.py` also tests every
+voxel's weight against zero across subjects, per class
+(`--importance-permutations`, default 10000; 0 skips it). Each subject's
+feature selection zeroes the voxels it left out, so those zeros are treated as
+*missing*, not as weights of 0: a subject contributes to a voxel only if its map is
+non-zero there, a voxel is tested only if at least `--importance-min-subjects`
+(default 10) subjects kept it, and the statistic is the plain mean weight of the
+subjects that kept it. Its null distribution comes from random sign flipping of
+whole subjects' maps (one flip is applied to all voxels of a subject, so spatial
+correlation is preserved); p is two-sided with a +1 correction, so the smallest
+possible p is 1/(n+1). A voxel is "significant" when p < `--importance-p-voxel`
+(0.001) *and* it survives Benjamini-Hochberg FDR at `--importance-fdr-q`
+(0.05; each class is its own family), optionally also in a cluster of at
+least `--importance-min-cluster` voxels. Files, next to the PDF:
+`{desc}_group_impa_mni_stats.nii.gz` (volumes: mean weight with zeros, mean
+weight among subjects that kept the voxel, p, significant 0/1 -- each one volume per class --
+then the number of subjects that kept the voxel; the `.json` beside it names them and records
+the settings) and `{desc}_group_impa_signflip_summary.csv`. Details and limits
+of the test (permutation p-values are coarse, which makes FDR conservative with few
+voxels at the floor; conditional on selection) are in `utils/importance_stats.py`.
+`_interactive_notebooks/operation_results.py --stats-nii ...` draws the significant voxels on the
+cortical surface from that one small file.
+
+**Importance maps that say how a voxel contributes (the paper's approach).**
+A raw classifier weight does not say whether a voxel helps by being *more* or *less* active than
+average, so `mvpa_workflow.py` also writes each subject's per-class mean z-scored activity next to the
+weights (`{subject}_impa_act[_mni].nii.gz`), and the group report forms, per subject and class,
+weight x activity where the signs agree (Kim et al. 2020; McDuff et al. 2009):
+**BOLD activation evidence** (weight > 0, activity > 0: the voxel supports the class when its
+activity is higher than average) and **BOLD deactivation evidence** (weight < 0, activity < 0: it
+supports the class when its activity is lower). Weight and activity of opposite sign (activity
+arguing against the class) and voxels the subject's feature selection left out are not shown.
+Each subject's two maps are z-scored together, averaged over subjects, and the top
+`--polarity-top-fraction` (0.05) of each group map is kept, clusters under
+`--polarity-min-cluster` (10) voxels dropped and the result smoothed (`--polarity-fwhm`, 12 mm).
+Written next to the PDF: `{desc}_group_impa_polarity_maps.nii.gz` (+ `.json` naming the volumes) and
+`{desc}_group_impa_polarity_summary.csv`; `operation_results.py --polarity-nii ...` draws it on the
+cortical surface. Subjects whose stage 3 predates the activity maps are left out (rerun stage 3 for them).
+
 The timecourse page always reads the raw per-TR `decoding_results.csv`, not
 `summary_decoding_results.csv` -- the summary only ever kept each group's
 mean, never the spread across the trials that went into it, so it can't

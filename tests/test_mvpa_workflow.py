@@ -227,6 +227,9 @@ class TestRunKfold:
             assert (base / "model" / f"01_fold{fold_id}_model_results_metadata.csv").exists()
             assert (base / "model" / f"01_fold{fold_id}_impa.nii.gz").exists()
 
+        # per-class mean z-scored activity of the training data, averaged over folds, next to the weights
+        assert (base / "model" / "01_impa_act.nii.gz").exists()
+
         # aggregated results
         assert xout["total_scores"] > 0.7  # cleanly separable synthetic data
         assert aggregated_impa.shape == (2, training_data.shape[1])

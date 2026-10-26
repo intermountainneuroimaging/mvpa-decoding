@@ -98,6 +98,34 @@ def parse_args():
              "observed inside a trial). Optional; without it the timecourse page still renders, just "
              "without those annotations."
     )
+    parser.add_argument(
+        "--importance-permutations", type=int, default=10000,
+        help="Group report with MNI importance maps: number of random sign flips for the voxelwise test of the "
+             "group mean weight against zero (utils/importance_stats.py explains the test and how voxels a subject's "
+             "feature selection left out are treated). Writes <desc>_group_impa_mni_stats.nii.gz/.json and "
+             "<desc>_group_impa_signflip_summary.csv next to the PDF. 0 skips it. The smallest possible p is "
+             "1/(n+1), and the FDR step needs many voxels at that floor to pass anything, so use >= 10000 (more for a finer FDR)."
+    )
+    parser.add_argument("--importance-min-subjects", type=int, default=10,
+                        help="a voxel is tested only if at least this many subjects selected it (default 10)")
+    parser.add_argument("--importance-seed", type=int, default=0, help="seed of the sign flips (default 0)")
+    parser.add_argument("--importance-p-voxel", type=float, default=0.001,
+                        help="voxelwise (uncorrected) threshold a voxel must also pass to be marked significant (default 0.001)")
+    parser.add_argument("--importance-fdr-q", type=float, default=0.05, help="FDR level, per class (default 0.05)")
+    parser.add_argument("--importance-min-cluster", type=int, default=0,
+                        help="extent threshold: drop significant clusters smaller than this many voxels (default 0 = none)")
+    parser.add_argument(
+        "--polarity-top-fraction", type=float, default=0.05,
+        help="Group report with MNI importance maps AND the per-class activity maps the workflow writes "
+             "(<subject>_impa_act_mni.nii.gz): the paper-style (Kim et al. 2020, McDuff et al. 2009) group maps -- per "
+             "subject, weight x mean z-scored activity where the two have the same sign: BOLD activation evidence "
+             "(weight > 0, activity > 0: higher activity supports the class) and BOLD deactivation evidence (weight < 0, "
+             "activity < 0: lower activity supports it); opposite signs (evidence against) are not shown. Z-scored, averaged "
+             "over subjects, the top fraction kept (default 0.05), clusters smaller than --polarity-min-cluster removed, "
+             "smoothed with --polarity-fwhm. 0 skips them. See utils/importance_maps.py."
+    )
+    parser.add_argument("--polarity-min-cluster", type=int, default=10, help="extent threshold in voxels (default 10)")
+    parser.add_argument("--polarity-fwhm", type=float, default=12.0, help="smoothing FWHM in mm (default 12; 0 = none)")
     parser.add_argument("--output", default=None, help="Output PDF path. Defaults to <dir>/<desc>/report_<desc>.pdf (group) or <dir>/<desc>/<subject>/report_<subject>.pdf (single-subject).")
     return parser.parse_args()
 
@@ -1643,8 +1671,91 @@ def resolve_group_impa_mni(analysis_output_dir: str, desc: str, subjects: list) 
     return available, missing
 
 
+def write_group_importance_stats(paths, regressor_categories, output_dir, desc, settings):
+    """Voxelwise sign-flip test of the subjects' MNI importance maps against zero (utils/importance_stats.py):
+    writes <desc>_group_impa_mni_stats.nii.gz and .json (mean weight, p, significant mask, subjects that
+    selected each voxel) and <desc>_group_impa_signflip_summary.csv next to the PDF."""
+    from utils.importance_stats import load_subject_maps, save_stats, sign_flip_test
+
+    maps, affine = load_subject_maps(paths)
+    classes = [regressor_categories[i] if i < len(regressor_categories) else f"class{i}" for i in range(maps.shape[-1])]
+    print(f"  Sign-flip test of {len(paths)} subjects' importance maps: {settings['n_perm']} flips, "
+          f"voxels kept by >= {settings['min_subjects']} subjects")
+    result = sign_flip_test(maps, n_perm=settings["n_perm"], seed=settings["seed"], min_subjects=settings["min_subjects"])
+    del maps
+    prefix = os.path.join(output_dir, f"{desc}_group_impa_mni")
+    path, rows = save_stats(prefix, affine, result, classes,
+                            params=dict(n_subjects=len(paths), n_perm=settings["n_perm"], seed=settings["seed"],
+                                        min_subjects=settings["min_subjects"]),
+                            p_voxel=settings["p_voxel"], fdr_q=settings["fdr_q"], min_cluster=settings["min_cluster"])
+    summary = pd.DataFrame(rows)
+    summary.insert(1, "n_subjects", len(paths))
+    summary_path = os.path.join(output_dir, f"{desc}_group_impa_signflip_summary.csv")
+    summary.to_csv(summary_path, index=False)
+    print(f"  Saved importance-map statistics: {path}")
+    print(summary.to_string(index=False))
+    return path
+
+
+def write_group_polarity_maps(weight_paths, regressor_categories, output_dir, desc, settings):
+    """The paper-style group importance maps (utils/importance_maps.py): per subject, weight x class-mean
+    activity where the signs match -- BOLD activation evidence and BOLD deactivation evidence --, z-scored; the
+    group mean's top fraction, cluster-filtered and smoothed.
+    `weight_paths` are {subject}_impa_mni.nii.gz files; each one's `_impa_act_mni.nii.gz` sibling (written by
+    mvpa_workflow.py) supplies the activity; subjects without it are left out with a note. Writes
+    <desc>_group_impa_polarity_maps.nii.gz (+ .json) and <desc>_group_impa_polarity_summary.csv."""
+    from utils.importance_maps import activity_tag, group_importance_maps
+
+    pairs = []
+    for path in weight_paths:
+        act_path = path.replace("impa_mni.nii.gz", activity_tag("impa_mni") + ".nii.gz")
+        if os.path.exists(act_path) and act_path != path:
+            pairs.append((path, act_path))
+    if len(pairs) < len(weight_paths):
+        print(f"  (!) {len(weight_paths) - len(pairs)} subject(s) have no *_impa_act_mni.nii.gz (written by the "
+              f"current mvpa_workflow.py; rerun stage 3 for them) -- left out of the polarity maps")
+    if len(pairs) < 3:
+        print("  (!) fewer than 3 subjects with activity maps -- polarity importance maps skipped")
+        return None
+
+    ref = nib.load(pairs[0][0])
+    voxel_mm = float(np.mean(np.abs(np.diag(ref.affine)[:3])))
+
+    def load_pairs():
+        for w_path, a_path in pairs:
+            w, a = nib.load(w_path).get_fdata(), nib.load(a_path).get_fdata()
+            if w.shape != a.shape or w.shape != ref.shape:
+                print(f"  (!) {w_path}: shape differs from the first map's -- left out")
+                continue
+            yield (w if w.ndim == 4 else w[..., None]), (a if a.ndim == 4 else a[..., None])
+
+    out = group_importance_maps(load_pairs(), top_fraction=settings["top_fraction"], min_cluster=settings["min_cluster"],
+                                fwhm_mm=settings["fwhm_mm"], voxel_mm=voxel_mm)
+    k = out["smooth_activation"].shape[-1]
+    classes = [regressor_categories[i] if i < len(regressor_categories) else f"class{i}" for i in range(k)]
+    stack = np.concatenate([out["smooth_activation"], out["smooth_deactivation"], out["top_activation"], out["top_deactivation"]],
+                           axis=-1).astype(np.float32)
+    prefix = os.path.join(output_dir, f"{desc}_group_impa_polarity_maps")
+    nib.save(nib.Nifti1Image(stack, ref.affine), prefix + ".nii.gz")
+    meta = dict(volumes={name: list(range(i * k, (i + 1) * k)) for i, name in
+                         enumerate(("smooth_activation", "smooth_deactivation", "top_activation", "top_deactivation"))},
+                classes=classes, n_subjects=out["n_subjects"], top_fraction=settings["top_fraction"],
+                min_cluster=settings["min_cluster"], fwhm_mm=settings["fwhm_mm"],
+                thresholds_activation=out["thresholds"][:, 0].tolist(), thresholds_deactivation=out["thresholds"][:, 1].tolist())
+    with open(prefix + ".json", "w") as f:
+        json.dump(meta, f, indent=2)
+    summary = pd.DataFrame(dict(cls=classes, n_subjects=out["n_subjects"],
+                                voxels_activation_evidence=[int((out["top_activation"][..., i] > 0).sum()) for i in range(k)],
+                                voxels_deactivation_evidence=[int((out["top_deactivation"][..., i] > 0).sum()) for i in range(k)],
+                                threshold_activation=out["thresholds"][:, 0], threshold_deactivation=out["thresholds"][:, 1]))
+    summary.to_csv(os.path.join(output_dir, f"{desc}_group_impa_polarity_summary.csv"), index=False)
+    print(f"  Saved polarity importance maps: {prefix}.nii.gz")
+    print(summary.to_string(index=False))
+    return prefix + ".nii.gz"
+
+
 def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags, regressor_categories, output_dir,
-                             mnispace=False):
+                             mnispace=False, importance_stats=None, polarity_maps=None):
     """A subject can have two independent importance-map families now: "CV"
     (kfold_impa -- the mean importance map across every k-fold fold's own fit,
     each fold trained on a different subset of runs, broken out fold-by-fold in
@@ -1691,6 +1802,13 @@ def render_importance_pages(pdf, analysis_output_dir, desc, subjects, fold_flags
             saved_path = os.path.join(output_dir, f"{desc}_group_mean_impa_mni.nii.gz")
             nib.save(mean_img, saved_path)
             print(f"  Saved group mean importance map: {saved_path}")
+
+            if importance_stats and importance_stats.get("n_perm", 0) > 0:
+                write_group_importance_stats([mni_paths[s][0] for s in included], regressor_categories, output_dir,
+                                             desc, importance_stats)
+            if polarity_maps and polarity_maps.get("top_fraction", 0) > 0:
+                write_group_polarity_maps([mni_paths[s][0] for s in included], regressor_categories, output_dir,
+                                          desc, polarity_maps)
 
             _plot_categories_page(pdf, mean_img, f"group mean, MNI space (n={len(included)} subjects)",
                                    regressor_categories, mosaic=True)
@@ -1758,7 +1876,12 @@ def main():
         render_timecourse_pages(pdf, args.analysis_output_dir, desc, subjects, event_markers, tr,
                                  overlay_conditions)
         render_importance_pages(pdf, args.analysis_output_dir, desc, subjects, fold_flags, regressor_categories,
-                                 os.path.dirname(output_path), mnispace=mnispace)
+                                 os.path.dirname(output_path), mnispace=mnispace,
+                                 polarity_maps=dict(top_fraction=args.polarity_top_fraction, min_cluster=args.polarity_min_cluster,
+                                                    fwhm_mm=args.polarity_fwhm),
+                                 importance_stats=dict(n_perm=args.importance_permutations, seed=args.importance_seed,
+                                                       min_subjects=args.importance_min_subjects, p_voxel=args.importance_p_voxel,
+                                                       fdr_q=args.importance_fdr_q, min_cluster=args.importance_min_cluster))
 
     print(f"Report written to: {output_path}")
 
