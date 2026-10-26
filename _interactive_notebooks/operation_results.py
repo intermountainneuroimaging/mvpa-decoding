@@ -3,7 +3,10 @@
 Reads what stage 4 (generate_report.py) writes and draws one figure per call:
 
     confusion    cross-validated accuracy and evidence matrices (true x predicted), mean across subjects
-    importance   group-mean importance map of each operation on the cortical surface (fsaverage)
+    importance   group-mean importance map of each operation on the cortical surface (fsaverage), either the top
+                 fraction of |weight| or only the voxels whose weight differs from zero across subjects
+                 (sign-flip permutation test of the group mean per voxel, p < 0.001 and FDR-corrected; computed
+                 by stage 4 (generate_report.py) or from the per-subject maps, see utils/importance_stats.py)
     timecourse   one panel per operation; each panel overlays the operation classifier's evidence for
                  that panel's own operation on the trials of pos_face, pos_place, neg_face, neg_place
                  (mean +/- 1 SE across subjects)
@@ -16,6 +19,7 @@ Evidence is the raw classifier output (no baseline correction, sigmoid scale so 
 time is unshifted (the hemodynamic lag only selects the training/testing volumes).
 """
 import argparse
+import json
 import os
 import sys
 
@@ -29,6 +33,8 @@ from matplotlib.lines import Line2D                                     # noqa: 
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from _interactive_notebooks.decoding_results_toolkit import select_evidence_value   # noqa: E402
+from utils.importance_stats import (load_subject_maps, save_stats, sign_flip_test, significant_voxels,  # noqa: E402
+                                    split_stats)
 from workflows.generate_report import draw_event_annotations                     # noqa: E402
 
 OPERATIONS = ("maintain", "suppress", "switch", "clear")
@@ -167,23 +173,38 @@ def plot_confusion(summary_csv: str, title: str = "", operations=OPERATIONS):
     return fig
 
 
-def plot_importance_surface(impa_nii: str, title: str = "", operations=OPERATIONS, top_fraction: float = 0.2):
-    """Group-mean importance map of each operation (4-D image, one volume per class in `operations` order)
-    projected onto the fsaverage inflated surface: left lateral / medial, right medial / lateral. Only the
-    top `top_fraction` of |weight| is coloured; one colour scale for every operation. The projection from
+def importance_overlap_table(mean, significant, operations=OPERATIONS, top_fraction: float = 0.2) -> pd.DataFrame:
+    """Per class: voxels in the top `top_fraction` of |mean weight| (threshold from all classes pooled, as in
+    plot_importance_surface; `mean` is the group-mean map including the zeros), voxels significant across
+    subjects, and their overlap (Dice)."""
+    nonzero = np.abs(mean[mean != 0])
+    cut = np.percentile(nonzero, 100 * (1 - top_fraction))
+    rows = []
+    for i, op in enumerate(operations):
+        top = np.abs(mean[..., i]) >= cut
+        sig = significant[..., i]
+        both = int((top & sig).sum())
+        denom = int(top.sum()) + int(sig.sum())
+        rows.append(dict(operation=op, voxels_top=int(top.sum()), voxels_significant=int(sig.sum()), voxels_both=both,
+                         dice=(2 * both / denom) if denom else np.nan,
+                         significant_positive=int((sig & (mean[..., i] > 0)).sum()),
+                         significant_negative=int((sig & (mean[..., i] < 0)).sum())))
+    return pd.DataFrame(rows)
+
+
+def _surface_grid(data, affine, classes, threshold, vmax, title, colorbar_label, colorbar_magnitude=False):
+    """One row per class (4-D `data`, last axis = class): left lateral / left medial / right medial / right lateral
+    views of the volume projected onto the fsaverage inflated surface over sulcal-depth shading, diverging colours
+    on a common (-vmax, vmax) scale, values with |value| < threshold not drawn. The projection from
     MNI152NLin6Asym onto the (MNI305-based) fsaverage surface is approximate, for display only."""
     import nibabel as nib
     from nilearn import datasets, plotting, surface
-    img = nib.load(impa_nii)
-    data = img.get_fdata()
-    nonzero = np.abs(data[data != 0])
-    vmax = np.percentile(nonzero, 99.5)
-    threshold = np.percentile(nonzero, 100 * (1 - top_fraction))
     fsaverage = datasets.load_fsaverage("fsaverage")
     sulcal = datasets.load_fsaverage_data(mesh="fsaverage", mesh_type="inflated", data_type="sulcal").data.parts
-    fig, axes = plt.subplots(len(operations), 4, figsize=(15, 3 * len(operations)), subplot_kw={"projection": "3d"})
-    for r, op in enumerate(operations):
-        vol = nib.Nifti1Image(data[..., r], img.affine)
+    fig, axes = plt.subplots(len(classes), 4, figsize=(15, 3 * len(classes)), subplot_kw={"projection": "3d"})
+    axes = np.atleast_2d(axes)
+    for r, name in enumerate(classes):
+        vol = nib.Nifti1Image(data[..., r], affine)
         for c, (hemi, view) in enumerate([("left", "lateral"), ("left", "medial"), ("right", "medial"), ("right", "lateral")]):
             texture = surface.vol_to_surf(vol, fsaverage.pial.parts[hemi], radius=3.0, interpolation="linear")
             plotting.plot_surf_stat_map(fsaverage.inflated.parts[hemi], texture, hemi=hemi, view=view, axes=axes[r][c],
@@ -191,15 +212,69 @@ def plot_importance_surface(impa_nii: str, title: str = "", operations=OPERATION
                                         vmin=-vmax, bg_map=sulcal[hemi], darkness=0.6)
             if r == 0:
                 axes[r][c].set_title(f"{hemi} {view}", fontsize=13)
-        axes[r][0].text2D(-0.05, 0.5, op.capitalize(), transform=axes[r][0].transAxes, rotation=90, fontsize=15,
+        axes[r][0].text2D(-0.05, 0.5, name.capitalize(), transform=axes[r][0].transAxes, rotation=90, fontsize=15,
                           fontweight="bold", va="center")
     colorbar_axes = fig.add_axes([0.35, 0.04, 0.3, 0.015])
-    fig.colorbar(plt.cm.ScalarMappable(cmap="RdBu_r", norm=plt.Normalize(-vmax, vmax)), cax=colorbar_axes,
-                 orientation="horizontal", label="mean classifier weight (one-vs-rest)")
-    fig.suptitle(title or f"Operation classifier: group-mean importance maps, top {top_fraction:.0%} of |weight| shown",
-                 fontsize=15, fontweight="bold")
-    fig.subplots_adjust(left=0.04, right=0.99, top=0.93, bottom=0.09, wspace=0, hspace=0)
+    colorbar = fig.colorbar(plt.cm.ScalarMappable(cmap="RdBu_r", norm=plt.Normalize(-vmax, vmax)), cax=colorbar_axes,
+                            orientation="horizontal", label=colorbar_label)
+    if colorbar_magnitude:       # blue is a second kind of evidence, not a negative importance: label magnitudes
+        from matplotlib.ticker import FuncFormatter
+        colorbar.ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{abs(x):g}"))
+    fig.suptitle(title, fontsize=15, fontweight="bold", y=0.995)
+    fig.subplots_adjust(left=0.04, right=0.99, top=0.88 if "\n" in title else 0.93, bottom=0.09, wspace=0, hspace=0)
     return fig
+
+
+def plot_importance_surface(impa_nii: str, title: str = "", operations=OPERATIONS, top_fraction: float = 0.2,
+                            significant=None, vmax=None, label: str = "Operation classifier"):
+    """Group-mean importance map (classifier weights) of each class (4-D image, one volume per class in
+    `operations` order) on the cortical surface. By default only the top `top_fraction` of |weight| is
+    coloured. With `significant` (a boolean array shaped like the map, see significant_voxels) only the
+    weights of those voxels are coloured instead. One colour scale for every class (pass the same `vmax` to
+    two calls to compare them)."""
+    import nibabel as nib
+    img = nib.load(impa_nii)
+    data = img.get_fdata()
+    nonzero = np.abs(data[data != 0])
+    vmax = np.percentile(nonzero, 99.5) if vmax is None else vmax
+    if significant is None:
+        threshold = np.percentile(nonzero, 100 * (1 - top_fraction))
+    else:
+        data = np.where(significant, data, 0.0)
+        threshold = 1e-12 * vmax                          # anything non-zero (a significant voxel) is drawn
+    default_title = (f"{label}: group-mean importance maps, top {top_fraction:.0%} of |weight| shown"
+                     if significant is None else
+                     f"{label}: group-mean importance maps, voxels different from zero across subjects only")
+    return _surface_grid(data, img.affine, operations, threshold, vmax, title or default_title,
+                         "mean classifier weight (one-vs-rest)")
+
+
+def plot_polarity_surface(polarity_nii: str, title: str = "", label: str = "Operation classifier",
+                          display_fraction: float = 0.2):
+    """The paper-style group importance maps (see utils/importance_maps.py, written by stage 4 as
+    <desc>_group_impa_polarity_maps.nii.gz + .json) on the cortical surface: red = BOLD activation evidence
+    (positive importance where the voxel's BOLD activity for the class is above average), blue = BOLD
+    deactivation evidence (positive importance where it is below average). Importance of the opposite sign
+    (activity arguing against the class) is not shown. The smoothed maps are drawn where they are at least
+    `display_fraction` of the largest smoothed value (the smoothing's faint tails are not); one scale for
+    every class."""
+    import nibabel as nib
+    img = nib.load(polarity_nii)
+    meta = json.load(open(polarity_nii.replace(".nii.gz", ".json")))
+    stack = img.get_fdata()
+
+    def volumes(name):
+        idx = meta["volumes"][name]
+        return stack[..., idx[0]:idx[-1] + 1]
+
+    data = volumes("smooth_activation") - volumes("smooth_deactivation")
+    vmax = float(np.abs(data).max())
+    return _surface_grid(data, img.affine, meta["classes"], display_fraction * vmax, vmax,
+                         title or (f"{label}: BOLD activation evidence (red) and BOLD deactivation evidence (blue)\n"
+                                   f"top {meta['top_fraction']:.0%} of the group importance map (n = {meta['n_subjects']}), "
+                                   f"{meta['fwhm_mm']:g} mm smoothing"),
+                         "importance (z-scored magnitude):  red = BOLD activation evidence,  blue = BOLD deactivation evidence",
+                         colorbar_magnitude=True)
 
 
 def main():
@@ -207,12 +282,32 @@ def main():
     parser.add_argument("--group-csv", default=None, help="<desc>_group_decoding_results.csv written by generate_report.py (time course)")
     parser.add_argument("--summary-csv", default=None, help="<desc>_group_summary.csv (confusion matrices)")
     parser.add_argument("--impa-nii", default=None, help="<desc>_group_mean_impa_mni.nii.gz (importance maps on the surface)")
+    parser.add_argument("--subject-impa-glob", default=None,
+                        help="glob of the per-subject importance maps (e.g. '<output_dir>/<desc>/*/model/*_impa_mni.nii.gz'): "
+                             "runs the sign-flip test here instead of using stage 4's (which already saves it)")
+    parser.add_argument("--n-perm", type=int, default=10000, help="sign flips for --subject-impa-glob")
+    parser.add_argument("--min-subjects", type=int, default=10, help="a voxel is tested only if this many subjects selected it")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--p-voxel", type=float, default=0.001, help="voxelwise (uncorrected) threshold, also the cluster-forming threshold")
+    parser.add_argument("--fdr-q", type=float, default=0.05, help="FDR level (Benjamini-Hochberg, per operation)")
+    parser.add_argument("--min-cluster", type=int, default=0, help="extent threshold: drop clusters smaller than this many voxels (0 = none)")
+    parser.add_argument("--stats-only", action="store_true", help="with --subject-impa-glob: save the stat maps and the table, draw no surface figure")
+    parser.add_argument("--polarity-nii", default=None,
+                        help="<desc>_group_impa_polarity_maps.nii.gz written by stage 4 (the .json beside it is read too): "
+                             "plot the paper-style BOLD activation / deactivation evidence maps")
+    parser.add_argument("--stats-nii", default=None, help="<desc>_group_impa_mni_stats.nii.gz written by stage 4 (or by --subject-impa-glob): plot the significant voxels")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--title", default="")
     parser.add_argument("--prefix", default="operation", help="file name prefix for the saved figures")
+    parser.add_argument("--classes", default=",".join(OPERATIONS),
+                        help="class names of the importance maps, in volume order (default: the four operations; the "
+                             "category classifier has e.g. face,place,item). With --stats-nii the names stored in the "
+                             "stats .json are used")
+    parser.add_argument("--label", default="Operation classifier", help="start of the importance-map figure titles")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+    classes = [c.strip() for c in args.classes.split(",") if c.strip()]
 
     def save(fig, name, dpi=150, pdf=True):
         path = os.path.join(args.output_dir, f"{args.prefix}_{name}.png")
@@ -224,8 +319,43 @@ def main():
 
     if args.summary_csv:
         save(plot_confusion(args.summary_csv, args.title), "confusion_matrices")
+    if args.subject_impa_glob:
+        import glob
+        paths = sorted(glob.glob(args.subject_impa_glob))
+        print(f"{len(paths)} subject importance maps")
+        maps, affine = load_subject_maps(paths)
+        result = sign_flip_test(maps, n_perm=args.n_perm, seed=args.seed, min_subjects=args.min_subjects)
+        del maps
+        stats_path, rows = save_stats(os.path.join(args.output_dir, f"{args.prefix}_group_impa_mni"), affine, result,
+                                      classes, dict(n_subjects=len(paths), n_perm=args.n_perm, seed=args.seed,
+                                                       min_subjects=args.min_subjects),
+                                      p_voxel=args.p_voxel, fdr_q=args.fdr_q, min_cluster=args.min_cluster)
+        print(pd.DataFrame(rows).to_string(index=False))
+        args.stats_nii = stats_path
     if args.impa_nii:
-        save(plot_importance_surface(args.impa_nii), "importance_maps_surface", dpi=130, pdf=False)
+        save(plot_importance_surface(args.impa_nii, operations=classes, label=args.label), "importance_maps_surface", dpi=130, pdf=False)
+    if args.stats_nii and not args.stats_only:
+        import nibabel as nib
+        mean_all, mean_selected, p, sig, n_selected = split_stats(nib.load(args.stats_nii).get_fdata())
+        meta_path = args.stats_nii.replace("_stats.nii.gz", "_stats.json")
+        meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
+        p_voxel, fdr_q = meta.get("p_voxel", args.p_voxel), meta.get("fdr_q", args.fdr_q)
+        classes = meta.get("classes", classes)
+        table = importance_overlap_table(mean_all, sig, operations=classes)
+        table.to_csv(os.path.join(args.output_dir, f"{args.prefix}_importance_threshold_comparison.csv"), index=False)
+        print(table.to_string(index=False))
+        import nibabel as nib
+        impa_path = args.impa_nii
+        if impa_path is None:                                           # draw the stats file's own mean map
+            impa_path = os.path.join(args.output_dir, f"{args.prefix}_group_mean_from_stats.nii.gz")
+            nib.save(nib.Nifti1Image(mean_all.astype(np.float32), nib.load(args.stats_nii).affine), impa_path)
+        vmax = np.percentile(np.abs(mean_all[mean_all != 0]), 99.5)
+        save(plot_importance_surface(impa_path, operations=classes, significant=sig, vmax=vmax, label=args.label,
+                                     title=f"{args.label}: importance maps, voxels different from zero across subjects "
+                                           f"(sign-flip test, p < {p_voxel:g}, FDR q < {fdr_q:g})"),
+             "importance_maps_surface_significant", dpi=130, pdf=False)
+    if args.polarity_nii:
+        save(plot_polarity_surface(args.polarity_nii, label=args.label), "importance_maps_surface_polarity", dpi=130, pdf=False)
     if args.group_csv:
         cols = ["subject", "task", "boldfile", "trial_index", "trial_type", "regressor_label", "window_index"] + [f"evidence_{o}" for o in OPERATIONS]
         df = pd.read_csv(args.group_csv, dtype={"subject": str}, usecols=cols)
