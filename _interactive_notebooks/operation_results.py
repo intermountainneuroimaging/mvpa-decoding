@@ -277,6 +277,26 @@ def plot_polarity_surface(polarity_nii: str, title: str = "", label: str = "Oper
                          colorbar_magnitude=True)
 
 
+def combine_pages(pages, path: str) -> int:
+    """Write one multi-page PDF. `pages` is a list of ("figure", matplotlib Figure) -- kept as vector -- or
+    ("image", png path), which is placed full-page (the surface figures: a vector copy of the 3-D meshes is ~90 MB).
+    Returns the number of pages."""
+    from matplotlib.backends.backend_pdf import PdfPages
+    with PdfPages(path) as pdf:
+        for kind, item in pages:
+            if kind == "figure":
+                pdf.savefig(item)
+                continue
+            image = plt.imread(item)
+            height, width = image.shape[:2]
+            fig = plt.figure(figsize=(width / 130.0, height / 130.0))       # the surface figures are saved at 130 dpi
+            fig.add_axes([0, 0, 1, 1]).imshow(image, interpolation="lanczos")
+            fig.axes[0].axis("off")
+            pdf.savefig(fig)
+            plt.close(fig)
+    return len(pages)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--group-csv", default=None, help="<desc>_group_decoding_results.csv written by generate_report.py (time course)")
@@ -299,6 +319,8 @@ def main():
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--title", default="")
     parser.add_argument("--prefix", default="operation", help="file name prefix for the saved figures")
+    parser.add_argument("--no-combined-pdf", action="store_true",
+                        help="do not also write <prefix>_results.pdf (every figure of this call, one per page)")
     parser.add_argument("--classes", default=",".join(OPERATIONS),
                         help="class names of the importance maps, in volume order (default: the four operations; the "
                              "category classifier has e.g. face,place,item). With --stats-nii the names stored in the "
@@ -309,12 +331,17 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     classes = [c.strip() for c in args.classes.split(",") if c.strip()]
 
+    pages = []                  # every figure of this call, in order, for the combined PDF
+
     def save(fig, name, dpi=150, pdf=True):
         path = os.path.join(args.output_dir, f"{args.prefix}_{name}.png")
         fig.savefig(path, dpi=dpi)
         if pdf:                 # not for the surface maps: a vector copy of 3-D meshes is ~90 MB
             fig.savefig(path.replace(".png", ".pdf"))
-        plt.close(fig)
+            pages.append(("figure", fig))               # stays open (vector page) until the combined PDF is written
+        else:
+            pages.append(("image", path))
+            plt.close(fig)
         print("saved", path)
 
     if args.summary_csv:
@@ -364,6 +391,12 @@ def main():
         curves = group_timecourses(df)
         curves.to_csv(os.path.join(args.output_dir, f"{args.prefix}_timecourse_curves.csv"), index=False)
         save(plot_timecourses(curves, args.title, markers=phase_markers(df)), "timecourse_decoding")
+    if pages and not args.no_combined_pdf:
+        combined = os.path.join(args.output_dir, f"{args.prefix}_results.pdf")
+        print(f"saved {combined} ({combine_pages(pages, combined)} pages)")
+    for kind, item in pages:
+        if kind == "figure":
+            plt.close(item)
 
 
 if __name__ == "__main__":
