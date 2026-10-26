@@ -38,6 +38,11 @@ from utils.importance_stats import (load_subject_maps, save_stats, sign_flip_tes
 from workflows.generate_report import draw_event_annotations                     # noqa: E402
 
 OPERATIONS = ("maintain", "suppress", "switch", "clear")
+POLARITY_CMAP = "PuOr_r"        # orange = activation, purple = deactivation: not the blue-red of the signed weight / t maps
+# page order of the combined PDF: confusion matrices, time courses, then the importance maps (significant voxels,
+# polarity maps, top-fraction weights)
+PAGE_ORDER = ("confusion_matrices", "timecourse_decoding", "importance_maps_surface_significant",
+              "importance_maps_surface_polarity", "importance_maps_surface")
 TR_SECONDS = 0.460
 CATEGORY_COLORS = {"face": "#7b3294", "place": "#008837"}              # colour = category ...
 VALENCE_STYLES = {"pos": "-", "neg": "--"}                              # ... line style = valence (solid pos, dashed neg)
@@ -192,9 +197,10 @@ def importance_overlap_table(mean, significant, operations=OPERATIONS, top_fract
     return pd.DataFrame(rows)
 
 
-def _surface_grid(data, affine, classes, threshold, vmax, title, colorbar_label, colorbar_magnitude=False):
+def _surface_grid(data, affine, classes, threshold, vmax, title, colorbar_label, colorbar_magnitude=False,
+                  cmap="RdBu_r"):
     """One row per class (4-D `data`, last axis = class): left lateral / left medial / right medial / right lateral
-    views of the volume projected onto the fsaverage inflated surface over sulcal-depth shading, diverging colours
+    views of the volume projected onto the fsaverage inflated surface over sulcal-depth shading, diverging colours (`cmap`)
     on a common (-vmax, vmax) scale, values with |value| < threshold not drawn. The projection from
     MNI152NLin6Asym onto the (MNI305-based) fsaverage surface is approximate, for display only."""
     import nibabel as nib
@@ -208,16 +214,16 @@ def _surface_grid(data, affine, classes, threshold, vmax, title, colorbar_label,
         for c, (hemi, view) in enumerate([("left", "lateral"), ("left", "medial"), ("right", "medial"), ("right", "lateral")]):
             texture = surface.vol_to_surf(vol, fsaverage.pial.parts[hemi], radius=3.0, interpolation="linear")
             plotting.plot_surf_stat_map(fsaverage.inflated.parts[hemi], texture, hemi=hemi, view=view, axes=axes[r][c],
-                                        figure=fig, colorbar=False, cmap="RdBu_r", threshold=threshold, vmax=vmax,
+                                        figure=fig, colorbar=False, cmap=cmap, threshold=threshold, vmax=vmax,
                                         vmin=-vmax, bg_map=sulcal[hemi], darkness=0.6)
             if r == 0:
                 axes[r][c].set_title(f"{hemi} {view}", fontsize=13)
         axes[r][0].text2D(-0.05, 0.5, name.capitalize(), transform=axes[r][0].transAxes, rotation=90, fontsize=15,
                           fontweight="bold", va="center")
     colorbar_axes = fig.add_axes([0.35, 0.04, 0.3, 0.015])
-    colorbar = fig.colorbar(plt.cm.ScalarMappable(cmap="RdBu_r", norm=plt.Normalize(-vmax, vmax)), cax=colorbar_axes,
+    colorbar = fig.colorbar(plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(-vmax, vmax)), cax=colorbar_axes,
                             orientation="horizontal", label=colorbar_label)
-    if colorbar_magnitude:       # blue is a second kind of evidence, not a negative importance: label magnitudes
+    if colorbar_magnitude:       # the cold colour is a second kind of evidence, not a negative importance: label magnitudes
         from matplotlib.ticker import FuncFormatter
         colorbar.ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f"{abs(x):g}"))
     fig.suptitle(title, fontsize=15, fontweight="bold", y=0.995)
@@ -252,8 +258,8 @@ def plot_importance_surface(impa_nii: str, title: str = "", operations=OPERATION
 def plot_polarity_surface(polarity_nii: str, title: str = "", label: str = "Operation classifier",
                           display_fraction: float = 0.2):
     """The paper-style group importance maps (see utils/importance_maps.py, written by stage 4 as
-    <desc>_group_impa_polarity_maps.nii.gz + .json) on the cortical surface: red = BOLD activation evidence
-    (positive importance where the voxel's BOLD activity for the class is above average), blue = BOLD
+    <desc>_group_impa_polarity_maps.nii.gz + .json) on the cortical surface: orange = BOLD activation evidence
+    (positive importance where the voxel's BOLD activity for the class is above average), purple = BOLD
     deactivation evidence (positive importance where it is below average). Importance of the opposite sign
     (activity arguing against the class) is not shown. The smoothed maps are drawn where they are at least
     `display_fraction` of the largest smoothed value (the smoothing's faint tails are not); one scale for
@@ -270,11 +276,18 @@ def plot_polarity_surface(polarity_nii: str, title: str = "", label: str = "Oper
     data = volumes("smooth_activation") - volumes("smooth_deactivation")
     vmax = float(np.abs(data).max())
     return _surface_grid(data, img.affine, meta["classes"], display_fraction * vmax, vmax,
-                         title or (f"{label}: BOLD activation evidence (red) and BOLD deactivation evidence (blue)\n"
+                         title or (f"{label}: BOLD activation evidence (orange) and BOLD deactivation evidence (purple)\n"
                                    f"top {meta['top_fraction']:.0%} of the group importance map (n = {meta['n_subjects']}), "
                                    f"{meta['fwhm_mm']:g} mm smoothing"),
-                         "importance (z-scored magnitude):  red = BOLD activation evidence,  blue = BOLD deactivation evidence",
-                         colorbar_magnitude=True)
+                         "importance (z-scored magnitude):  orange = BOLD activation evidence,  purple = BOLD deactivation evidence",
+                         colorbar_magnitude=True, cmap=POLARITY_CMAP)
+
+
+def order_pages(pages):
+    """[(name, kind, item), ...] in PAGE_ORDER (names not listed go last, in the order given) as the
+    [(kind, item), ...] that combine_pages takes."""
+    rank = lambda page: PAGE_ORDER.index(page[0]) if page[0] in PAGE_ORDER else len(PAGE_ORDER)
+    return [page[1:] for page in sorted(pages, key=rank)]
 
 
 def combine_pages(pages, path: str) -> int:
@@ -338,9 +351,9 @@ def main():
         fig.savefig(path, dpi=dpi)
         if pdf:                 # not for the surface maps: a vector copy of 3-D meshes is ~90 MB
             fig.savefig(path.replace(".png", ".pdf"))
-            pages.append(("figure", fig))               # stays open (vector page) until the combined PDF is written
+            pages.append((name, "figure", fig))         # stays open (vector page) until the combined PDF is written
         else:
-            pages.append(("image", path))
+            pages.append((name, "image", path))
             plt.close(fig)
         print("saved", path)
 
@@ -393,8 +406,8 @@ def main():
         save(plot_timecourses(curves, args.title, markers=phase_markers(df)), "timecourse_decoding")
     if pages and not args.no_combined_pdf:
         combined = os.path.join(args.output_dir, f"{args.prefix}_results.pdf")
-        print(f"saved {combined} ({combine_pages(pages, combined)} pages)")
-    for kind, item in pages:
+        print(f"saved {combined} ({combine_pages(order_pages(pages), combined)} pages)")
+    for _, kind, item in pages:
         if kind == "figure":
             plt.close(item)
 

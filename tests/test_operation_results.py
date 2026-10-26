@@ -34,3 +34,12 @@ class TestCombinedPdf:
         assert opr.combine_pages([("figure", fig), ("image", str(png))], str(out)) == 2
         plt.close(fig)
         assert out.read_bytes().count(b"/Type /Page\n") + out.read_bytes().count(b"/Type /Page ") >= 2
+
+    def test_pages_are_ordered_confusion_timecourse_then_importance_maps(self):
+        pages = [("importance_maps_surface_polarity", "image", "p"), ("timecourse_decoding", "figure", "t"),
+                 ("importance_maps_surface", "image", "w"), ("confusion_matrices", "figure", "c"),
+                 ("importance_maps_surface_significant", "image", "s"), ("extra", "figure", "x")]
+        assert [item for _, item in opr.order_pages(pages)] == ["c", "t", "s", "p", "w", "x"]
+
+    def test_polarity_maps_use_another_colour_map_than_the_signed_maps(self):
+        assert opr.POLARITY_CMAP != "RdBu_r"
