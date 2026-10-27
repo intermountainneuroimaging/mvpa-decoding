@@ -16,7 +16,7 @@ Every model's results live in one folder of the organized results tree
 
 `<roi>` is `vvps` or `gm`; `<N>bins` (or `<N>windows` for sliding windows) is the size of the FDR family
 (7bins = the 3-TR bins from TR 7 on, 9bins = every bin). `_interactive_notebooks/results_layout.py` holds all of these
-rules in one place; the notebooks, `operation_results.py` and the ingest command all use it.
+rules in one place; the notebooks and the ingest command all use it; the notebooks' own helpers are in `_interactive_notebooks/evidence_common.py`.
 
 ## 1. New results downloaded from the cluster
 
@@ -37,9 +37,11 @@ destination is not overwritten unless `--overwrite`, unrecognised files are list
 ## 2. Analyses (notebooks)
 
 `valence_evidence_by_operation.ipynb` (category classifiers) and `operation_evidence_by_category.ipynb` (operation
-classifier): set `MODEL_DIR` to the model folder (relative to the results root) and the settings (baseline correction,
+classifier): set `GROUP_CSV_PATH` to the model's `raw_data/group_decoding_results.csv` (the model folder is the folder above `raw_data/`; absolute, or relative to the results root) and the settings (baseline correction,
 grouping, statistics window); the notebook reads `raw_data/group_decoding_results.csv` and writes everything into the
 matching `decoding/...` folder under the right names. The last cell copies the saved notebook beside its results.
 
-`python3 _interactive_notebooks/operation_results.py --model-dir <model folder>` writes the operation classifier's
-confusion matrices, time courses, importance figures and `stats_and_figures.pdf` into the model folder.
+`operation_evidence_by_category.ipynb` is the one place for the operation classifier's `stats_and_figures`: it draws the cross-validated confusion
+matrices and the raw-evidence time courses (saved on their own in `decoding/uncorrected/`), the evidence-by-category statistics, and the
+importance maps on the cortical surface (saved in `importance_maps/`; only missing ones are drawn unless `REDRAW_IMPORTANCE_MAPS = True`,
+and they need a nilearn version whose `plot_surf_stat_map` accepts `darkness`), and puts them all in `stats_and_figures_<N>bins.pdf`.

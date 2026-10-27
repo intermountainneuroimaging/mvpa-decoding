@@ -124,6 +124,20 @@ def resolve_model_dir(model_dir: str, root: str = None) -> str:
     return path
 
 
+def resolve_path(path: str, root: str = None) -> str:
+    """An absolute path as it is, a relative one taken relative to the results root."""
+    return path if os.path.isabs(path) else os.path.join(root or default_root(), path)
+
+
+def model_dir_from_raw_data(raw_data_path: str, root: str = None) -> str:
+    """The model folder from the path of its input table (<model>/raw_data/group_decoding_results.csv) or of its raw_data folder."""
+    path = resolve_path(raw_data_path, root)
+    folder = path if os.path.isdir(path) else os.path.dirname(path)
+    if os.path.basename(os.path.normpath(folder)) != "raw_data":
+        raise ValueError(f"{raw_data_path!r} is not inside a model's raw_data folder (<model>/raw_data/group_decoding_results.csv)")
+    return os.path.dirname(os.path.normpath(folder))
+
+
 # =====================================================
 # Where an analysis writes its outputs, and what its files are called
 # =====================================================
@@ -162,7 +176,7 @@ def decoding_dir(model_dir: str, baseline_correction: bool = False, baseline_trs
 
 
 def operation_figures_dir(model_dir: str) -> str:
-    """Where operation_results.py writes the confusion matrices, time courses and the combined PDF."""
+    """Where operation_evidence_by_category.ipynb saves the confusion matrices and raw time courses (independent of the statistics settings)."""
     return os.path.join(model_dir, "decoding", "uncorrected")
 
 

@@ -57,6 +57,23 @@ class TestModelInfo:
         assert info.path(str(tmp_path)) == os.path.join(str(tmp_path), "clearvale", "category", "sigmoid", "all_trials", "vvps_liblinear_onevrest_C50")
 
 
+class TestModelFromRawData:
+    def test_model_folder_is_the_parent_of_raw_data(self, tmp_path):
+        model = tmp_path / "clearvale" / "category" / "sigmoid" / "all_trials" / "vvps_liblinear_onevrest_C50"
+        (model / "raw_data").mkdir(parents=True)
+        csv = model / "raw_data" / "group_decoding_results.csv"; csv.write_text("x")
+        assert layout.model_dir_from_raw_data(str(csv)) == str(model)
+        assert layout.model_dir_from_raw_data(str(model / "raw_data")) == str(model)
+
+    def test_a_relative_path_is_relative_to_the_results_root(self, tmp_path):
+        (tmp_path / "m" / "raw_data").mkdir(parents=True)
+        assert layout.model_dir_from_raw_data("m/raw_data/group_decoding_results.csv", str(tmp_path)) == str(tmp_path / "m")
+
+    def test_a_table_outside_raw_data_is_refused(self, tmp_path):
+        with pytest.raises(ValueError):
+            layout.model_dir_from_raw_data(str(tmp_path / "somewhere" / "group_decoding_results.csv"))
+
+
 class TestFolderNames:
     def test_baseline_folders(self):
         assert layout.baseline_folder((1, 2, 3)) == "baseline-correction-viewonset_TR1-3"

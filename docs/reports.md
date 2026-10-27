@@ -157,7 +157,7 @@ then the number of subjects that kept the voxel; the `.json` beside it names the
 the settings) and `{desc}_group_impa_signflip_summary.csv`. Details and limits
 of the test (permutation p-values are coarse, which makes FDR conservative with few
 voxels at the floor; conditional on selection) are in `utils/importance_stats.py`.
-`_interactive_notebooks/operation_results.py --stats-nii ...` draws the significant voxels on the
+The importance-map cell of `_interactive_notebooks/operation_evidence_by_category.ipynb` draws the significant voxels on the
 cortical surface from that one small file.
 
 **Importance maps that say how a voxel contributes (the paper's approach).**
@@ -173,7 +173,7 @@ Each subject's two maps are z-scored together, averaged over subjects, and the t
 `--polarity-top-fraction` (0.05) of each group map is kept, clusters under
 `--polarity-min-cluster` (10) voxels dropped and the result smoothed (`--polarity-fwhm`, 12 mm).
 Written next to the PDF: `{desc}_group_impa_polarity_maps.nii.gz` (+ `.json` naming the volumes) and
-`{desc}_group_impa_polarity_summary.csv`; `operation_results.py --polarity-nii ...` draws it on the
+`{desc}_group_impa_polarity_summary.csv`; the same notebook draws it on the
 cortical surface. Subjects whose stage 3 predates the activity maps are left out (rerun stage 3 for them).
 
 The timecourse page always reads the raw per-TR `decoding_results.csv`, not
