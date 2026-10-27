@@ -30,6 +30,7 @@ from _interactive_notebooks.decoding_results_toolkit import (
     subtract_baseline,
     bin_by_size,
     bin_by_edges,
+    sliding_windows,
     ttest_1samp_diff,
     ttest_rel,
     wilcoxon_signed_rank,
@@ -332,6 +333,39 @@ class TestBinBySize:
         assert bins_meta.iloc[0]["tr_end"] == 2
 
 
+class TestSlidingWindows:
+    def _wide(self, n=8):
+        idx = pd.MultiIndex.from_product([["01", "02"], range(n)], names=["subject", "window_index"])
+        return pd.DataFrame({"pos": np.arange(2 * n, dtype=float), "neg": np.zeros(2 * n)}, index=idx)
+
+    def test_one_window_per_start_tr_each_the_mean_of_its_trs(self):
+        per_subject_bin, meta = sliding_windows(self._wide(), window=3, tr_offset=0)
+        assert list(meta["bin"]) == [0, 1, 2, 3, 4, 5]          # 8 TRs hold 6 windows of 3
+        assert per_subject_bin.loc[("01", 0), "pos"] == pytest.approx(1.0)       # mean(0, 1, 2)
+        assert per_subject_bin.loc[("01", 3), "pos"] == pytest.approx(4.0)       # mean(3, 4, 5): shifted by 1 TR only
+        assert per_subject_bin.loc[("02", 5), "pos"] == pytest.approx(14.0)      # mean(13, 14, 15)
+
+    def test_each_window_is_reported_at_the_tr_it_is_centred_on(self):
+        _, meta = sliding_windows(self._wide(), window=3)         # 1-indexed TRs
+        assert list(zip(meta["window_tr_start"], meta["window_tr_end"]))[:2] == [(1, 3), (2, 4)]
+        assert list(meta["tr_start"]) == [2, 3, 4, 5, 6, 7] and list(meta["tr_end"]) == list(meta["tr_start"])
+
+    def test_report_at_start_and_end_and_even_windows(self):
+        assert list(sliding_windows(self._wide(), 3, report_at="start")[1]["tr_start"]) == [1, 2, 3, 4, 5, 6]
+        assert list(sliding_windows(self._wide(), 3, report_at="end")[1]["tr_start"]) == [3, 4, 5, 6, 7, 8]
+        with pytest.raises(ValueError):
+            sliding_windows(self._wide(), 2)                      # no centre TR
+
+    def test_window_one_is_bin_size_one(self):
+        sliding, _ = sliding_windows(self._wide(), window=1, tr_offset=0)
+        binned, _ = bin_by_size(self._wide(), bin_size=1, tr_offset=0)
+        pd.testing.assert_frame_equal(sliding, binned, check_names=False)
+
+    def test_window_longer_than_the_data_gives_no_windows(self):
+        per_subject_bin, meta = sliding_windows(self._wide(2), window=3)
+        assert per_subject_bin.empty and meta.empty
+
+
 class TestBinByEdges:
     def test_explicit_windows(self):
         idx = pd.MultiIndex.from_product([["01"], range(8)], names=["subject", "window_index"])
@@ -487,6 +521,25 @@ class TestCompareConditionsByBinFdr:
         result = compare_conditions_by_bin(self._per_subject_bin(), "pos", "neg", fdr=None)
         assert "p_fdr" not in result.columns
 
+    def test_also_fdr_adds_the_extra_method_over_the_same_family(self):
+        result = compare_conditions_by_bin(self._per_subject_bin(n_bins=6), "pos", "neg", fdr="bh", fdr_from_bin=2,
+                                           also_fdr=("by",))
+        cols = list(result.columns)
+        assert cols[cols.index("p_fdr") + 1] == "p_fdr_by"
+        later = result["bin"] >= 2
+        np.testing.assert_allclose(result.loc[later, "p_fdr_by"], fdr_correct(result.loc[later, "p_value"], "by"))
+        assert result.loc[~later, "p_fdr_by"].isna().all()
+        assert (result.loc[later, "p_fdr_by"] >= result.loc[later, "p_fdr"] - 1e-12).all()
+
+    def test_bins_before_test_from_bin_are_not_tested_at_all(self):
+        result = compare_conditions_by_bin(self._per_subject_bin(n_bins=6), "pos", "neg", alternative="two-sided",
+                                           fdr_from_bin=2, test_from_bin=2)
+        early, late = result[result["bin"] < 2], result[result["bin"] >= 2]
+        assert len(early) == 2 and early[["stat", "p_value", "p_fdr"]].isna().all().all()
+        assert early["mean_diff"].notna().all() and early["n"].eq(8).all()      # described, not tested
+        assert late[["stat", "p_value", "p_fdr"]].notna().all().all()
+        np.testing.assert_allclose(late["p_fdr"], fdr_correct(late["p_value"], "bh"))   # the family is the tested bins
+
     def test_by_method_selectable(self):
         bh = compare_conditions_by_bin(self._per_subject_bin(), "pos", "neg", fdr="bh")
         by = compare_conditions_by_bin(self._per_subject_bin(), "pos", "neg", fdr="by")
@@ -564,6 +617,17 @@ class TestSplitHalfGroupDifference:
         assert len(merged) == len(stats) == len(res)
         np.testing.assert_allclose(merged["full_mean_diff"], merged["mean_diff"], atol=1e-12)
         assert (merged["tr_start"] == merged["tr_start_stats"]).all() and (merged["tr_end"] == merged["tr_end_stats"]).all()
+
+    def test_sliding_full_mean_diff_is_the_sliding_stats_own_mean_diff(self):
+        df = _trial_table(n_subj=20, effect_by_bin=[0, 0.02, 0.05, 0, 0, 0.1, 0, 0, 0], missing=0.03, seed=1)
+        res = split_half_group_difference(df, "valence", "pos", "neg", bin_size=3, n_splits=30, seed=0, sliding=True)
+        wide = aggregate_by_subject_window(df, condition_col="valence")
+        per_bin, meta = sliding_windows(wide, window=3, tr_offset=0)
+        stats = compare_conditions_by_bin(per_bin, "pos", "neg", alternative="two-sided", bins_meta=meta)
+        merged = res.merge(stats, on="bin", suffixes=("", "_stats"))
+        assert len(merged) == len(stats) == len(res) > len(df["window_index"].unique()) // 3     # one window per start TR
+        np.testing.assert_allclose(merged["full_mean_diff"], merged["mean_diff"], atol=1e-12)
+        assert (merged["tr_start"] == merged["tr_start_stats"]).all() and (merged["window_tr_end"] == merged["window_tr_end_stats"]).all()
 
     def test_only_the_two_named_conditions_are_used(self):
         base = _trial_table(n_subj=12, seed=2)
@@ -1119,6 +1183,12 @@ class TestBaselineCorrection:
         assert baseline_only_bins((3, 4, 5), 3) == {1}
         assert baseline_only_bins((6, 7, 8), 3) == {2}       # the first three operation-phase TRs are exactly one stat bin
         assert baseline_only_bins((7, 8, 9), 3) == set()     # a shifted baseline straddles bins, so none is wholly inside
+
+    def test_baseline_only_sliding_windows_are_numbered_by_their_first_tr(self):
+        assert baseline_only_bins((0, 1, 2), 3, sliding=True) == {0}
+        assert baseline_only_bins((0, 1, 2, 3), 3, sliding=True) == {0, 1}
+        assert baseline_only_bins((0, 1, 2), 1, sliding=True) == {0, 1, 2}
+        assert baseline_only_bins((0, 1, 2), 4, sliding=True) == set()
 
 
 # ---------------------------------------------------------------- balancing on the preceding trial

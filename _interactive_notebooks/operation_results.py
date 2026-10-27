@@ -15,6 +15,11 @@ Run:
     python operation_results.py --group-csv <desc>_group_decoding_results.csv --output-dir <folder> \
         [--title "Operation classifier ..."]
 
+Or, with the organized results folder (results_layout.py): python operation_results.py --model-dir
+clearvale/operation/sigmoid/all_trials/gm_liblinear_onevrest_C50_kfold   reads group_summary.csv, raw_data/ and importance_maps/
+of that model and writes confusion_matrices, timecourse_decoding, timecourse_curves.csv and stats_and_figures.pdf to its
+decoding/uncorrected/, and the importance figures and tables to its importance_maps/.
+
 Evidence is the raw classifier output (no baseline correction, sigmoid scale so there is no 1/4 chance level); TR 0 of every trial is the view cue and
 time is unshifted (the hemodynamic lag only selects the training/testing volumes).
 """
@@ -36,6 +41,7 @@ from _interactive_notebooks.decoding_results_toolkit import select_evidence_valu
 from utils.importance_stats import (load_subject_maps, save_stats, sign_flip_test, significant_voxels,  # noqa: E402
                                     split_stats)
 from workflows.generate_report import draw_event_annotations                     # noqa: E402
+from _interactive_notebooks import results_layout as layout                      # noqa: E402
 
 OPERATIONS = ("maintain", "suppress", "switch", "clear")
 POLARITY_CMAP = "PuOr_r"        # orange = activation, purple = deactivation: not the blue-red of the signed weight / t maps
@@ -310,8 +316,34 @@ def combine_pages(pages, path: str) -> int:
     return len(pages)
 
 
+LAYOUT_FILES = {                    # figure name -> (folder: decoding / importance_maps, file stem) in the organized layout
+    "confusion_matrices": ("decoding", "confusion_matrices"), "timecourse_decoding": ("decoding", "timecourse_decoding"),
+    "importance_maps_surface": ("importance_maps", "surface_top20"),
+    "importance_maps_surface_significant": ("importance_maps", "surface_significant"),
+    "importance_maps_surface_polarity": ("importance_maps", "surface_polarity")}
+
+
+def model_inputs(model_path: str) -> dict:
+    """The inputs of an organized model folder that exist (summary_csv, group_csv, stats_nii, polarity_nii)."""
+    candidates = {"summary_csv": "group_summary.csv", "group_csv": os.path.join("raw_data", "group_decoding_results.csv"),
+                  "stats_nii": os.path.join("importance_maps", "importance_signflip_stats.nii.gz"),
+                  "polarity_nii": os.path.join("importance_maps", "importance_polarity_maps.nii.gz")}
+    return {key: os.path.join(model_path, rel) for key, rel in candidates.items() if os.path.isfile(os.path.join(model_path, rel))}
+
+
+def layout_target(model_path: str, name: str, ext: str) -> str:
+    """Where a figure goes in the organized layout (decoding/uncorrected/ or importance_maps/)."""
+    folder, stem = LAYOUT_FILES[name]
+    base = layout.operation_figures_dir(model_path) if folder == "decoding" else os.path.join(model_path, "importance_maps")
+    return os.path.join(base, stem + ext)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--model-dir", default=None,
+                        help="a model folder of the organized results (absolute, or relative to --results-root): the inputs are found in it "
+                             "and the outputs written to its decoding/uncorrected/ and importance_maps/ (no --output-dir needed)")
+    parser.add_argument("--results-root", default=None, help="root of the organized results (default: results_layout.default_root())")
     parser.add_argument("--group-csv", default=None, help="<desc>_group_decoding_results.csv written by generate_report.py (time course)")
     parser.add_argument("--summary-csv", default=None, help="<desc>_group_summary.csv (confusion matrices)")
     parser.add_argument("--impa-nii", default=None, help="<desc>_group_mean_impa_mni.nii.gz (importance maps on the surface)")
@@ -329,7 +361,7 @@ def main():
                         help="<desc>_group_impa_polarity_maps.nii.gz written by stage 4 (the .json beside it is read too): "
                              "plot the paper-style BOLD activation / deactivation evidence maps")
     parser.add_argument("--stats-nii", default=None, help="<desc>_group_impa_mni_stats.nii.gz written by stage 4 (or by --subject-impa-glob): plot the significant voxels")
-    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--output-dir", default=None, help="where to write (not needed with --model-dir)")
     parser.add_argument("--title", default="")
     parser.add_argument("--prefix", default="operation", help="file name prefix for the saved figures")
     parser.add_argument("--no-combined-pdf", action="store_true",
@@ -341,13 +373,24 @@ def main():
     parser.add_argument("--label", default="Operation classifier", help="start of the importance-map figure titles")
     args = parser.parse_args()
 
+    model_path = None
+    if args.model_dir:
+        model_path = layout.resolve_model_dir(args.model_dir, args.results_root)
+        for key, path in model_inputs(model_path).items():
+            if getattr(args, key) is None and not (key == "stats_nii" and args.subject_impa_glob):
+                setattr(args, key, path)
+        args.output_dir = layout.operation_figures_dir(model_path)
+        args.title = args.title or os.path.basename(model_path)
+        os.makedirs(os.path.join(model_path, "importance_maps"), exist_ok=True)
+    elif not args.output_dir:
+        parser.error("give --output-dir, or --model-dir to use the organized layout")
     os.makedirs(args.output_dir, exist_ok=True)
     classes = [c.strip() for c in args.classes.split(",") if c.strip()]
 
     pages = []                  # every figure of this call, in order, for the combined PDF
 
     def save(fig, name, dpi=150, pdf=True):
-        path = os.path.join(args.output_dir, f"{args.prefix}_{name}.png")
+        path = layout_target(model_path, name, ".png") if model_path else os.path.join(args.output_dir, f"{args.prefix}_{name}.png")
         fig.savefig(path, dpi=dpi)
         if pdf:                 # not for the surface maps: a vector copy of 3-D meshes is ~90 MB
             fig.savefig(path.replace(".png", ".pdf"))
@@ -366,7 +409,9 @@ def main():
         maps, affine = load_subject_maps(paths)
         result = sign_flip_test(maps, n_perm=args.n_perm, seed=args.seed, min_subjects=args.min_subjects)
         del maps
-        stats_path, rows = save_stats(os.path.join(args.output_dir, f"{args.prefix}_group_impa_mni"), affine, result,
+        stats_prefix = (os.path.join(model_path, "importance_maps", "importance_signflip") if model_path
+                        else os.path.join(args.output_dir, f"{args.prefix}_group_impa_mni"))
+        stats_path, rows = save_stats(stats_prefix, affine, result,
                                       classes, dict(n_subjects=len(paths), n_perm=args.n_perm, seed=args.seed,
                                                        min_subjects=args.min_subjects),
                                       p_voxel=args.p_voxel, fdr_q=args.fdr_q, min_cluster=args.min_cluster)
@@ -382,12 +427,15 @@ def main():
         p_voxel, fdr_q = meta.get("p_voxel", args.p_voxel), meta.get("fdr_q", args.fdr_q)
         classes = meta.get("classes", classes)
         table = importance_overlap_table(mean_all, sig, operations=classes)
-        table.to_csv(os.path.join(args.output_dir, f"{args.prefix}_importance_threshold_comparison.csv"), index=False)
+        importance_dir = os.path.join(model_path, "importance_maps") if model_path else args.output_dir
+        table.to_csv(os.path.join(importance_dir, "importance_threshold_comparison.csv" if model_path
+                                  else f"{args.prefix}_importance_threshold_comparison.csv"), index=False)
         print(table.to_string(index=False))
         import nibabel as nib
         impa_path = args.impa_nii
         if impa_path is None:                                           # draw the stats file's own mean map
-            impa_path = os.path.join(args.output_dir, f"{args.prefix}_group_mean_from_stats.nii.gz")
+            impa_path = os.path.join(importance_dir, "importance_group_mean_from_stats.nii.gz" if model_path
+                                     else f"{args.prefix}_group_mean_from_stats.nii.gz")
             nib.save(nib.Nifti1Image(mean_all.astype(np.float32), nib.load(args.stats_nii).affine), impa_path)
         vmax = np.percentile(np.abs(mean_all[mean_all != 0]), 99.5)
         save(plot_importance_surface(impa_path, operations=classes, significant=sig, vmax=vmax, label=args.label,
@@ -402,10 +450,10 @@ def main():
         print(f"{len(df)} rows, {df['subject'].nunique()} subject(s)")
         print("phase markers (TR):", [(m["trial_type"], m["mean_start"]) for m in phase_markers(df)])
         curves = group_timecourses(df)
-        curves.to_csv(os.path.join(args.output_dir, f"{args.prefix}_timecourse_curves.csv"), index=False)
+        curves.to_csv(os.path.join(args.output_dir, "timecourse_curves.csv" if model_path else f"{args.prefix}_timecourse_curves.csv"), index=False)
         save(plot_timecourses(curves, args.title, markers=phase_markers(df)), "timecourse_decoding")
     if pages and not args.no_combined_pdf:
-        combined = os.path.join(args.output_dir, f"{args.prefix}_results.pdf")
+        combined = os.path.join(args.output_dir, "stats_and_figures.pdf" if model_path else f"{args.prefix}_results.pdf")
         print(f"saved {combined} ({combine_pages(order_pages(pages), combined)} pages)")
     for _, kind, item in pages:
         if kind == "figure":

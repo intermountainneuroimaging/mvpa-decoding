@@ -30,10 +30,11 @@ configurable pipeline, so a new analysis picks just the pieces it needs:
                 weighted_group_mean            the weighted means that go with the weights
   baseline:     subtract_baseline             (matched on shared index, e.g.
                                                subject + window_index)
-  windows:      bin_by_size, bin_by_edges     (adjustable stat windows --
-                                               uniform bin size, or an
+  windows:      bin_by_size, bin_by_edges,    (adjustable stat windows --
+                sliding_windows                uniform bin size, an
                                                explicit list of (start, end)
-                                               TR ranges)
+                                               TR ranges, or a window slid
+                                               one TR at a time)
   stats:        compare_conditions_by_bin,     one row per bin; STAT_METHODS
                 STAT_METHODS, fdr_correct      is swappable/extensible, or
                                                 pass your own callable; each
@@ -320,6 +321,55 @@ def bin_by_edges(wide_df: pd.DataFrame, edges: list, window_level: str = "window
     return per_subject_bin, bins_meta
 
 
+SLIDING_REPORT_AT = ("center", "start", "end")
+
+
+def sliding_window_meta(starts, window: int, tr_offset: int = 1, report_at: str = "center") -> pd.DataFrame:
+    """One row per sliding window (`starts`: its first window_index): bin (= that start),
+    window_tr_start / window_tr_end (the TRs it averages, both inclusive, numbered like bin_by_size's
+    tr_start / tr_end), and tr_start = tr_end = the single TR the window is *reported at*: the TR it is
+    centred on ("center", needs an odd window), its first ("start") or its last ("end"). Everything that
+    draws or marks a window by tr_start / tr_end therefore puts it on that one TR."""
+    if report_at not in SLIDING_REPORT_AT:
+        raise ValueError(f"report_at must be one of {SLIDING_REPORT_AT}, got {report_at!r}")
+    if report_at == "center" and window % 2 == 0:
+        raise ValueError(f"a window of {window} TRs has no centre TR: use an odd window or report_at='start' / 'end'")
+    shift = {"start": 0, "center": (window - 1) // 2, "end": window - 1}[report_at]
+    starts = np.asarray(list(starts), dtype=int)
+    return pd.DataFrame({"bin": starts, "window_tr_start": starts + tr_offset,
+                         "window_tr_end": starts + window - 1 + tr_offset,
+                         "tr_start": starts + shift + tr_offset, "tr_end": starts + shift + tr_offset})
+
+
+def sliding_windows(wide_df: pd.DataFrame, window: int = 3, window_level: str = "window_index",
+                    tr_offset: int = 1, report_at: str = "center") -> tuple:
+    """Overlapping windows: a `window`-TR window slid one TR at a time (window k = TRs k .. k + window - 1,
+    so consecutive windows share window - 1 TRs). Same return shape as bin_by_size: (per_subject_bin,
+    bins_meta), where `bin` is the window's first window_index (window=1 is the same as bin_by_size with
+    bin_size=1) and bins_meta is sliding_window_meta(...): each window is reported at one TR (the centre
+    by default). Only windows that fit inside the data are made, so a 3-TR window has no window centred on
+    the first or the last TR. A subject's value is the mean over the window's TRs that subject has, as in
+    bin_by_size.
+
+    The windows overlap, so their tests are correlated; see compare_conditions_by_bin's also_fdr for
+    checking an FDR result under any dependence."""
+    df = wide_df.reset_index()
+    value_cols = [c for c in df.columns if c not in ("subject", window_level)]
+    first, last = int(df[window_level].min()), int(df[window_level].max())
+    starts = list(range(first, last - window + 2))
+    parts = []
+    for start in starts:
+        inside = df[(df[window_level] >= start) & (df[window_level] < start + window)]
+        mean = inside.groupby("subject")[value_cols].mean()
+        mean["bin"] = start
+        parts.append(mean.reset_index())
+    if not parts:
+        empty = pd.DataFrame(columns=["subject", "bin", *value_cols]).set_index(["subject", "bin"])
+        return empty, sliding_window_meta([], window, tr_offset, report_at)
+    per_subject_bin = pd.concat(parts, ignore_index=True).set_index(["subject", "bin"]).sort_index()
+    return per_subject_bin, sliding_window_meta(starts, window, tr_offset, report_at)
+
+
 # =====================================================
 # Stat methods (pluggable)
 # =====================================================
@@ -388,7 +438,8 @@ def fdr_correct(p_values, method: str = "bh") -> np.ndarray:
 
 def compare_conditions_by_bin(per_subject_bin: pd.DataFrame, cond_a: str, cond_b: str,
                                method="ttest_1samp_diff", alternative: str = "greater",
-                               bins_meta: pd.DataFrame = None, fdr: str = "bh", fdr_from_bin: int = None) -> pd.DataFrame:
+                               bins_meta: pd.DataFrame = None, fdr: str = "bh", fdr_from_bin: int = None,
+                               also_fdr=(), test_from_bin: int = None) -> pd.DataFrame:
     """One row per bin -- `method` is a name in STAT_METHODS (swap the test
     with one line), or your own callable(a_vals, b_vals, alternative) -> dict
     with at least {"stat", "p_value"}. A bin with fewer than 2 subjects
@@ -406,7 +457,16 @@ def compare_conditions_by_bin(per_subject_bin: pd.DataFrame, cond_a: str, cond_b
     fdr_from_bin, if given, restricts the FDR family to the bins numbered
     fdr_from_bin and later: earlier bins are still tested (stat, p_value) but are
     NOT part of the correction and get p_fdr = NaN (never called significant on
-    p_fdr). The correction then counts only the later bins as tests."""
+    p_fdr). The correction then counts only the later bins as tests.
+
+    test_from_bin, if given, leaves the bins before it untested: their rows keep n / mean_diff / sd_diff
+    but stat and p_value (and so p_fdr) are NaN, so nothing can be called significant there (use it,
+    with the same number as fdr_from_bin, to start the statistics at a chosen TR).
+
+    also_fdr, e.g. ("by",), adds a p_fdr_<method> column per extra method over the same family -- for
+    checking a result under another assumption (Benjamini-Hochberg, the usual `fdr`, is valid for
+    independent or positively dependent tests, which overlapping sliding windows are; "by" is valid under
+    any dependence and so is stricter)."""
     test_fn = STAT_METHODS[method] if isinstance(method, str) else method
 
     rows = []
@@ -415,6 +475,8 @@ def compare_conditions_by_bin(per_subject_bin: pd.DataFrame, cond_a: str, cond_b
         if len(sub) < 2:
             continue
         result = test_fn(sub[cond_a].to_numpy(), sub[cond_b].to_numpy(), alternative)
+        if test_from_bin is not None and bin_id < test_from_bin:
+            result.update(stat=np.nan, p_value=np.nan)
         result["bin"] = int(bin_id)
         rows.append(result)
 
@@ -424,6 +486,10 @@ def compare_conditions_by_bin(per_subject_bin: pd.DataFrame, cond_a: str, cond_b
         p_fdr = pd.Series(np.nan, index=out.index)
         p_fdr[in_family] = fdr_correct(out.loc[in_family, "p_value"], fdr)
         out.insert(out.columns.get_loc("p_value") + 1, "p_fdr", p_fdr)
+        for extra in reversed(list(also_fdr)):
+            p_extra = pd.Series(np.nan, index=out.index)
+            p_extra[in_family] = fdr_correct(out.loc[in_family, "p_value"], extra)
+            out.insert(out.columns.get_loc("p_fdr") + 1, f"p_fdr_{extra}", p_extra)
     if bins_meta is not None and not out.empty:
         out = out.merge(bins_meta, on="bin", how="left")
     return out
@@ -458,7 +524,8 @@ def split_half_group_difference(df: pd.DataFrame, condition_col: str, cond_a: st
                                  bin_size: int = 3, value_col: str = "value", subject_col: str = "subject",
                                  time_col: str = "window_index", trial_cols=("boldfile", "trial_index"),
                                  tr_offset: int = 0, n_splits: int = 1000, seed: int = 0,
-                                 min_trials: int = 2, weight_col: str = None) -> pd.DataFrame:
+                                 min_trials: int = 2, weight_col: str = None, sliding: bool = False,
+                                 report_at: str = "center") -> pd.DataFrame:
     """If the same participants were run again, how reliable is the group-level
     finding "condition a differs from condition b" in each time bin?
 
@@ -482,6 +549,10 @@ def split_half_group_difference(df: pd.DataFrame, condition_col: str, cond_a: st
     weighted mean of the trials that landed in it. Subjects need at least `min_trials` (>= 2) trials
     in BOTH conditions to take part; the rest are left out of every split and
     of full_mean_diff (n_subjects counts those who took part).
+
+    sliding=True uses the overlapping windows of sliding_windows (window = bin_size TRs, one per start
+    TR, reported at report_at: tr_start = tr_end = that TR, window_tr_start / window_tr_end the TRs it
+    averages) instead of non-overlapping bins.
 
     Returns one row per bin: bin, tr_start/tr_end (as bin_by_size), n_subjects,
     full_mean_diff, half_ci_low/half_ci_high (2.5/97.5th percentile of the
@@ -515,8 +586,15 @@ def split_half_group_difference(df: pd.DataFrame, condition_col: str, cond_a: st
     unit_weights = (sub.groupby(index_cols)[weight_col].first().reindex(wide.index).to_numpy(dtype=float)
                     if weight_col is not None else None)
     times = wide.columns.to_numpy()
-    bins = np.unique(times // bin_size)
-    bin_matrix = ((times[:, None] // bin_size) == bins[None, :]).astype(float)  # (timepoints, bins)
+    if sliding:
+        bins = np.arange(times.min(), times.max() - bin_size + 2)
+        if bins.size == 0:
+            return pd.DataFrame()
+        bin_matrix = ((times[:, None] >= bins[None, :]) & (times[:, None] < bins[None, :] + bin_size)).astype(float)
+        meta = sliding_window_meta(bins, bin_size, tr_offset, report_at).set_index("bin")
+    else:
+        bins = np.unique(times // bin_size)
+        bin_matrix = ((times[:, None] // bin_size) == bins[None, :]).astype(float)  # (timepoints, bins)
 
     def bin_means(x):  # NaN-aware mean over each bin's timepoints: (..., timepoints) -> (..., bins)
         valid = np.isfinite(x).astype(float)
@@ -555,10 +633,13 @@ def split_half_group_difference(df: pd.DataFrame, condition_col: str, cond_a: st
         h = pooled[:, j][np.isfinite(pooled[:, j])]
         both = np.isfinite(group_a[:, j]) & np.isfinite(group_b[:, j])
         have_full = np.isfinite(full[j]) and full[j] != 0 and h.size > 0
+        where = ({"tr_start": int(meta.loc[bin_id, "tr_start"]), "tr_end": int(meta.loc[bin_id, "tr_end"]),
+                  "window_tr_start": int(meta.loc[bin_id, "window_tr_start"]),
+                  "window_tr_end": int(meta.loc[bin_id, "window_tr_end"])} if sliding else
+                 {"tr_start": int(bin_id * bin_size + tr_offset), "tr_end": int(bin_id * bin_size + bin_size - 1 + tr_offset)})
         rows.append({
             "bin": int(bin_id),
-            "tr_start": int(bin_id * bin_size + tr_offset),
-            "tr_end": int(bin_id * bin_size + bin_size - 1 + tr_offset),
+            **where,
             "n_subjects": len(full_diffs),
             "full_mean_diff": float(full[j]),
             "half_ci_low": float(np.percentile(h, 2.5)) if h.size else np.nan,
@@ -794,13 +875,15 @@ def describe_baseline_groups(df: pd.DataFrame, group_cols, valence_col: str = "v
     return list(baseline_group_names(df, group_cols, valence_col, operation_col).values())
 
 
-def baseline_only_bins(baseline_windows, bin_size: int) -> set:
+def baseline_only_bins(baseline_windows, bin_size: int, sliding: bool = False) -> set:
     """Stat bins (bin_by_size numbering) that lie entirely inside the baseline
     windows. After baseline correction such a bin averages to zero in every
     participant by construction, so it carries no information to test (and a
     t-test on it would only amplify floating-point noise): leave it out of the
-    statistics."""
+    statistics. sliding=True: the bins of sliding_windows (numbered by their first TR) instead."""
     windows = set(baseline_windows)
+    if sliding:         # bin = the window's first TR (sliding_windows): every window made of baseline TRs only
+        return {b for b in windows if all(t in windows for t in range(b, b + bin_size))}
     candidate_bins = {w // bin_size for w in windows}
     return {b for b in candidate_bins if all(t in windows for t in range(b * bin_size, (b + 1) * bin_size))}
 

@@ -1,5 +1,7 @@
 """operation_results: the overlap table between the top-weights and the significant-voxel maps."""
 
+import os
+
 import numpy as np
 import pytest
 
@@ -43,3 +45,19 @@ class TestCombinedPdf:
 
     def test_polarity_maps_use_another_colour_map_than_the_signed_maps(self):
         assert opr.POLARITY_CMAP != "RdBu_r"
+
+
+class TestOrganizedLayout:
+    def test_inputs_are_found_in_the_model_folder(self, tmp_path):
+        (tmp_path / "raw_data").mkdir(); (tmp_path / "importance_maps").mkdir()
+        for rel in ("group_summary.csv", "raw_data/group_decoding_results.csv", "importance_maps/importance_signflip_stats.nii.gz"):
+            (tmp_path / rel).write_text("x")
+        found = opr.model_inputs(str(tmp_path))
+        assert set(found) == {"summary_csv", "group_csv", "stats_nii"}          # no polarity maps in this model
+        assert found["group_csv"].endswith(os.path.join("raw_data", "group_decoding_results.csv"))
+
+    def test_figures_go_to_decoding_uncorrected_and_importance_maps(self):
+        assert opr.layout_target("/m", "confusion_matrices", ".pdf") == "/m/decoding/uncorrected/confusion_matrices.pdf"
+        assert opr.layout_target("/m", "timecourse_decoding", ".png") == "/m/decoding/uncorrected/timecourse_decoding.png"
+        assert opr.layout_target("/m", "importance_maps_surface_significant", ".png") == "/m/importance_maps/surface_significant.png"
+        assert opr.layout_target("/m", "importance_maps_surface", ".png") == "/m/importance_maps/surface_top20.png"
